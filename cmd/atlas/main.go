@@ -77,6 +77,7 @@ func runServer(args []string) error {
 	}
 	controller, err := server.New(server.Config{
 		Address: *address, PublicURL: *publicURL, AdminToken: *adminToken, Demo: *demo,
+		Version: version, Repository: envOr("ATLAS_REPOSITORY", "yayitinyu/nginx-atlas"),
 	}, stateStore, box, slog.Default())
 	if err != nil {
 		return err

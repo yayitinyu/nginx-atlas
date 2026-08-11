@@ -33,6 +33,7 @@ usage() {
 Usage:
   install.sh server --public-url https://atlas.example.com [--panel-domain atlas.example.com]
   install.sh agent --server https://atlas.example.com --token TOKEN [--name Tokyo-02]
+  install.sh uninstall-agent
 
 Options:
   --binary-file PATH       Install a locally built nginx-atlas binary.
@@ -64,7 +65,7 @@ parse_args() {
   MODE="$1"
   shift
   case "$MODE" in
-    server|agent) ;;
+    server|agent|uninstall-agent) ;;
     -h|--help|help) usage; exit 0 ;;
     *) die "未知安装模式：$MODE" ;;
   esac
@@ -87,6 +88,10 @@ parse_args() {
 }
 
 validate_args() {
+  if [[ "$MODE" == "uninstall-agent" ]]; then
+    return
+  fi
+  [[ "$REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || die "GitHub 仓库必须使用 OWNER/REPO 格式。"
   [[ "$NODE_NAME" =~ ^[^[:cntrl:]]{2,64}$ ]] || die "节点名称必须为 2–64 个可见字符。"
   if [[ "$MODE" == "agent" ]]; then
     [[ "$SERVER_URL" =~ ^https://[^/[:space:]]+ ]] || die "远程主控地址必须使用 HTTPS。"
@@ -107,6 +112,23 @@ validate_args() {
   if [[ -n "$BINARY_FILE" ]]; then
     [[ -f "$BINARY_FILE" ]] || die "本地二进制不存在：$BINARY_FILE"
   fi
+}
+
+uninstall_agent_mode() {
+  log "停止并移除 Nginx Atlas 节点代理"
+  systemctl disable --now nginx-atlas-agent.service >/dev/null 2>&1 || true
+  rm -f -- "$SYSTEMD_DIR/nginx-atlas-agent.service" "$CONFIG_DIR/agent.env"
+  case "$STATE_ROOT/agent" in
+    /var/lib/nginx-atlas/agent) rm -rf -- "$STATE_ROOT/agent" ;;
+    *) die "拒绝清理异常代理目录：$STATE_ROOT/agent" ;;
+  esac
+  if [[ ! -f "$SYSTEMD_DIR/nginx-atlas-server.service" ]]; then
+    rm -f -- "$INSTALL_DIR/$PROGRAM"
+  else
+    log "检测到本机主控服务，已保留共享二进制与主控数据。"
+  fi
+  systemctl daemon-reload
+  log "节点代理已卸载；Nginx 配置、软件包及 /etc/ssl 证书均未修改。"
 }
 
 detect_package_manager() {
@@ -332,6 +354,11 @@ write_server_env() {
     log "保留现有 server.env 与主密钥"
     ADMIN_TOKEN="$(sed -n 's/^ATLAS_ADMIN_TOKEN=//p' "$CONFIG_DIR/server.env" | head -n1)"
     [[ -n "$ADMIN_TOKEN" ]] || die "现有 server.env 缺少 ATLAS_ADMIN_TOKEN。"
+    if ! grep -q '^ATLAS_REPOSITORY=' "$CONFIG_DIR/server.env"; then
+      printf 'ATLAS_REPOSITORY=%s\n' "$REPOSITORY" >>"$CONFIG_DIR/server.env"
+      chown nginx-atlas:nginx-atlas "$CONFIG_DIR/server.env"
+      chmod 0600 "$CONFIG_DIR/server.env"
+    fi
     return
   fi
   local secrets master_key
@@ -346,6 +373,7 @@ ATLAS_PUBLIC_URL=$PUBLIC_URL
 ATLAS_STATE_PATH=$STATE_ROOT/server/state.json
 ATLAS_MASTER_KEY=$master_key
 ATLAS_ADMIN_TOKEN=$ADMIN_TOKEN
+ATLAS_REPOSITORY=$REPOSITORY
 EOF
   chown nginx-atlas:nginx-atlas "$CONFIG_DIR/server.env"
   chmod 0600 "$CONFIG_DIR/server.env"
@@ -498,6 +526,10 @@ main() {
   parse_args "$@"
   require_root
   validate_args
+  if [[ "$MODE" == "uninstall-agent" ]]; then
+    uninstall_agent_mode
+    return
+  fi
   detect_package_manager
   WORK_DIR="$(mktemp -d /tmp/nginx-atlas.XXXXXX)"
   install_packages

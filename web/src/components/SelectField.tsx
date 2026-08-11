@@ -20,15 +20,17 @@ interface Props {
 }
 
 export function SelectField({ value, options, onChange, placeholder, ariaLabel, icon, disabled, className = '' }: Props) {
+  const utility = className.split(/\s+/).includes('utility-select')
+  const selected = options.find((option) => option.value === value)
   return (
     <Select.Root value={value || undefined} onValueChange={onChange} disabled={disabled}>
       <Select.Trigger className={`custom-select-trigger ${className}`} aria-label={ariaLabel}>
         {icon && <Icon name={icon} size={17} />}
-        <Select.Value placeholder={placeholder} />
+        <Select.Value placeholder={placeholder}>{selected?.label}</Select.Value>
         <Select.Icon className="custom-select-caret"><Icon name="chevron" size={15} /></Select.Icon>
       </Select.Trigger>
       <Select.Portal>
-        <Select.Content className="custom-select-content" position="popper" sideOffset={7} collisionPadding={12}>
+        <Select.Content className={`custom-select-content ${utility ? 'utility-select-content' : ''}`} position="popper" align={utility ? 'end' : 'start'} sideOffset={8} collisionPadding={14} sticky="always">
           <Select.ScrollUpButton className="custom-select-scroll-button"><Icon name="chevron" size={14} /></Select.ScrollUpButton>
           <Select.Viewport className="custom-select-viewport">
             {options.map((option) => (

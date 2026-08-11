@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -605,6 +606,205 @@ func TestRenewalReusesCertificateRecord(t *testing.T) {
 	}
 	if len(prepared.DeployedNodeIDs) != 2 {
 		t.Fatalf("renewal lost deployment metadata: %+v", prepared.DeployedNodeIDs)
+	}
+}
+
+func TestTakeoverExistingNginxDomainQueuesTransactionalReplacement(t *testing.T) {
+	stateStore, err := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	box, err := securebox.New(bytes.Repeat([]byte{0x73}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminToken := strings.Repeat("t", 32)
+	controller, err := New(Config{AdminToken: adminToken}, stateStore, box, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if err := stateStore.Update(func(state *model.State) error {
+		state.Nodes["node_takeover"] = model.Node{
+			ID: "node_takeover", Name: "Takeover", Status: model.NodeOnline, CreatedAt: now,
+			NginxSites: []model.NginxSiteMeta{{
+				Domain: "legacy.example.com", ConfigPath: "/etc/nginx/sites-enabled/legacy.conf",
+				UpstreamHost: "127.0.0.1", UpstreamPort: 9000,
+			}},
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := performJSON(t, controller.Handler(), http.MethodPost, "/api/v1/domains/adopt", map[string]any{
+		"node_id": "node_takeover", "domain": "legacy.example.com",
+		"config_path": "/etc/nginx/sites-enabled/legacy.conf", "takeover": true,
+	}, "Bearer "+adminToken)
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("takeover returned %d: %s", recorder.Code, recorder.Body.String())
+	}
+	snapshot := stateStore.Snapshot()
+	var domain model.Domain
+	for _, candidate := range snapshot.Domains {
+		domain = candidate
+	}
+	if domain.ObservedOnly || !domain.TakenOver || domain.LastJobID == "" {
+		t.Fatalf("takeover state is incomplete: %+v", domain)
+	}
+	job := snapshot.Jobs[domain.LastJobID]
+	if job.Type != protocol.JobApplyDomain {
+		t.Fatalf("unexpected takeover job: %+v", job)
+	}
+	var spec applyDomainSpec
+	if err := json.Unmarshal(job.Payload, &spec); err != nil {
+		t.Fatal(err)
+	}
+	if spec.ReplaceConfigPath != domain.ConfigPath {
+		t.Fatalf("takeover job did not preserve original path: %+v", spec)
+	}
+}
+
+func TestRenameNodeUpdatesOnlyDisplayName(t *testing.T) {
+	stateStore, err := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	box, _ := securebox.New(bytes.Repeat([]byte{0x74}, 32))
+	adminToken := strings.Repeat("u", 32)
+	controller, err := New(Config{AdminToken: adminToken}, stateStore, box, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	_ = stateStore.Update(func(state *model.State) error {
+		state.Nodes["node_rename"] = model.Node{ID: "node_rename", Name: "Old name", SecretHash: "secret", Status: model.NodeOnline, CreatedAt: now}
+		return nil
+	})
+	recorder := performJSON(t, controller.Handler(), http.MethodPut, "/api/v1/nodes/node_rename", map[string]string{"name": "Tokyo edge"}, "Bearer "+adminToken)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("rename returned %d: %s", recorder.Code, recorder.Body.String())
+	}
+	node := stateStore.Snapshot().Nodes["node_rename"]
+	if node.Name != "Tokyo edge" || node.SecretHash != "secret" {
+		t.Fatalf("rename changed unexpected node state: %+v", node)
+	}
+}
+
+func TestCertificateAutomationSupportsWildcardSANs(t *testing.T) {
+	stateStore, err := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	box, _ := securebox.New(bytes.Repeat([]byte{0x75}, 32))
+	adminToken := strings.Repeat("v", 32)
+	controller, err := New(Config{AdminToken: adminToken}, stateStore, box, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	_ = stateStore.Update(func(state *model.State) error {
+		state.Nodes["node_issue"] = model.Node{ID: "node_issue", Name: "Issuer", Status: model.NodeOnline, CreatedAt: now}
+		state.DNSAccounts["dns_cf"] = model.DNSAccount{ID: "dns_cf", Name: "Cloudflare", Provider: "cloudflare"}
+		state.ACMEAccounts["acme_le"] = model.ACMEAccount{ID: "acme_le", Name: "Let's Encrypt", Email: "ops@example.com", DirectoryURL: letsEncryptDirectory}
+		state.Certificates["crt_san"] = model.Certificate{ID: "crt_san", Domain: "nanami.im", DNSNames: []string{"nanami.im"}, NotAfter: now.Add(60 * 24 * time.Hour), CreatedAt: now, UpdatedAt: now}
+		return nil
+	})
+	recorder := performJSON(t, controller.Handler(), http.MethodPut, "/api/v1/certificates/crt_san/automation", map[string]any{
+		"node_id": "node_issue", "dns_account_id": "dns_cf", "acme_account_id": "acme_le",
+		"auto_renew": true, "renew_before_days": 21, "dns_names": []string{"nanami.im", "*.nanami.im"},
+	}, "Bearer "+adminToken)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("automation update returned %d: %s", recorder.Code, recorder.Body.String())
+	}
+	certificate := stateStore.Snapshot().Certificates["crt_san"]
+	if !certificate.AutoRenew || certificate.RenewBeforeDays != 21 || len(certificate.RequestedDNSNames) != 2 || certificate.RequestedDNSNames[1] != "*.nanami.im" {
+		t.Fatalf("SAN automation was not saved: %+v", certificate)
+	}
+}
+
+func TestCloudflareClientEditsExistingRecordWithBearerToken(t *testing.T) {
+	var patched cloudflareRecordRequest
+	var authorized bool
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authorized = authorized || r.Header.Get("Authorization") == "Bearer test-token"
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/zones":
+			_, _ = io.WriteString(w, `{"success":true,"result":[{"id":"zone-1","name":"example.com"}]}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/zones/zone-1/dns_records":
+			_, _ = io.WriteString(w, `{"success":true,"result":[{"id":"record-1","type":"A","name":"api.example.com","content":"192.0.2.1"}]}`)
+		case r.Method == http.MethodPatch && r.URL.Path == "/zones/zone-1/dns_records/record-1":
+			_ = json.NewDecoder(r.Body).Decode(&patched)
+			_, _ = io.WriteString(w, `{"success":true,"result":{"id":"record-1"}}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer api.Close()
+	client, err := newCloudflareClient(api.URL, "test-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	zone, err := client.findZone(context.Background(), "api.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	records, err := client.listRecords(context.Background(), zone.ID, "A", "api.example.com")
+	if err != nil || len(records) != 1 {
+		t.Fatalf("list records failed: %v %+v", err, records)
+	}
+	if err := client.editRecord(context.Background(), zone.ID, records[0].ID, cloudflareRecordRequest{Type: "A", Name: "api.example.com", Content: "198.51.100.8", TTL: 1, Proxied: true}); err != nil {
+		t.Fatal(err)
+	}
+	if !authorized || patched.Content != "198.51.100.8" || !patched.Proxied || patched.TTL != 1 {
+		t.Fatalf("unexpected Cloudflare request: authorized=%v payload=%+v", authorized, patched)
+	}
+}
+
+func TestTakeoverPathRequiresExactNginxDirectoryBoundary(t *testing.T) {
+	valid := []string{
+		"/etc/nginx/conf.d/legacy.conf",
+		"/etc/nginx/sites-enabled/example.com",
+		"/etc/nginx/conf.d/nested/../legacy.conf",
+	}
+	for _, value := range valid {
+		if !validReportedTakeoverPath(value) {
+			t.Fatalf("expected takeover path to be accepted: %s", value)
+		}
+	}
+	invalid := []string{
+		"/etc/nginx/conf.d",
+		"/etc/nginx/conf.d-archive/legacy.conf",
+		"/etc/nginx/sites-enabled-old/example.com",
+		"/etc/nginx/conf.d/../../passwd",
+		"relative.conf",
+	}
+	for _, value := range invalid {
+		if validReportedTakeoverPath(value) {
+			t.Fatalf("expected takeover path to be rejected: %s", value)
+		}
+	}
+}
+
+func TestVersionUpdateAvailableOnlyAllowsNewerRelease(t *testing.T) {
+	tests := []struct {
+		current string
+		latest  string
+		want    bool
+	}{
+		{current: "0.1.0", latest: "0.2.0", want: true},
+		{current: "v1.9.9", latest: "v2.0.0", want: true},
+		{current: "1.2.0-rc.1", latest: "1.2.0", want: true},
+		{current: "1.2.0", latest: "1.2.0", want: false},
+		{current: "1.3.0", latest: "1.2.9", want: false},
+		{current: "dev", latest: "1.0.0", want: false},
+		{current: "broken", latest: "1.0.0", want: false},
+	}
+	for _, test := range tests {
+		if got := versionUpdateAvailable(test.current, test.latest); got != test.want {
+			t.Errorf("versionUpdateAvailable(%q, %q) = %v, want %v", test.current, test.latest, got, test.want)
+		}
 	}
 }
 

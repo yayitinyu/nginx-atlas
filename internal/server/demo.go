@@ -14,16 +14,20 @@ func seedDemoState(stateStore *store.Store) error {
 		}
 		now := time.Now().UTC()
 		nodes := []model.Node{
-			{ID: "node_demo_shanghai", Name: "Shanghai-01", Status: model.NodeOnline, Hostname: "edge-sh-01", IPAddresses: []string{"203.0.113.10"}, OS: "linux", Arch: "amd64", NginxVersion: "nginx/1.26.3", NginxHealthy: true, AgentVersion: "dev", LastSeenAt: &now, CreatedAt: now.Add(-48 * time.Hour)},
-			{ID: "node_demo_tokyo", Name: "Tokyo-02", Status: model.NodeOnline, Hostname: "edge-tyo-02", IPAddresses: []string{"203.0.113.20"}, OS: "linux", Arch: "amd64", NginxVersion: "nginx/1.26.3", NginxHealthy: true, AgentVersion: "dev", LastSeenAt: &now, CreatedAt: now.Add(-36 * time.Hour)},
-			{ID: "node_demo_frankfurt", Name: "Frankfurt-01", Status: model.NodeOnline, Hostname: "edge-fra-01", IPAddresses: []string{"203.0.113.30"}, OS: "linux", Arch: "arm64", NginxVersion: "nginx/1.26.3", NginxHealthy: true, AgentVersion: "dev", LastSeenAt: &now, CreatedAt: now.Add(-24 * time.Hour)},
+			{ID: "node_demo_shanghai", Name: "Shanghai-01", Status: model.NodeOnline, Hostname: "edge-sh-01", IPAddresses: []string{"203.0.113.10"}, OS: "linux", OSName: "Ubuntu 24.04.2 LTS", OSVersion: "24.04", Arch: "amd64", PackageManager: "apt", ControllerInstalled: true, NginxVersion: "nginx/1.26.3", NginxHealthy: true, AgentVersion: "dev", LastSeenAt: &now, CreatedAt: now.Add(-48 * time.Hour)},
+			{
+				ID: "node_demo_tokyo", Name: "Tokyo-02", Status: model.NodeOnline, Hostname: "edge-tyo-02", IPAddresses: []string{"203.0.113.20"}, OS: "linux", OSName: "Debian GNU/Linux 12", OSVersion: "12", Arch: "amd64", PackageManager: "apt", NginxVersion: "nginx/1.26.3", NginxHealthy: true, AgentVersion: "dev", LastSeenAt: &now, CreatedAt: now.Add(-36 * time.Hour),
+				Certificates: []model.CertificateMeta{{Domain: "legacy.example.com", Path: "/etc/ssl/legacy.example.com", Issuer: "Let's Encrypt R11", NotAfter: now.Add(67 * 24 * time.Hour), DNSNames: []string{"legacy.example.com"}, KeyMatches: true}},
+				NginxSites:   []model.NginxSiteMeta{{Domain: "legacy.example.com", ConfigPath: "/etc/nginx/sites-enabled/legacy.example.com", UpstreamHost: "127.0.0.1", UpstreamPort: 8787, TLS: true, CertificatePath: "/etc/ssl/legacy.example.com/fullchain.pem"}},
+			},
+			{ID: "node_demo_frankfurt", Name: "Frankfurt-01", Status: model.NodeOnline, Hostname: "edge-fra-01", IPAddresses: []string{"203.0.113.30"}, OS: "linux", OSName: "Rocky Linux 9.6", OSVersion: "9.6", Arch: "arm64", PackageManager: "dnf", NginxVersion: "nginx/1.26.3", NginxHealthy: true, AgentVersion: "dev", LastSeenAt: &now, CreatedAt: now.Add(-24 * time.Hour)},
 		}
 		for _, node := range nodes {
 			state.Nodes[node.ID] = node
 		}
 		certificates := []model.Certificate{
-			{ID: "crt_demo_api", Domain: "api.example.com", Source: model.CertificateACME, Issuer: "Let's Encrypt E6", SerialNumber: "0a11ce", NotBefore: now.Add(-11 * 24 * time.Hour), NotAfter: now.Add(79 * 24 * time.Hour), DNSNames: []string{"api.example.com"}, AutoRenew: true, RenewBeforeDays: 30, ACMEAccountID: "acme_demo", DNSAccountID: "dns_demo", IssuerNodeID: "node_demo_shanghai", DeployedNodeIDs: []string{"node_demo_shanghai"}, CreatedAt: now.Add(-11 * 24 * time.Hour), UpdatedAt: now.Add(-11 * 24 * time.Hour)},
-			{ID: "crt_demo_studio", Domain: "studio.example.com", Source: model.CertificateUpload, Issuer: "Let's Encrypt R11", SerialNumber: "0b22df", NotBefore: now.Add(-69 * 24 * time.Hour), NotAfter: now.Add(21 * 24 * time.Hour), DNSNames: []string{"studio.example.com"}, AutoRenew: true, RenewBeforeDays: 30, ACMEAccountID: "acme_demo", DNSAccountID: "dns_demo", IssuerNodeID: "node_demo_tokyo", DeployedNodeIDs: []string{"node_demo_tokyo"}, CreatedAt: now.Add(-69 * 24 * time.Hour), UpdatedAt: now.Add(-2 * time.Hour)},
+			{ID: "crt_demo_api", Domain: "api.example.com", Source: model.CertificateACME, Issuer: "Let's Encrypt E6", SerialNumber: "0a11ce", NotBefore: now.Add(-11 * 24 * time.Hour), NotAfter: now.Add(79 * 24 * time.Hour), DNSNames: []string{"api.example.com"}, RequestedDNSNames: []string{"api.example.com"}, AutoRenew: true, RenewBeforeDays: 30, ACMEAccountID: "acme_demo", DNSAccountID: "dns_demo", IssuerNodeID: "node_demo_shanghai", DeployedNodeIDs: []string{"node_demo_shanghai"}, CreatedAt: now.Add(-11 * 24 * time.Hour), UpdatedAt: now.Add(-11 * 24 * time.Hour)},
+			{ID: "crt_demo_studio", Domain: "studio.example.com", Source: model.CertificateUpload, Issuer: "Let's Encrypt R11", SerialNumber: "0b22df", NotBefore: now.Add(-69 * 24 * time.Hour), NotAfter: now.Add(21 * 24 * time.Hour), DNSNames: []string{"studio.example.com"}, RequestedDNSNames: []string{"studio.example.com"}, AutoRenew: true, RenewBeforeDays: 30, ACMEAccountID: "acme_demo", DNSAccountID: "dns_demo", IssuerNodeID: "node_demo_tokyo", DeployedNodeIDs: []string{"node_demo_tokyo"}, CreatedAt: now.Add(-69 * 24 * time.Hour), UpdatedAt: now.Add(-2 * time.Hour)},
 		}
 		for _, certificate := range certificates {
 			state.Certificates[certificate.ID] = certificate

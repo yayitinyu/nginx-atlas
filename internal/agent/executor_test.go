@@ -56,3 +56,28 @@ func TestApplyDomainRestoresConfigWhenNginxTestFails(t *testing.T) {
 		t.Fatal("expected the rolled-back configuration to be validated")
 	}
 }
+
+func TestValidateTakeoverPathRejectsSiblingDirectoriesAndTraversal(t *testing.T) {
+	valid := []string{
+		"/etc/nginx/conf.d/legacy.conf",
+		"/etc/nginx/sites-enabled/example.com",
+		"/etc/nginx/conf.d/nested/../legacy.conf",
+	}
+	for _, value := range valid {
+		if _, err := validateTakeoverPath(value); err != nil {
+			t.Errorf("validateTakeoverPath(%q): %v", value, err)
+		}
+	}
+	invalid := []string{
+		"/etc/nginx/conf.d",
+		"/etc/nginx/conf.d-old/legacy.conf",
+		"/etc/nginx/sites-enabled-backup/example.com",
+		"/etc/nginx/conf.d/../../passwd",
+		"legacy.conf",
+	}
+	for _, value := range invalid {
+		if _, err := validateTakeoverPath(value); err == nil {
+			t.Errorf("validateTakeoverPath(%q) unexpectedly succeeded", value)
+		}
+	}
+}

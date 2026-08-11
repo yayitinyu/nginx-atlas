@@ -157,7 +157,11 @@ func (c *Client) pollOnce(ctx context.Context) (time.Duration, error) {
 		return time.Duration(response.PollAfter) * time.Second, nil
 	}
 	c.logger.Info("executing job", "job_id", response.Job.ID, "type", response.Job.Type)
-	jobCtx, cancel := context.WithTimeout(ctx, 15*time.Minute)
+	jobTimeout := 15 * time.Minute
+	if response.Job.Type == protocol.JobUpdateSystem {
+		jobTimeout = 75 * time.Minute
+	}
+	jobCtx, cancel := context.WithTimeout(ctx, jobTimeout)
 	result := c.executor.Execute(jobCtx, *response.Job)
 	cancel()
 	var acknowledgement map[string]any
@@ -166,13 +170,23 @@ func (c *Client) pollOnce(ctx context.Context) (time.Duration, error) {
 		return c.config.PollInterval, fmt.Errorf("report job result: %w", err)
 	}
 	c.logger.Info("job completed", "job_id", response.Job.ID, "success", result.Success)
+	if result.Success && len(result.RestartServices) > 0 {
+		restartCtx, restartCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		args := append([]string{"restart", "--no-block"}, result.RestartServices...)
+		if _, err := c.runner.Run(restartCtx, c.executor.config.Systemctl, args, nil); err != nil {
+			c.logger.Error("updated binary installed but service restart failed", "error", err)
+		}
+		restartCancel()
+	}
 	return time.Second, nil
 }
 
 func (c *Client) report(ctx context.Context) protocol.NodeReport {
 	hostname, _ := os.Hostname()
+	osName, osVersion := readOSRelease()
 	report := protocol.NodeReport{
 		Hostname: hostname, IPAddresses: interfaceAddresses(), OS: runtime.GOOS, Arch: runtime.GOARCH,
+		OSName: osName, OSVersion: osVersion, PackageManager: detectPackageManager(), ControllerInstalled: fileExists("/etc/systemd/system/nginx-atlas-server.service"),
 		AgentVersion: c.config.Version, Certificates: c.executor.InventoryCertificates(),
 	}
 	if output, err := c.runner.Run(ctx, c.executor.config.NginxBinary, []string{"-v"}, nil); err == nil {
@@ -185,6 +199,49 @@ func (c *Client) report(ctx context.Context) protocol.NodeReport {
 		report.LastError = limitOutput(output)
 	}
 	return report
+}
+
+func readOSRelease() (string, string) {
+	data, err := os.ReadFile("/etc/os-release")
+	if err != nil {
+		return "", ""
+	}
+	values := make(map[string]string)
+	for _, line := range strings.Split(string(data), "\n") {
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		values[strings.TrimSpace(key)] = strings.Trim(strings.TrimSpace(value), `"'`)
+	}
+	name := values["PRETTY_NAME"]
+	if name == "" {
+		name = values["NAME"]
+	}
+	return name, values["VERSION_ID"]
+}
+
+func detectPackageManager() string {
+	for _, candidate := range []struct {
+		name  string
+		paths []string
+	}{
+		{name: "apt", paths: []string{"/usr/bin/apt-get", "/bin/apt-get"}},
+		{name: "dnf", paths: []string{"/usr/bin/dnf", "/bin/dnf"}},
+		{name: "yum", paths: []string{"/usr/bin/yum", "/bin/yum"}},
+	} {
+		for _, path := range candidate.paths {
+			if fileExists(path) {
+				return candidate.name
+			}
+		}
+	}
+	return ""
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 func (c *Client) doJSON(ctx context.Context, method, path string, requestBody, responseBody any, authenticate bool) error {

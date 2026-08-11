@@ -8,6 +8,8 @@ import type {
   DomainRecord,
   EnrollmentResponse,
   NodeRecord,
+  ReleaseInfo,
+  UninstallCommand,
 } from './types'
 
 const tokenKey = 'nginx-atlas-token'
@@ -76,9 +78,16 @@ export const api = {
       body: JSON.stringify({ name, ttl_minutes: ttlMinutes }),
     }),
   revokeNode: (id: string) => request<void>(`/api/v1/nodes/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  renameNode: (id: string, name: string) => request<NodeRecord>(`/api/v1/nodes/${encodeURIComponent(id)}`, {
+    method: 'PUT', body: JSON.stringify({ name }),
+  }),
+  releaseInfo: () => request<ReleaseInfo>('/api/v1/release'),
+  updateNodeAtlas: (id: string) => request<unknown>(`/api/v1/nodes/${encodeURIComponent(id)}/update-atlas`, { method: 'POST', body: '{}' }),
+  updateNodeSystem: (id: string) => request<unknown>(`/api/v1/nodes/${encodeURIComponent(id)}/update-system`, { method: 'POST', body: '{}' }),
+  nodeUninstallCommand: (id: string) => request<UninstallCommand>(`/api/v1/nodes/${encodeURIComponent(id)}/uninstall-command`),
   createDomain: (input: CreateDomainInput) =>
     request<DomainRecord>('/api/v1/domains', { method: 'POST', body: JSON.stringify(input) }),
-  adoptDomain: (input: { node_id: string; domain: string; config_path?: string }) =>
+  adoptDomain: (input: { node_id: string; domain: string; config_path?: string; takeover?: boolean }) =>
     request<DomainRecord>('/api/v1/domains/adopt', { method: 'POST', body: JSON.stringify(input) }),
   deleteDomain: (id: string) =>
     request<{ queued: boolean }>(`/api/v1/domains/${encodeURIComponent(id)}`, { method: 'DELETE' }),
@@ -103,6 +112,16 @@ export const api = {
     request<CertificateRecord>(`/api/v1/certificates/${encodeURIComponent(id)}/auto-renew`, {
       method: 'PUT', body: JSON.stringify({ enabled }),
     }),
+  updateCertificateAutomation: (id: string, input: {
+    node_id: string
+    auto_renew: boolean
+    renew_before_days: number
+    acme_account_id: string
+    dns_account_id: string
+    dns_names: string[]
+  }) => request<CertificateRecord>(`/api/v1/certificates/${encodeURIComponent(id)}/automation`, {
+    method: 'PUT', body: JSON.stringify(input),
+  }),
   renewCertificate: (id: string) =>
     request<unknown>(`/api/v1/certificates/${encodeURIComponent(id)}/renew`, { method: 'POST', body: '{}' }),
   syncCertificate: (id: string, nodeIds: string[]) =>

@@ -7,6 +7,7 @@ import {
   ClipboardText,
   Clock,
   Cloud,
+  CloudSlash,
   CloudArrowDown,
   Copy,
   Database,
@@ -27,12 +28,13 @@ import {
   MagnifyingGlass,
   Moon,
   PencilSimple,
+  Package,
   Plus,
   ShieldCheck,
   SignOut,
   SquaresFour,
   Sun,
-  TerminalWindow,
+  Terminal,
   Translate,
   Trash,
   UploadSimple,
@@ -49,6 +51,7 @@ export type IconName =
   | 'logout' | 'refresh' | 'key' | 'clock' | 'trash' | 'link' | 'home'
   | 'edit' | 'language' | 'sun' | 'moon' | 'system' | 'user' | 'lock'
   | 'download' | 'eye' | 'certificate' | 'cloud-download' | 'database'
+  | 'cloud' | 'cloud-off' | 'package'
 
 type Props = Omit<IconProps, 'name'> & { name: IconName; size?: number }
 
@@ -70,7 +73,7 @@ const icons: Record<IconName, PhosphorIcon> = {
   info: Info,
   close: X,
   upload: UploadSimple,
-  terminal: TerminalWindow,
+  terminal: Terminal,
   chevron: CaretRight,
   copy: Copy,
   menu: List,
@@ -93,6 +96,9 @@ const icons: Record<IconName, PhosphorIcon> = {
   certificate: Certificate,
   'cloud-download': CloudArrowDown,
   database: Database,
+  cloud: Cloud,
+  'cloud-off': CloudSlash,
+  package: Package,
 }
 
 export function Icon({ name, size = 20, weight = 'regular', ...props }: Props) {

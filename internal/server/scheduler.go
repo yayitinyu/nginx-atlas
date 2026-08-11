@@ -38,7 +38,7 @@ func (s *Server) runMaintenance() {
 			}
 		}
 		for id, job := range state.Jobs {
-			if job.Status != model.JobRunning || job.StartedAt == nil || now.Sub(*job.StartedAt) <= runningJobTimeout {
+			if job.Status != model.JobRunning || job.StartedAt == nil || now.Sub(*job.StartedAt) <= timeoutForJob(job.Type) {
 				continue
 			}
 			if node, ok := state.Nodes[job.NodeID]; ok && node.RunningJobID == job.ID {
@@ -85,7 +85,7 @@ func (s *Server) runMaintenance() {
 			if hasActiveJob(state, domain.ID, protocol.JobIssueCertificate) {
 				continue
 			}
-			job, err := enqueueJob(state, domain.NodeID, domain.ID, protocol.JobIssueCertificate, issueCertificateSpec{DomainID: domain.ID})
+			job, err := enqueueJob(state, domain.NodeID, domain.ID, protocol.JobIssueCertificate, issueCertificateSpec{DomainID: domain.ID, DNSNames: desiredNamesForDomain(*state, domain)})
 			if err != nil {
 				return err
 			}
@@ -125,7 +125,7 @@ func (s *Server) runMaintenance() {
 				}
 			}
 			job, err := enqueueJob(state, certificate.IssuerNodeID, "", protocol.JobIssueCertificate, issueCertificateSpec{
-				Domain: certificate.Domain, CertificateID: certificate.ID,
+				Domain: certificate.Domain, DNSNames: desiredCertificateNames(certificate), CertificateID: certificate.ID,
 				ACMEAccountID: certificate.ACMEAccountID, DNSAccountID: certificate.DNSAccountID,
 				AutoRenew: true, RenewBeforeDays: renewBeforeDays,
 				Install: true, ReloadNginx: true, SyncNodeIDs: syncNodeIDs,
@@ -140,6 +140,16 @@ func (s *Server) runMaintenance() {
 	if err != nil {
 		s.logger.Error("maintenance failed", "error", err)
 	}
+}
+
+func timeoutForJob(jobType string) time.Duration {
+	if jobType == protocol.JobUpdateSystem {
+		return 90 * time.Minute
+	}
+	if jobType == protocol.JobUpdateAtlas {
+		return 30 * time.Minute
+	}
+	return runningJobTimeout
 }
 
 func hasActiveCertificateJob(state *model.State, certificateID string) bool {

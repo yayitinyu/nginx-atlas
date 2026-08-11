@@ -29,12 +29,16 @@ import (
 const maxJSONBody = 2 << 20
 
 type Config struct {
-	Address      string
-	PublicURL    string
-	AdminToken   string
-	PollAfter    time.Duration
-	OfflineAfter time.Duration
-	Demo         bool
+	Address          string
+	PublicURL        string
+	AdminToken       string
+	Version          string
+	Repository       string
+	ReleaseAPIURL    string
+	CloudflareAPIURL string
+	PollAfter        time.Duration
+	OfflineAfter     time.Duration
+	Demo             bool
 }
 
 type Server struct {
@@ -57,6 +61,18 @@ func New(config Config, stateStore *store.Store, box *securebox.Box, logger *slo
 	}
 	if config.Address == "" {
 		config.Address = "127.0.0.1:9090"
+	}
+	if strings.TrimSpace(config.Version) == "" {
+		config.Version = "dev"
+	}
+	if strings.TrimSpace(config.Repository) == "" {
+		config.Repository = "yayitinyu/nginx-atlas"
+	}
+	if strings.TrimSpace(config.ReleaseAPIURL) == "" {
+		config.ReleaseAPIURL = "https://api.github.com"
+	}
+	if strings.TrimSpace(config.CloudflareAPIURL) == "" {
+		config.CloudflareAPIURL = "https://api.cloudflare.com/client/v4"
 	}
 	config.PublicURL = strings.TrimRight(config.PublicURL, "/")
 	if config.PollAfter < 3*time.Second {
@@ -118,6 +134,11 @@ func (s *Server) routes() http.Handler {
 	mux.Handle("GET /api/v1/session", s.adminAuth(http.HandlerFunc(s.handleSession)))
 	mux.Handle("GET /api/v1/dashboard", s.adminAuth(http.HandlerFunc(s.handleDashboard)))
 	mux.Handle("GET /api/v1/nodes", s.adminAuth(http.HandlerFunc(s.handleNodes)))
+	mux.Handle("PUT /api/v1/nodes/{id}", s.adminAuth(http.HandlerFunc(s.handleRenameNode)))
+	mux.Handle("GET /api/v1/nodes/{id}/uninstall-command", s.adminAuth(http.HandlerFunc(s.handleNodeUninstallCommand)))
+	mux.Handle("POST /api/v1/nodes/{id}/update-atlas", s.adminAuth(http.HandlerFunc(s.handleUpdateNodeAtlas)))
+	mux.Handle("POST /api/v1/nodes/{id}/update-system", s.adminAuth(http.HandlerFunc(s.handleUpdateNodeSystem)))
+	mux.Handle("GET /api/v1/release", s.adminAuth(http.HandlerFunc(s.handleReleaseInfo)))
 	mux.Handle("POST /api/v1/enrollments", s.adminAuth(http.HandlerFunc(s.handleCreateEnrollment)))
 	mux.Handle("DELETE /api/v1/nodes/{id}", s.adminAuth(http.HandlerFunc(s.handleRevokeNode)))
 	mux.Handle("GET /api/v1/domains", s.adminAuth(http.HandlerFunc(s.handleDomains)))
@@ -129,6 +150,7 @@ func (s *Server) routes() http.Handler {
 	mux.Handle("POST /api/v1/certificates/issue", s.adminAuth(http.HandlerFunc(s.handleIssueCertificate)))
 	mux.Handle("POST /api/v1/certificates/import", s.adminAuth(http.HandlerFunc(s.handleImportCertificate)))
 	mux.Handle("PUT /api/v1/certificates/{id}/auto-renew", s.adminAuth(http.HandlerFunc(s.handleSetCertificateAutoRenew)))
+	mux.Handle("PUT /api/v1/certificates/{id}/automation", s.adminAuth(http.HandlerFunc(s.handleUpdateCertificateAutomation)))
 	mux.Handle("POST /api/v1/certificates/{id}/renew", s.adminAuth(http.HandlerFunc(s.handleRenewCertificate)))
 	mux.Handle("POST /api/v1/certificates/{id}/sync", s.adminAuth(http.HandlerFunc(s.handleSyncCertificate)))
 	mux.Handle("GET /api/v1/dns-accounts", s.adminAuth(http.HandlerFunc(s.handleDNSAccounts)))

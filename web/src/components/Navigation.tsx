@@ -1,7 +1,8 @@
 import type { CSSProperties } from 'react'
-import { usePreferences } from '../preferences'
+import { usePreferences, type LanguageMode, type ThemeMode } from '../preferences'
 import { Icon, type IconName } from './Icon'
-import { AdminAvatar, Logo } from './Primitives'
+import { Logo } from './Primitives'
+import { SelectField } from './SelectField'
 
 export type PageKey = 'overview' | 'domains' | 'certificates' | 'nodes' | 'accounts' | 'audit' | 'settings'
 
@@ -29,8 +30,8 @@ export function NavigationRail({ page, onChange, onLogout }: { page: PageKey; on
         ))}
       </nav>
       <div className="rail-profile">
-        <AdminAvatar />
-        <span className="profile-copy"><strong>admin</strong><small>{t('app.admin')}</small></span>
+        <span className="rail-health"><span className="pulse-dot" /></span>
+        <span className="profile-copy"><strong>NGINX ATLAS</strong><small>{t('app.admin')}</small></span>
         <button className="profile-action" onClick={onLogout} aria-label={t('app.logout')} title={t('app.logout')}><Icon name="logout" size={19} /></button>
       </div>
     </aside>
@@ -68,24 +69,28 @@ export function MobileMenu({ open, page, onChange, onClose, onLogout }: {
   onClose: () => void
   onLogout: () => void
 }) {
-  const { t } = usePreferences()
+  const { t, theme, language, setTheme, setLanguage } = usePreferences()
   if (!open) return null
   return (
-    <div className="mobile-menu-layer mobile-menu-open">
-      <div className="mobile-menu-top"><Logo /><button onClick={onClose} aria-label={t('nav.close')}><Icon name="close" size={25} /></button></div>
-      <nav>
-        {items.map((item, index) => (
-          <button
-            key={item.key}
-            className={page === item.key ? 'active' : ''}
-            style={{ '--menu-index': index } as CSSProperties}
-            onClick={() => { onChange(item.key); onClose() }}
-          >
-            <Icon name={item.icon} size={23} /><span>{t(item.labelKey)}</span><Icon name="arrow" size={21} />
-          </button>
-        ))}
-      </nav>
-      <button className="mobile-logout" onClick={onLogout}><Icon name="logout" size={20} />{t('app.logout')}</button>
+    <div className="mobile-menu-layer mobile-menu-open" onMouseDown={(event) => event.currentTarget === event.target && onClose()}>
+      <aside className="mobile-menu-drawer">
+        <div className="mobile-menu-top"><Logo /><button onClick={onClose} aria-label={t('nav.close')}><Icon name="close" size={25} /></button></div>
+        <div className="mobile-preferences"><span>{t('settings.quickPreferences')}</span><div><SelectField ariaLabel={t('app.language')} value={language} onChange={(value) => setLanguage(value as LanguageMode)} icon="language" options={[{ value: 'system', label: t('common.system') }, { value: 'zh', label: t('common.chinese') }, { value: 'en', label: t('common.english') }]} /><SelectField ariaLabel={t('app.theme')} value={theme} onChange={(value) => setTheme(value as ThemeMode)} icon={theme === 'light' ? 'sun' : theme === 'dark' ? 'moon' : 'system'} options={[{ value: 'system', label: t('common.system') }, { value: 'light', label: t('common.light') }, { value: 'dark', label: t('common.dark') }]} /></div></div>
+        <nav>
+          {items.map((item, index) => (
+            <button
+              key={item.key}
+              className={page === item.key ? 'active' : ''}
+              style={{ '--menu-index': index } as CSSProperties}
+              onClick={() => { onChange(item.key); onClose() }}
+            >
+              <Icon name={item.icon} size={23} /><span>{t(item.labelKey)}</span><Icon name="arrow" size={21} />
+            </button>
+          ))}
+        </nav>
+        <div className="mobile-account"><span className="mobile-account-mark">A</span><span><strong>admin</strong><small>{t('app.admin')}</small></span></div>
+        <button className="mobile-logout" onClick={onLogout}><Icon name="logout" size={20} />{t('app.logout')}</button>
+      </aside>
     </div>
   )
 }

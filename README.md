@@ -16,7 +16,11 @@ Nginx Atlas 是一个面向 Linux VPS 集群的 Nginx、域名路由与 TLS 证�
 - 为上传或本机已有证书绑定 DNS/ACME 账户，在到期窗口内自动切换到 ACME 续期。
 - 在证书页随时开启或关闭自动续期；手动续期必须经过确认，避免误触发签发任务。
 - 将证书版本推送到多台 VPS；每台节点分别原子写入、验证并重载 Nginx。
-- 从各节点的 `nginx -T` 输出中提取安全元数据，发现并接管已有域名配置。
+- 单张 ACME 证书可包含最多 20 个 SAN/通配符域名，并在后续续期中保持完整名称集合。
+- 可在添加域名时创建或更新 Cloudflare A/AAAA/CNAME 记录，并选择橙云代理或灰云 DNS。
+- 从各节点的 `nginx -T` 输出中提取安全元数据；可只监控现有规则，也可备份后安全接管。
+- 在面板检查 GitHub 发行版并更新主控/子节点代理；APT 节点可确认后更新软件包与 Nginx。
+- 可修改节点显示名称，并复制只卸载 Atlas Agent、保留 Nginx 配置与证书的命令。
 - 一次性添加令牌、节点撤销、自动重试、离线任务排队和审计日志。
 - 支持管理员密码轮换、系统/浅色/深色主题，以及自动识别系统语言的中英文界面。
 - 响应式管理界面完整适配桌面与移动端竖屏。
@@ -132,12 +136,10 @@ curl -fsSL https://atlas.example.com/install.sh | sudo bash -s -- agent \
 
 1. 域名、目标节点、上游地址和项目端口。
 2. 证书来源：
-   - **已有证书**：使用目标节点 `/etc/ssl/<域名>`，主控可捕获并加密保存以便同步；
-   - **上传证书**：上传 `fullchain.pem` 与 `privkey.pem`；
-   - **Let’s Encrypt**：选择 DNS 与 ACME 账户，通过 DNS-01 签发；
-   - 可明确选择仅 HTTP。
-3. 可选的同步目标节点与自动续期。
-4. Nginx 配置预览与“验证并部署”。
+   - **已有证书**：选择证书页已管理且覆盖该域名的证书；
+   - **Let’s Encrypt**：自动选中已有 DNS 与 ACME 账户，通过 DNS-01 签发，并可开启自动续期。
+3. 可选同步 Cloudflare DNS：自动使用节点 IP 或填写 A/AAAA/CNAME 目标，并选择橙云或灰云。
+4. Nginx 配置预览与“验证并部署”。证书上传、节点证书接管、跨节点分发和自动化账户统一在“证书”页管理。
 
 典型 TLS 配置会生成 HTTP 到 HTTPS 的 308 跳转、TLS 站点、反向代理头与 WebSocket 升级头。文件写入后才运行 `nginx -t`；配置校验或 reload 失败会恢复之前的配置和证书。
 
@@ -151,6 +153,8 @@ Credential: CLOUDFLARE_DNS_API_TOKEN=<最小权限 API Token>
 ```
 
 禁止 `manual` 和 `exec` 提供商进入无人值守任务，避免交互阻塞或任意程序执行。DNS 环境变量名必须是大写字母、数字与下划线，凭据不会出现在 API 列表、审计日志或任务持久化数据中。
+
+启用域名的 Cloudflare 同步时，主控使用选中的加密 API Token 查找最长匹配的活动 Zone，再创建或更新同名记录。建议 Token 只授予所需 Zone 的 DNS 编辑与 Zone 读取权限。
 
 ACME 账户默认目录：
 
@@ -168,6 +172,15 @@ https://acme-v02.api.letsencrypt.org/directory
 - 每个节点独立执行证书校验、`nginx -t` 和 reload；失败会恢复它自己的旧版本。
 - 调度器每 15 秒处理离线与超时任务，并在证书进入 `renew_before_days` 窗口时创建 ACME 续期任务。
 - 关闭证书自动续期会同时停止关联域名的后续调度，但不会取消已经进入运行状态的任务。
+- 证书页可编辑签发节点、DNS/ACME 账户、续期窗口与 SAN 名称；例如一张证书同时覆盖 `nanami.im` 与 `*.nanami.im`。
+
+## 节点维护与规则接管
+
+- “节点 → 管理节点”可改名、检查最新 GitHub Release、更新 Atlas Agent，并在 APT 节点上确认执行软件包与 Nginx 更新；标记为“主控 VPS”的本机节点会更新主控与 Agent 共用的二进制并依次重启两项服务。
+- Atlas 更新包必须来自受信任的 GitHub HTTPS 地址，并同时通过 Release `checksums.txt` 的 SHA-256 与更新后二进制版本校验；当前二进制会先备份。
+- 系统更新固定执行 `apt-get update`、保留现有配置的 `upgrade` 与 `nginx --only-upgrade`，前后都运行 `nginx -t`，最后才 reload。
+- 卸载命令仅移除节点 Agent、凭据与服务；不会删除 Nginx、`/etc/nginx` 或 `/etc/ssl`。主控所在节点会保留共享二进制与主控数据。
+- “域名 → 节点发现”默认可只监控。选择接管时，仅接受 `/etc/nginx/conf.d/` 或 `/etc/nginx/sites-enabled/` 下、可识别上游的规则；Atlas 先把原文件或符号链接移入私有备份，再写入托管配置。验证或 reload 失败会恢复原规则，删除接管域名时也会恢复它。
 
 ## 运行路径
 

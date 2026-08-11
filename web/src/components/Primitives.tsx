@@ -6,7 +6,7 @@ export function Logo({ compact = false }: { compact?: boolean }) {
   return (
     <div className="brand" aria-label="Nginx Atlas">
       <span className="brand-mark" aria-hidden="true" />
-      {!compact && <span className="brand-word">ATLAS</span>}
+      {!compact && <span className="brand-word"><b>NGINX</b> ATLAS</span>}
     </div>
   )
 }
