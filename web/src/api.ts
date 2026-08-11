@@ -87,6 +87,8 @@ export const api = {
   nodeUninstallCommand: (id: string) => request<UninstallCommand>(`/api/v1/nodes/${encodeURIComponent(id)}/uninstall-command`),
   createDomain: (input: CreateDomainInput) =>
     request<DomainRecord>('/api/v1/domains', { method: 'POST', body: JSON.stringify(input) }),
+  updateDomain: (id: string, input: Partial<CreateDomainInput>) =>
+    request<DomainRecord>(`/api/v1/domains/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(input) }),
   adoptDomain: (input: { node_id: string; domain: string; config_path?: string; takeover?: boolean }) =>
     request<DomainRecord>('/api/v1/domains/adopt', { method: 'POST', body: JSON.stringify(input) }),
   deleteDomain: (id: string) =>

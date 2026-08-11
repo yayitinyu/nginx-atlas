@@ -30,8 +30,7 @@ export function NavigationRail({ page, onChange, onLogout }: { page: PageKey; on
         ))}
       </nav>
       <div className="rail-profile">
-        <span className="rail-health"><span className="pulse-dot" /></span>
-        <span className="profile-copy"><strong>NGINX ATLAS</strong><small>{t('app.admin')}</small></span>
+        <span className="rail-health" title={t('app.allHealthy')}><span className="pulse-dot" /></span>
         <button className="profile-action" onClick={onLogout} aria-label={t('app.logout')} title={t('app.logout')}><Icon name="logout" size={19} /></button>
       </div>
     </aside>

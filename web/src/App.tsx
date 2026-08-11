@@ -125,11 +125,21 @@ export default function App() {
 
   const allHealthy = useMemo(() => data.nodes.length > 0 && data.nodes.every((node) => node.status === 'online' && node.nginx_healthy), [data.nodes])
 
+  const [editingDomain, setEditingDomain] = useState<DomainRecord>()
+
   async function createDomain(submission: DomainSubmission) {
     setBusy('domain')
     try {
       await api.createDomain(submission.input)
-      setDomainDrawer(false); setPage('domains'); toast('success', t('toast.domainQueued')); await refresh(true)
+      setDomainDrawer(false); setEditingDomain(undefined); setPage('domains'); toast('success', t('toast.domainQueued')); await refresh(true)
+    } catch (error) { handleError(error, t('error.domain')) } finally { setBusy('') }
+  }
+
+  async function updateDomain(id: string, submission: DomainSubmission) {
+    setBusy('domain')
+    try {
+      await api.updateDomain(id, submission.input)
+      setDomainDrawer(false); setEditingDomain(undefined); toast('success', t('toast.domainQueued')); await refresh(true)
     } catch (error) { handleError(error, t('error.domain')) } finally { setBusy('') }
   }
 
@@ -276,13 +286,12 @@ export default function App() {
         <header className="command-bar">
           <span className="system-state"><span className={`pulse-dot ${allHealthy ? '' : 'pulse-warning'}`} />{allHealthy ? t('app.allHealthy') : data.nodes.length === 0 ? t('app.waitingNode') : t('app.needsAttention')}</span>
           <div className="command-tools">
-            <div className="command-proof"><Icon name="terminal" size={18} weight="light" /><code>nginx -t</code><span><Icon name={allHealthy ? 'check' : 'warning'} size={16} />{allHealthy ? t('app.configVerified') : t('app.statusSynced')}</span><button onClick={() => void refresh()} aria-label={t('app.refreshNow')}><Icon name="refresh" size={18} /></button></div>
             <SelectField ariaLabel={t('app.language')} value={language} onChange={(value) => setLanguage(value as LanguageMode)} icon="language" className="utility-select" options={[{ value: 'system', label: t('common.system') }, { value: 'zh', label: t('common.chinese') }, { value: 'en', label: t('common.english') }]} />
             <SelectField ariaLabel={t('app.theme')} value={theme} onChange={(value) => setTheme(value as ThemeMode)} icon={theme === 'light' ? 'sun' : theme === 'dark' ? 'moon' : 'system'} className="utility-select" options={[{ value: 'system', label: t('common.system') }, { value: 'light', label: t('common.light') }, { value: 'dark', label: t('common.dark') }]} />
           </div>
         </header>
         <main className="workspace-content">{loading ? <LoadingState /> : renderPage(page, {
-          data, dnsAccounts, acmeAccounts, onAddDomain: () => setDomainDrawer(true), onAddCertificate: () => setCertificateDialog(true), onPage: setPage,
+          data, dnsAccounts, acmeAccounts, onAddDomain: () => { setEditingDomain(undefined); setDomainDrawer(true) }, onEditDomain: (domain) => { setEditingDomain(domain); setDomainDrawer(true) }, onAddCertificate: () => setCertificateDialog(true), onPage: setPage,
           onDeleteDomain: setConfirmDomain, onAdoptDomain: adoptDomain, onAddNode: () => { setNodeResult(undefined); setNodeDialog(true) }, onRevokeNode: setConfirmNode, onManageNode: (node) => void openNodeManager(node),
           onRenew: setConfirmCertificate, onToggleAutoRenew: (certificate, enabled) => void setCertificateAutoRenew(certificate, enabled), onSync: setSyncCertificate, onEditCertificate: setAutomationCertificate, busy,
           onAddDNS: () => { setEditingDNS(undefined); setDNSDialog(true) }, onEditDNS: (account) => { setEditingDNS(account); setDNSDialog(true) },
@@ -292,7 +301,7 @@ export default function App() {
       </div>
       <MobileNavigation page={page} onChange={setPage} />
       <MobileMenu open={mobileMenu} page={page} onChange={setPage} onClose={() => setMobileMenu(false)} onLogout={logout} />
-      <DomainDrawer open={domainDrawer} nodes={data.nodes} certificates={data.certificates} dnsAccounts={dnsAccounts} acmeAccounts={acmeAccounts} busy={busy === 'domain'} onClose={() => !busy && setDomainDrawer(false)} onSubmit={createDomain} />
+      <DomainDrawer open={domainDrawer} nodes={data.nodes} certificates={data.certificates} dnsAccounts={dnsAccounts} acmeAccounts={acmeAccounts} busy={busy === 'domain'} editingDomain={editingDomain} onClose={() => { if (!busy) { setDomainDrawer(false); setEditingDomain(undefined) } }} onSubmit={createDomain} onUpdate={updateDomain} />
       <CertificateDialog open={certificateDialog} nodes={data.nodes} dnsAccounts={dnsAccounts} acmeAccounts={acmeAccounts} busy={busy === 'certificate'} onClose={() => !busy && setCertificateDialog(false)} onSubmit={submitCertificate} />
       <CertificateAutomationDialog open={Boolean(automationCertificate)} certificate={automationCertificate} nodes={data.nodes} dnsAccounts={dnsAccounts} acmeAccounts={acmeAccounts} busy={busy === 'certificate-automation'} onClose={() => !busy && setAutomationCertificate(undefined)} onSave={saveCertificateAutomation} />
       <NodeDialog open={nodeDialog} busy={busy === 'node'} result={nodeResult} onClose={() => { setNodeDialog(false); setNodeResult(undefined) }} onCreate={createNode} />
@@ -315,6 +324,7 @@ interface PageProps {
   dnsAccounts: DNSAccount[]
   acmeAccounts: ACMEAccount[]
   onAddDomain: () => void
+  onEditDomain: (domain: DomainRecord) => void
   onAddCertificate: () => void
   onPage: (page: PageKey) => void
   onDeleteDomain: (domain: DomainRecord) => void
@@ -338,7 +348,7 @@ interface PageProps {
 function renderPage(page: PageKey, props: PageProps) {
   switch (page) {
     case 'overview': return <Overview data={props.data} onNavigate={props.onPage} />
-    case 'domains': return <DomainsPage domains={props.data.domains} nodes={props.data.nodes} onAdd={props.onAddDomain} onDelete={props.onDeleteDomain} onAdopt={props.onAdoptDomain} />
+    case 'domains': return <DomainsPage domains={props.data.domains} nodes={props.data.nodes} onAdd={props.onAddDomain} onEdit={props.onEditDomain} onDelete={props.onDeleteDomain} onAdopt={props.onAdoptDomain} />
     case 'certificates': return <CertificatesPage certificates={props.data.certificates} nodes={props.data.nodes} onAdd={props.onAddCertificate} onRenew={props.onRenew} onToggleAutoRenew={props.onToggleAutoRenew} onSync={props.onSync} onEdit={props.onEditCertificate} busy={props.busy} />
     case 'nodes': return <NodesPage nodes={props.data.nodes} onAdd={props.onAddNode} onRevoke={props.onRevokeNode} onManage={props.onManageNode} />
     case 'accounts': return <AccountsPage dnsAccounts={props.dnsAccounts} acmeAccounts={props.acmeAccounts} onAddDNS={props.onAddDNS} onAddACME={props.onAddACME} onEditDNS={props.onEditDNS} onEditACME={props.onEditACME} />

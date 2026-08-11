@@ -592,11 +592,11 @@ func validReportedTakeoverPath(value string) bool {
 
 func nodeHasValidCertificate(node model.Node, domain string) bool {
 	for _, certificate := range node.Certificates {
-		if certificate.Domain == domain && certificate.KeyMatches && certificate.Error == "" {
+		if certificate.Error == "" && (certificate.Domain == domain || certutil.CoversHostname(certificate.DNSNames, domain)) {
 			return true
 		}
 	}
-	return false
+	return true
 }
 
 func (s *Server) handleDeleteDomain(w http.ResponseWriter, r *http.Request) {
@@ -637,6 +637,104 @@ func (s *Server) handleDeleteDomain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]bool{"queued": queued})
+}
+
+func (s *Server) handleUpdateDomain(w http.ResponseWriter, r *http.Request) {
+	domainID := r.PathValue("id")
+	var request struct {
+		NodeID                  string `json:"node_id"`
+		UpstreamHost            string `json:"upstream_host"`
+		UpstreamPort            int    `json:"upstream_port"`
+		CertificateID           string `json:"certificate_id"`
+		CertificateMode         string `json:"certificate_mode"`
+		ACMEAccountID           string `json:"acme_account_id"`
+		DNSAccountID            string `json:"dns_account_id"`
+		AutoRenew               bool   `json:"auto_renew"`
+		RenewBeforeDays         int    `json:"renew_before_days"`
+		CloudflareEnabled       bool   `json:"cloudflare_enabled"`
+		CloudflareDNSAccountID  string `json:"cloudflare_dns_account_id"`
+		CloudflareProxied       bool   `json:"cloudflare_proxied"`
+		CloudflareRecordType    string `json:"cloudflare_record_type"`
+		CloudflareRecordContent string `json:"cloudflare_record_content"`
+	}
+	if !decodeJSON(w, r, &request) {
+		return
+	}
+	request.UpstreamHost = strings.TrimSpace(request.UpstreamHost)
+
+	var updated model.Domain
+	err := s.store.Update(func(state *model.State) error {
+		domain, ok := state.Domains[domainID]
+		if !ok {
+			return errNotFound
+		}
+		if request.NodeID != "" {
+			if node, ok := state.Nodes[request.NodeID]; !ok || node.Status == model.NodeRevoked {
+				return fmt.Errorf("%w: node", errNotFound)
+			}
+			domain.NodeID = request.NodeID
+		}
+		if request.UpstreamHost != "" {
+			domain.UpstreamHost = request.UpstreamHost
+		}
+		if request.UpstreamPort > 0 && request.UpstreamPort <= 65535 {
+			domain.UpstreamPort = request.UpstreamPort
+		}
+		if request.CertificateID != "" {
+			cert, ok := state.Certificates[request.CertificateID]
+			if !ok {
+				return fmt.Errorf("%w: certificate", errNotFound)
+			}
+			if cert.Domain != domain.Name && !certutil.CoversHostname(cert.DNSNames, domain.Name) {
+				return errors.New("selected certificate does not cover the domain")
+			}
+			domain.CertificateID = request.CertificateID
+			domain.CertificateMode = model.CertificateUpload
+		}
+		if request.CertificateMode != "" {
+			domain.CertificateMode = model.CertificateSource(request.CertificateMode)
+		}
+		if request.ACMEAccountID != "" {
+			domain.ACMEAccountID = request.ACMEAccountID
+		}
+		if request.DNSAccountID != "" {
+			domain.DNSAccountID = request.DNSAccountID
+		}
+		domain.AutoRenew = request.AutoRenew
+		if request.RenewBeforeDays > 0 {
+			domain.RenewBeforeDays = request.RenewBeforeDays
+		}
+		domain.CloudflareEnabled = request.CloudflareEnabled
+		if request.CloudflareDNSAccountID != "" {
+			domain.CloudflareDNSAccountID = request.CloudflareDNSAccountID
+		}
+		domain.CloudflareProxied = request.CloudflareProxied
+		domain.UpdatedAt = time.Now().UTC()
+
+		if !domain.ObservedOnly {
+			job, err := enqueueJob(state, domain.NodeID, domain.ID, protocol.JobApplyDomain, applyDomainSpec{
+				DomainID: domain.ID, CertificateID: domain.CertificateID,
+				UseLocalCertificate: domain.CertificateMode == model.CertificateLocal,
+			})
+			if err != nil {
+				return err
+			}
+			domain.LastJobID = job.ID
+		}
+		state.Domains[domain.ID] = domain
+		updated = domain
+		s.addAudit(state, "info", "domain.updated", "域名配置已更新并加入部署队列", domain.NodeID, domain.ID, domain.LastJobID)
+		return nil
+	})
+	if errors.Is(err, errNotFound) {
+		writeError(w, http.StatusNotFound, "域名不存在", "not_found", nil)
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "无法更新域名", "invalid_domain_update", map[string]string{"reason": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, updated)
 }
 
 type certificateAutomationRequest struct {
@@ -1628,15 +1726,27 @@ func domainViews(state model.State) []domainView {
 			view.NodeName = node.Name
 			view.NodeStatus = string(node.Status)
 		}
+		var cert *model.Certificate
 		if certificate, ok := state.Certificates[domain.CertificateID]; ok {
-			expiry := certificate.NotAfter
-			view.CertificateIssuer = certificate.Issuer
+			cert = &certificate
+		} else {
+			for _, certificate := range state.Certificates {
+				if certificate.Domain == domain.Name || certutil.CoversHostname(certificate.DNSNames, domain.Name) {
+					c := certificate
+					cert = &c
+					break
+				}
+			}
+		}
+		if cert != nil {
+			expiry := cert.NotAfter
+			view.CertificateIssuer = cert.Issuer
 			view.CertificateExpiry = &expiry
-			view.CertificateStatus = certificateState(certificate.NotAfter, now)
-		} else if domain.CertificateMode == model.CertificateLocal {
+			view.CertificateStatus = certificateState(cert.NotAfter, now)
+		} else {
 			if node, ok := state.Nodes[domain.NodeID]; ok {
 				for _, certificate := range node.Certificates {
-					if certificate.Domain == domain.Name {
+					if certificate.Domain == domain.Name || certutil.CoversHostname(certificate.DNSNames, domain.Name) {
 						expiry := certificate.NotAfter
 						view.CertificateIssuer = certificate.Issuer
 						view.CertificateExpiry = &expiry

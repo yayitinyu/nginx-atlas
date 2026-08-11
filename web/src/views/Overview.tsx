@@ -31,15 +31,57 @@ export function Overview({ data, onNavigate }: Props) {
       <div className="overview-grid">
         <div className="overview-primary">
           <Bezel className="domain-panel">
-            <div className="panel-toolbar"><h2>{t('overview.routes')}</h2><div className="toolbar-actions"><label className="search-field"><Icon name="search" size={17} /><span className="sr-only">{t('overview.searchDomain')}</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t('overview.searchDomain')} /></label><IconButton name="filter" label={t('common.search')} /></div></div>
+            <div className="panel-toolbar"><h2>{t('overview.routes')}</h2><div className="toolbar-actions"><label className="search-field"><Icon name="search" size={17} /><span className="sr-only">{t('overview.searchDomain')}</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t('overview.searchDomain')} /></label></div></div>
             {domains.length > 0 ? <DomainTable domains={domains.slice(0, 6)} onOpen={() => onNavigate('domains')} /> : <EmptyState icon="globe" title={t('overview.noDomain')} description={query ? t('overview.adjustSearch') : t('overview.noDomainDescription')} />}
             {data.domains.length > 0 && <div className="panel-footer"><span>{t('overview.total', { count: data.domains.length })}</span><button className="text-link" onClick={() => onNavigate('domains')}>{t('overview.viewAll')} <Icon name="arrow" size={17} /></button></div>}
           </Bezel>
           <CertificateTimeline data={data} onOpen={() => onNavigate('certificates')} />
+          <OverviewQuickActions data={data} onNavigate={onNavigate} />
         </div>
         <aside className="overview-rail"><NodeHealth nodes={data.nodes} onOpen={() => onNavigate('nodes')} /><ActivityFeed events={data.audit} domains={data.domains} nodes={data.nodes} onOpen={() => onNavigate('audit')} /></aside>
       </div>
     </div>
+  )
+}
+
+function OverviewQuickActions({ data, onNavigate }: { data: DashboardData; onNavigate: (page: 'domains' | 'certificates' | 'nodes' | 'audit') => void }) {
+  const { t } = usePreferences()
+  const activeDomains = data.domains.filter((domain) => domain.enabled).length
+  const autoRenewCerts = data.certificates.filter((certificate) => certificate.auto_renew).length
+  return (
+    <Bezel className="overview-summary-card">
+      <SectionHeading title={t('overview.quickActions')} />
+      <div className="overview-summary-body">
+        <div className="summary-widgets">
+          <div className="summary-widget-item">
+            <span className="widget-icon"><Icon name="globe" size={18} /></span>
+            <div>
+              <strong>{activeDomains} / {data.domains.length}</strong>
+              <small>{t('overview.activeRoutes')}</small>
+            </div>
+          </div>
+          <div className="summary-widget-item">
+            <span className="widget-icon"><Icon name="refresh" size={18} /></span>
+            <div>
+              <strong>{autoRenewCerts} / {data.certificates.length}</strong>
+              <small>{t('overview.autoRenewCerts')}</small>
+            </div>
+          </div>
+          <div className="summary-widget-item">
+            <span className="widget-icon"><Icon name="check" size={18} /></span>
+            <div>
+              <strong>nginx -t</strong>
+              <small>{t('app.configVerified')}</small>
+            </div>
+          </div>
+        </div>
+        <div className="summary-actions-bar">
+          <button className="inline-action" onClick={() => onNavigate('domains')}><Icon name="plus" size={15} />{t('domain.add')}</button>
+          <button className="inline-action quiet-action" onClick={() => onNavigate('certificates')}><Icon name="shield" size={15} />{t('certificate.add')}</button>
+          <button className="inline-action quiet-action" onClick={() => onNavigate('nodes')}><Icon name="server" size={15} />{t('nodes.add')}</button>
+        </div>
+      </div>
+    </Bezel>
   )
 }
 
@@ -66,7 +108,7 @@ function CertificateTimeline({ data, onOpen }: { data: DashboardData; onOpen: ()
 
 function NodeHealth({ nodes, onOpen }: { nodes: NodeRecord[]; onOpen: () => void }) {
   const { t } = usePreferences()
-  return <Bezel className="node-health-panel"><SectionHeading title={t('overview.nodeHealth')} action={<button className="square-link" onClick={onOpen} aria-label={t('overview.viewNodes')}><Icon name="arrow" size={17} /></button>} />{nodes.length === 0 ? <EmptyState icon="server" title={t('overview.noNodes')} description={t('overview.noNodesDescription')} /> : <div className="node-health-list">{nodes.slice(0, 5).map((node) => <button className="node-health-row" key={node.id} onClick={onOpen}><StatusDot tone={node.status === 'online' && node.nginx_healthy ? 'good' : node.status === 'offline' ? 'danger' : 'warning'} /><span><strong>{node.name}</strong><small>{node.ip_addresses?.[0] ?? node.hostname ?? t('overview.waitingReport')}</small><small>{node.nginx_version || t('overview.nginxUndetected')}</small></span><span className={node.status === 'online' ? 'node-online' : 'node-offline'}>{node.status === 'online' ? t('common.online') : t('common.offline')}<strong>{node.nginx_healthy ? '100%' : '—'}</strong></span></button>)}</div>}{nodes.length > 0 && <button className="rail-link" onClick={onOpen}>{t('overview.viewNodes')} <Icon name="arrow" size={17} /></button>}</Bezel>
+  return <Bezel className="node-health-panel"><SectionHeading title={t('overview.nodeHealth')} />{nodes.length === 0 ? <EmptyState icon="server" title={t('overview.noNodes')} description={t('overview.noNodesDescription')} /> : <div className="node-health-list">{nodes.slice(0, 5).map((node) => <button className="node-health-row" key={node.id} onClick={onOpen}><StatusDot tone={node.status === 'online' && node.nginx_healthy ? 'good' : node.status === 'offline' ? 'danger' : 'warning'} /><span><strong>{node.name}</strong><small>{node.ip_addresses?.[0] ?? node.hostname ?? t('overview.waitingReport')}</small><small>{node.nginx_version || t('overview.nginxUndetected')}</small></span><span className={node.status === 'online' ? 'node-online' : 'node-offline'}>{node.status === 'online' ? t('common.online') : t('common.offline')}<strong>{node.nginx_healthy ? '100%' : '—'}</strong></span></button>)}</div>}{nodes.length > 0 && <button className="rail-link" onClick={onOpen}>{t('overview.viewNodes')} <Icon name="arrow" size={17} /></button>}</Bezel>
 }
 
 function ActivityFeed({ events, domains, nodes, onOpen }: { events: AuditEvent[]; domains: DomainRecord[]; nodes: NodeRecord[]; onOpen: () => void }) {

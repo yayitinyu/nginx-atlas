@@ -143,6 +143,7 @@ func (s *Server) routes() http.Handler {
 	mux.Handle("DELETE /api/v1/nodes/{id}", s.adminAuth(http.HandlerFunc(s.handleRevokeNode)))
 	mux.Handle("GET /api/v1/domains", s.adminAuth(http.HandlerFunc(s.handleDomains)))
 	mux.Handle("POST /api/v1/domains", s.adminAuth(http.HandlerFunc(s.handleCreateDomain)))
+	mux.Handle("PUT /api/v1/domains/{id}", s.adminAuth(http.HandlerFunc(s.handleUpdateDomain)))
 	mux.Handle("POST /api/v1/domains/adopt", s.adminAuth(http.HandlerFunc(s.handleAdoptDomain)))
 	mux.Handle("DELETE /api/v1/domains/{id}", s.adminAuth(http.HandlerFunc(s.handleDeleteDomain)))
 	mux.Handle("GET /api/v1/certificates", s.adminAuth(http.HandlerFunc(s.handleCertificates)))
