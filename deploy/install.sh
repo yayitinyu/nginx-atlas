@@ -310,7 +310,14 @@ create_server_user() {
   if ! id nginx-atlas >/dev/null 2>&1; then
     useradd --system --home-dir "$STATE_ROOT/server" --shell /usr/sbin/nologin nginx-atlas
   fi
-  install -d -m 0700 -o nginx-atlas -g nginx-atlas "$STATE_ROOT/server"
+  prepare_server_state_directory nginx-atlas nginx-atlas
+}
+
+prepare_server_state_directory() {
+  local owner="$1" group="$2"
+  chown root:"$group" "$STATE_ROOT"
+  chmod 0710 "$STATE_ROOT"
+  install -d -m 0700 -o "$owner" -g "$group" "$STATE_ROOT/server"
 }
 
 write_server_env() {
@@ -486,4 +493,6 @@ main() {
   fi
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

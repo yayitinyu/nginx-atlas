@@ -30,6 +30,8 @@ jobs:
       - name: Vet Go packages
         run: go vet ./...
       - name: Check shell syntax
-        run: bash -n deploy/install.sh scripts/build.sh scripts/build-release.sh
+        run: bash -n deploy/install.sh scripts/build.sh scripts/build-release.sh scripts/test-installer.sh
+      - name: Test installer permissions
+        run: sudo bash scripts/test-installer.sh
       - name: Check whitespace
         run: git diff --check
