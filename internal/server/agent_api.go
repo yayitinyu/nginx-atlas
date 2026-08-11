@@ -226,7 +226,7 @@ func (s *Server) buildWireJob(job model.Job, state model.State) (protocol.WireJo
 		wirePayload := protocol.ApplyDomainPayload{
 			Domain: domain.Name, UpstreamHost: domain.UpstreamHost, UpstreamPort: domain.UpstreamPort,
 			TLS: domain.CertificateMode != "", UseLocalCertificate: spec.UseLocalCertificate,
-			CaptureCertificate: spec.CaptureCertificate,
+			CaptureCertificate: spec.CaptureCertificate, ReplaceConfigPath: spec.ReplaceConfigPath,
 		}
 		if spec.CertificateID != "" {
 			bundle, err := s.decryptCertificate(state, spec.CertificateID)
@@ -241,7 +241,7 @@ func (s *Server) buildWireJob(job model.Job, state model.State) (protocol.WireJo
 		if err := json.Unmarshal(job.Payload, &spec); err != nil {
 			return wired, err
 		}
-		payload = protocol.DeleteDomainPayload{Domain: spec.Domain}
+		payload = protocol.DeleteDomainPayload{Domain: spec.Domain, RestoreConfigPath: spec.RestoreConfigPath}
 	case protocol.JobSyncCertificate:
 		var spec syncCertificateSpec
 		if err := json.Unmarshal(job.Payload, &spec); err != nil {
@@ -257,15 +257,26 @@ func (s *Server) buildWireJob(job model.Job, state model.State) (protocol.WireJo
 		if err := json.Unmarshal(job.Payload, &spec); err != nil {
 			return wired, err
 		}
-		domain, ok := state.Domains[spec.DomainID]
-		if !ok {
-			return wired, errors.New("domain no longer exists")
+		domainName := spec.Domain
+		acmeAccountID := spec.ACMEAccountID
+		dnsAccountID := spec.DNSAccountID
+		if spec.DomainID != "" {
+			domain, ok := state.Domains[spec.DomainID]
+			if !ok {
+				return wired, errors.New("domain no longer exists")
+			}
+			domainName = domain.Name
+			acmeAccountID = domain.ACMEAccountID
+			dnsAccountID = domain.DNSAccountID
 		}
-		dnsAccount, ok := state.DNSAccounts[domain.DNSAccountID]
+		if domainName == "" {
+			return wired, errors.New("certificate domain is missing")
+		}
+		dnsAccount, ok := state.DNSAccounts[dnsAccountID]
 		if !ok {
 			return wired, errors.New("DNS account no longer exists")
 		}
-		acmeAccount, ok := state.ACMEAccounts[domain.ACMEAccountID]
+		acmeAccount, ok := state.ACMEAccounts[acmeAccountID]
 		if !ok {
 			return wired, errors.New("ACME account no longer exists")
 		}
@@ -286,12 +297,40 @@ func (s *Server) buildWireJob(job model.Job, state model.State) (protocol.WireJo
 			hmac = string(plaintext)
 		}
 		payload = protocol.IssueCertificatePayload{
-			Domain: domain.Name, Email: acmeAccount.Email, DirectoryURL: acmeAccount.DirectoryURL,
+			Domain: domainName, Domains: spec.DNSNames, Email: acmeAccount.Email, DirectoryURL: acmeAccount.DirectoryURL,
 			DNSProvider: dnsAccount.Provider, Credentials: credentials,
 			EABKID: acmeAccount.EABKID, EABHMAC: hmac,
+			Install: spec.Install, ReloadNginx: spec.ReloadNginx,
 		}
+	case protocol.JobCaptureCertificate:
+		var spec captureCertificateSpec
+		if err := json.Unmarshal(job.Payload, &spec); err != nil {
+			return wired, err
+		}
+		domainName := spec.Domain
+		if spec.DomainID != "" {
+			if domain, ok := state.Domains[spec.DomainID]; ok {
+				domainName = domain.Name
+			}
+		}
+		if domainName == "" {
+			return wired, errors.New("certificate domain is missing")
+		}
+		payload = protocol.CaptureCertificatePayload{Domain: domainName}
 	case protocol.JobReloadNginx:
 		payload = struct{}{}
+	case protocol.JobUpdateAtlas:
+		var update protocol.UpdateAtlasPayload
+		if err := json.Unmarshal(job.Payload, &update); err != nil {
+			return wired, err
+		}
+		payload = update
+	case protocol.JobUpdateSystem:
+		var update protocol.UpdateSystemPayload
+		if err := json.Unmarshal(job.Payload, &update); err != nil {
+			return wired, err
+		}
+		payload = update
 	default:
 		return wired, fmt.Errorf("unsupported job type %q", job.Type)
 	}
@@ -338,20 +377,27 @@ func (s *Server) failDispatch(job model.Job, dispatchErr error) {
 
 func (s *Server) prepareCertificateResult(state model.State, job model.Job, bundle *protocol.CertificateBundle) (*model.Certificate, error) {
 	if bundle == nil {
-		if job.Type == protocol.JobIssueCertificate {
-			return nil, errors.New("ACME task returned no certificate")
+		if job.Type == protocol.JobIssueCertificate || job.Type == protocol.JobCaptureCertificate {
+			return nil, errors.New("certificate task returned no certificate")
 		}
 		return nil, nil
 	}
-	domain, ok := state.Domains[job.DomainID]
-	if !ok {
-		return nil, errors.New("certificate result has no matching domain")
+	context, err := certificateResultContextForJob(state, job)
+	if err != nil {
+		return nil, err
 	}
-	info, err := certutil.Validate([]byte(bundle.FullchainPEM), []byte(bundle.PrivateKeyPEM), domain.Name, time.Now())
+	info, err := certutil.Validate([]byte(bundle.FullchainPEM), []byte(bundle.PrivateKeyPEM), context.Domain, time.Now())
 	if err != nil {
 		return nil, fmt.Errorf("agent returned an invalid certificate: %w", err)
 	}
-	certificateID := domain.CertificateID
+	requestedDNSNames := context.RequestedDNSNames
+	if len(requestedDNSNames) == 0 {
+		requestedDNSNames = append([]string(nil), info.DNSNames...)
+	}
+	if err := ensureCertificateNames(info.DNSNames, requestedDNSNames); err != nil {
+		return nil, fmt.Errorf("agent returned a certificate with incomplete names: %w", err)
+	}
+	certificateID := context.CertificateID
 	var existing model.Certificate
 	if certificateID != "" {
 		existing = state.Certificates[certificateID]
@@ -371,24 +417,132 @@ func (s *Server) prepareCertificateResult(state model.State, job model.Job, bund
 	if err != nil {
 		return nil, err
 	}
-	source := model.CertificateLocal
-	if job.Type == protocol.JobIssueCertificate {
-		source = model.CertificateACME
-	}
 	now := time.Now().UTC()
 	createdAt := existing.CreatedAt
 	if createdAt.IsZero() {
 		createdAt = now
 	}
+	deployedNodeIDs := append([]string(nil), existing.DeployedNodeIDs...)
+	if context.InstalledOnIssuer {
+		deployedNodeIDs = appendUnique(deployedNodeIDs, job.NodeID)
+	}
 	return &model.Certificate{
-		ID: certificateID, Domain: domain.Name, Source: source,
+		ID: certificateID, Domain: context.Domain, Source: context.Source,
 		FullchainCiphertext: fullchainCiphertext, PrivateKeyCiphertext: privateKeyCiphertext,
 		FingerprintSHA256: info.FingerprintSHA256, Issuer: info.Issuer, SerialNumber: info.SerialNumber,
-		NotBefore: info.NotBefore, NotAfter: info.NotAfter, DNSNames: info.DNSNames,
-		AutoRenew: domain.AutoRenew, ACMEAccountID: domain.ACMEAccountID, DNSAccountID: domain.DNSAccountID,
-		IssuerNodeID: job.NodeID, DeployedNodeIDs: append([]string(nil), existing.DeployedNodeIDs...),
+		NotBefore: info.NotBefore, NotAfter: info.NotAfter, DNSNames: info.DNSNames, RequestedDNSNames: requestedDNSNames,
+		AutoRenew: context.AutoRenew, RenewBeforeDays: normalizeRenewBeforeDays(context.RenewBeforeDays),
+		ACMEAccountID: context.ACMEAccountID, DNSAccountID: context.DNSAccountID,
+		IssuerNodeID: job.NodeID, DeployedNodeIDs: deployedNodeIDs,
 		CreatedAt: createdAt, UpdatedAt: now,
 	}, nil
+}
+
+type certificateResultContext struct {
+	Domain            string
+	CertificateID     string
+	Source            model.CertificateSource
+	AutoRenew         bool
+	RenewBeforeDays   int
+	ACMEAccountID     string
+	DNSAccountID      string
+	InstalledOnIssuer bool
+	RequestedDNSNames []string
+}
+
+func certificateResultContextForJob(state model.State, job model.Job) (certificateResultContext, error) {
+	switch job.Type {
+	case protocol.JobApplyDomain:
+		var spec applyDomainSpec
+		if err := json.Unmarshal(job.Payload, &spec); err != nil {
+			return certificateResultContext{}, err
+		}
+		if !spec.CaptureCertificate {
+			return certificateResultContext{}, errors.New("unexpected certificate result for apply task")
+		}
+		domain, ok := state.Domains[spec.DomainID]
+		if !ok {
+			return certificateResultContext{}, errors.New("certificate result has no matching domain")
+		}
+		return certificateResultContext{
+			Domain: domain.Name, CertificateID: domain.CertificateID, Source: model.CertificateLocal,
+			RequestedDNSNames: []string{domain.Name},
+			AutoRenew:         domain.AutoRenew, RenewBeforeDays: domain.RenewBeforeDays,
+			ACMEAccountID: domain.ACMEAccountID, DNSAccountID: domain.DNSAccountID,
+			InstalledOnIssuer: true,
+		}, nil
+	case protocol.JobIssueCertificate:
+		if job.DomainID != "" {
+			domain, ok := state.Domains[job.DomainID]
+			if !ok {
+				return certificateResultContext{}, errors.New("certificate result has no matching domain")
+			}
+			return certificateResultContext{
+				Domain: domain.Name, CertificateID: domain.CertificateID, Source: model.CertificateACME,
+				RequestedDNSNames: desiredNamesForDomain(state, domain),
+				AutoRenew:         domain.AutoRenew, RenewBeforeDays: domain.RenewBeforeDays,
+				ACMEAccountID: domain.ACMEAccountID, DNSAccountID: domain.DNSAccountID,
+			}, nil
+		}
+		var spec issueCertificateSpec
+		if err := json.Unmarshal(job.Payload, &spec); err != nil {
+			return certificateResultContext{}, err
+		}
+		return certificateResultContext{
+			Domain: spec.Domain, CertificateID: spec.CertificateID, Source: model.CertificateACME,
+			RequestedDNSNames: spec.DNSNames,
+			AutoRenew:         spec.AutoRenew, RenewBeforeDays: spec.RenewBeforeDays,
+			ACMEAccountID: spec.ACMEAccountID, DNSAccountID: spec.DNSAccountID,
+			InstalledOnIssuer: spec.Install,
+		}, nil
+	case protocol.JobCaptureCertificate:
+		var spec captureCertificateSpec
+		if err := json.Unmarshal(job.Payload, &spec); err != nil {
+			return certificateResultContext{}, err
+		}
+		result := certificateResultContext{
+			Domain: spec.Domain, CertificateID: spec.CertificateID, Source: model.CertificateLocal,
+			AutoRenew: spec.AutoRenew, RenewBeforeDays: spec.RenewBeforeDays,
+			ACMEAccountID: spec.ACMEAccountID, DNSAccountID: spec.DNSAccountID,
+			InstalledOnIssuer: true,
+		}
+		if spec.DomainID != "" {
+			domain, ok := state.Domains[spec.DomainID]
+			if !ok {
+				return certificateResultContext{}, errors.New("certificate result has no matching domain")
+			}
+			result.Domain = domain.Name
+			result.CertificateID = domain.CertificateID
+			result.AutoRenew = domain.AutoRenew
+			result.RenewBeforeDays = domain.RenewBeforeDays
+			result.ACMEAccountID = domain.ACMEAccountID
+			result.DNSAccountID = domain.DNSAccountID
+			result.RequestedDNSNames = []string{domain.Name}
+		}
+		return result, nil
+	default:
+		return certificateResultContext{}, fmt.Errorf("job type %s cannot return a certificate", job.Type)
+	}
+}
+
+func ensureCertificateNames(actual, requested []string) error {
+	actualSet := make(map[string]bool, len(actual))
+	for _, value := range actual {
+		actualSet[strings.ToLower(strings.TrimSpace(value))] = true
+	}
+	for _, value := range requested {
+		value = strings.ToLower(strings.TrimSpace(value))
+		if strings.HasPrefix(value, "*.") {
+			if !actualSet[value] {
+				return fmt.Errorf("missing %s", value)
+			}
+			continue
+		}
+		if !certutil.CoversHostname(actual, value) {
+			return fmt.Errorf("missing %s", value)
+		}
+	}
+	return nil
 }
 
 func (s *Server) completeSuccessfulJob(state *model.State, job model.Job, request protocol.JobResultRequest, prepared *model.Certificate) error {
@@ -401,20 +555,51 @@ func (s *Server) completeSuccessfulJob(state *model.State, job model.Job, reques
 		if prepared == nil {
 			return errors.New("ACME task returned no certificate")
 		}
-		domain, ok := state.Domains[job.DomainID]
-		if !ok {
-			return errNotFound
+		if job.DomainID != "" {
+			domain, ok := state.Domains[job.DomainID]
+			if !ok {
+				return errNotFound
+			}
+			domain.CertificateID = prepared.ID
+			domain.CertificateMode = model.CertificateACME
+			domain.LastError = ""
+			applyJob, err := enqueueJob(state, domain.NodeID, domain.ID, protocol.JobApplyDomain, applyDomainSpec{DomainID: domain.ID, CertificateID: prepared.ID})
+			if err != nil {
+				return err
+			}
+			domain.LastJobID = applyJob.ID
+			domain.UpdatedAt = now
+			state.Domains[domain.ID] = domain
+		} else {
+			var spec issueCertificateSpec
+			if err := json.Unmarshal(job.Payload, &spec); err != nil {
+				return err
+			}
+			if err := enqueueCertificateSyncJobs(state, prepared.ID, prepared.Domain, spec.SyncNodeIDs); err != nil {
+				return err
+			}
 		}
-		domain.CertificateID = prepared.ID
-		domain.CertificateMode = model.CertificateACME
-		domain.LastError = ""
-		applyJob, err := enqueueJob(state, domain.NodeID, domain.ID, protocol.JobApplyDomain, applyDomainSpec{DomainID: domain.ID, CertificateID: prepared.ID})
-		if err != nil {
+	case protocol.JobCaptureCertificate:
+		if prepared == nil {
+			return errors.New("capture task returned no certificate")
+		}
+		var spec captureCertificateSpec
+		if err := json.Unmarshal(job.Payload, &spec); err != nil {
 			return err
 		}
-		domain.LastJobID = applyJob.ID
-		domain.UpdatedAt = now
-		state.Domains[domain.ID] = domain
+		if job.DomainID != "" {
+			domain, ok := state.Domains[job.DomainID]
+			if !ok {
+				return errNotFound
+			}
+			domain.CertificateID = prepared.ID
+			domain.LastError = ""
+			domain.UpdatedAt = now
+			state.Domains[domain.ID] = domain
+		}
+		if err := enqueueCertificateSyncJobs(state, prepared.ID, prepared.Domain, spec.SyncNodeIDs); err != nil {
+			return err
+		}
 	case protocol.JobApplyDomain:
 		domain, ok := state.Domains[job.DomainID]
 		if !ok {
@@ -459,15 +644,31 @@ func (s *Server) completeSuccessfulJob(state *model.State, job model.Job, reques
 	return nil
 }
 
+func enqueueCertificateSyncJobs(state *model.State, certificateID, domain string, nodeIDs []string) error {
+	for _, nodeID := range nodeIDs {
+		if _, err := enqueueJob(state, nodeID, "", protocol.JobSyncCertificate, syncCertificateSpec{
+			CertificateID: certificateID, Domain: domain, ReloadNginx: true,
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func applyNodeReport(node *model.Node, report protocol.NodeReport) {
 	node.Hostname = truncate(strings.TrimSpace(report.Hostname), 255)
 	node.IPAddresses = append([]string(nil), report.IPAddresses...)
 	node.OS = truncate(report.OS, 64)
+	node.OSName = truncate(report.OSName, 160)
+	node.OSVersion = truncate(report.OSVersion, 64)
 	node.Arch = truncate(report.Arch, 64)
+	node.PackageManager = truncate(report.PackageManager, 16)
+	node.ControllerInstalled = report.ControllerInstalled
 	node.NginxVersion = truncate(report.NginxVersion, 256)
 	node.NginxHealthy = report.NginxHealthy
 	node.AgentVersion = truncate(report.AgentVersion, 64)
 	node.Certificates = append([]model.CertificateMeta(nil), report.Certificates...)
+	node.NginxSites = append([]model.NginxSiteMeta(nil), report.NginxSites...)
 	node.LastError = truncate(report.LastError, 2048)
 }
 

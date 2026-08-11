@@ -8,11 +8,14 @@ import (
 )
 
 const (
-	JobApplyDomain      = "apply_domain"
-	JobDeleteDomain     = "delete_domain"
-	JobSyncCertificate  = "sync_certificate"
-	JobIssueCertificate = "issue_certificate"
-	JobReloadNginx      = "reload_nginx"
+	JobApplyDomain        = "apply_domain"
+	JobDeleteDomain       = "delete_domain"
+	JobSyncCertificate    = "sync_certificate"
+	JobIssueCertificate   = "issue_certificate"
+	JobCaptureCertificate = "capture_certificate"
+	JobReloadNginx        = "reload_nginx"
+	JobUpdateAtlas        = "update_atlas"
+	JobUpdateSystem       = "update_system"
 )
 
 type EnrollRequest struct {
@@ -28,15 +31,20 @@ type EnrollResponse struct {
 }
 
 type NodeReport struct {
-	Hostname     string                  `json:"hostname"`
-	IPAddresses  []string                `json:"ip_addresses,omitempty"`
-	OS           string                  `json:"os"`
-	Arch         string                  `json:"arch"`
-	NginxVersion string                  `json:"nginx_version,omitempty"`
-	NginxHealthy bool                    `json:"nginx_healthy"`
-	AgentVersion string                  `json:"agent_version"`
-	Certificates []model.CertificateMeta `json:"certificates,omitempty"`
-	LastError    string                  `json:"last_error,omitempty"`
+	Hostname            string                  `json:"hostname"`
+	IPAddresses         []string                `json:"ip_addresses,omitempty"`
+	OS                  string                  `json:"os"`
+	OSName              string                  `json:"os_name,omitempty"`
+	OSVersion           string                  `json:"os_version,omitempty"`
+	Arch                string                  `json:"arch"`
+	PackageManager      string                  `json:"package_manager,omitempty"`
+	ControllerInstalled bool                    `json:"controller_installed,omitempty"`
+	NginxVersion        string                  `json:"nginx_version,omitempty"`
+	NginxHealthy        bool                    `json:"nginx_healthy"`
+	AgentVersion        string                  `json:"agent_version"`
+	Certificates        []model.CertificateMeta `json:"certificates,omitempty"`
+	NginxSites          []model.NginxSiteMeta   `json:"nginx_sites,omitempty"`
+	LastError           string                  `json:"last_error,omitempty"`
 }
 
 type PollRequest struct {
@@ -68,10 +76,12 @@ type ApplyDomainPayload struct {
 	UseLocalCertificate bool               `json:"use_local_certificate"`
 	Certificate         *CertificateBundle `json:"certificate,omitempty"`
 	CaptureCertificate  bool               `json:"capture_certificate"`
+	ReplaceConfigPath   string             `json:"replace_config_path,omitempty"`
 }
 
 type DeleteDomainPayload struct {
-	Domain string `json:"domain"`
+	Domain            string `json:"domain"`
+	RestoreConfigPath string `json:"restore_config_path,omitempty"`
 }
 
 type SyncCertificatePayload struct {
@@ -82,20 +92,38 @@ type SyncCertificatePayload struct {
 
 type IssueCertificatePayload struct {
 	Domain       string            `json:"domain"`
+	Domains      []string          `json:"domains,omitempty"`
 	Email        string            `json:"email"`
 	DirectoryURL string            `json:"directory_url"`
 	DNSProvider  string            `json:"dns_provider"`
 	Credentials  map[string]string `json:"credentials"`
 	EABKID       string            `json:"eab_kid,omitempty"`
 	EABHMAC      string            `json:"eab_hmac,omitempty"`
+	Install      bool              `json:"install"`
+	ReloadNginx  bool              `json:"reload_nginx"`
+}
+
+type UpdateAtlasPayload struct {
+	DownloadURL     string `json:"download_url"`
+	SHA256          string `json:"sha256"`
+	ExpectedVersion string `json:"expected_version"`
+}
+
+type UpdateSystemPayload struct {
+	PackageManager string `json:"package_manager"`
+}
+
+type CaptureCertificatePayload struct {
+	Domain string `json:"domain"`
 }
 
 type JobResultRequest struct {
-	Success     bool               `json:"success"`
-	Message     string             `json:"message"`
-	Error       string             `json:"error,omitempty"`
-	Certificate *CertificateBundle `json:"certificate,omitempty"`
-	NginxOutput string             `json:"nginx_output,omitempty"`
+	Success         bool               `json:"success"`
+	Message         string             `json:"message"`
+	Error           string             `json:"error,omitempty"`
+	Certificate     *CertificateBundle `json:"certificate,omitempty"`
+	NginxOutput     string             `json:"nginx_output,omitempty"`
+	RestartServices []string           `json:"-"`
 }
 
 type APIError struct {

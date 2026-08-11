@@ -1,0 +1,177 @@
+package server
+
+import (
+	"errors"
+	"fmt"
+	"net/http"
+	"strings"
+
+	"github.com/yayitinyu/nginx-atlas/internal/model"
+	"github.com/yayitinyu/nginx-atlas/internal/protocol"
+)
+
+func (s *Server) handleRenameNode(w http.ResponseWriter, r *http.Request) {
+	var request struct {
+		Name string `json:"name"`
+	}
+	if !decodeJSON(w, r, &request) {
+		return
+	}
+	request.Name = strings.TrimSpace(request.Name)
+	if len([]rune(request.Name)) < 2 || len([]rune(request.Name)) > 64 || strings.ContainsAny(request.Name, "\r\n\x00") {
+		writeError(w, http.StatusBadRequest, "节点名称需为 2–64 个可见字符", "invalid_node_name", nil)
+		return
+	}
+	var updated model.Node
+	err := s.store.Update(func(state *model.State) error {
+		node, ok := state.Nodes[r.PathValue("id")]
+		if !ok {
+			return errNotFound
+		}
+		node.Name = request.Name
+		state.Nodes[node.ID] = node
+		updated = node
+		s.addAudit(state, "info", "node.renamed", "节点名称已更新", node.ID)
+		return nil
+	})
+	if errors.Is(err, errNotFound) {
+		writeError(w, http.StatusNotFound, "节点不存在", "not_found", nil)
+		return
+	}
+	if err != nil {
+		wrapStoreError(w, err)
+		return
+	}
+	updated.SecretHash = ""
+	writeJSON(w, http.StatusOK, updated)
+}
+
+func (s *Server) handleNodeUninstallCommand(w http.ResponseWriter, r *http.Request) {
+	state := s.store.Snapshot()
+	node, ok := state.Nodes[r.PathValue("id")]
+	if !ok {
+		writeError(w, http.StatusNotFound, "节点不存在", "not_found", nil)
+		return
+	}
+	baseURL := s.publicURL(r)
+	installerURL := strings.TrimRight(baseURL, "/") + "/install.sh"
+	command := fmt.Sprintf("curl -fsSL %s | sudo bash -s -- uninstall-agent", shellQuote(installerURL))
+	writeJSON(w, http.StatusOK, map[string]any{
+		"command":              command,
+		"preserves_nginx":      true,
+		"controller_installed": node.ControllerInstalled,
+	})
+}
+
+func (s *Server) handleUpdateNodeAtlas(w http.ResponseWriter, r *http.Request) {
+	nodeID := r.PathValue("id")
+	snapshot := s.store.Snapshot()
+	node, ok := snapshot.Nodes[nodeID]
+	if !ok || node.Status == model.NodeRevoked {
+		writeError(w, http.StatusNotFound, "节点不存在或已撤销", "not_found", nil)
+		return
+	}
+	release, err := s.fetchLatestRelease(r.Context())
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "无法读取可验证的最新发行版", "release_unavailable", map[string]string{"reason": err.Error()})
+		return
+	}
+	if strings.TrimSpace(node.AgentVersion) != "" && node.AgentVersion != "dev" && !versionUpdateAvailable(node.AgentVersion, release.Version) {
+		writeError(w, http.StatusConflict, "节点已经是最新版本，或版本高于最新发行版", "already_up_to_date", nil)
+		return
+	}
+	arch := normalizeNodeArch(node.Arch)
+	asset, ok := release.Assets[arch]
+	if !ok {
+		writeError(w, http.StatusBadRequest, "最新发行版不支持该节点架构", "unsupported_arch", map[string]string{"arch": node.Arch})
+		return
+	}
+	var job model.Job
+	err = s.store.Update(func(state *model.State) error {
+		current, ok := state.Nodes[nodeID]
+		if !ok || current.Status == model.NodeRevoked {
+			return errNotFound
+		}
+		if hasActiveNodeJob(state, nodeID, protocol.JobUpdateAtlas) {
+			return errConflict
+		}
+		job, err = enqueueJob(state, nodeID, "", protocol.JobUpdateAtlas, protocol.UpdateAtlasPayload{
+			DownloadURL: asset.DownloadURL, SHA256: asset.SHA256, ExpectedVersion: release.Version,
+		})
+		if err != nil {
+			return err
+		}
+		s.addAudit(state, "info", "node.atlas-update.queued", "Nginx Atlas 更新任务已加入队列", nodeID, "", job.ID)
+		return nil
+	})
+	if errors.Is(err, errConflict) {
+		writeError(w, http.StatusConflict, "该节点已有 Atlas 更新任务", "job_exists", nil)
+		return
+	}
+	if errors.Is(err, errNotFound) {
+		writeError(w, http.StatusNotFound, "节点不存在", "not_found", nil)
+		return
+	}
+	if err != nil {
+		wrapStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, job)
+}
+
+func (s *Server) handleUpdateNodeSystem(w http.ResponseWriter, r *http.Request) {
+	nodeID := r.PathValue("id")
+	var job model.Job
+	err := s.store.Update(func(state *model.State) error {
+		node, ok := state.Nodes[nodeID]
+		if !ok || node.Status == model.NodeRevoked {
+			return errNotFound
+		}
+		if node.PackageManager != "apt" {
+			return errors.New("only apt-based nodes are currently supported")
+		}
+		if hasActiveNodeJob(state, nodeID, protocol.JobUpdateSystem) {
+			return errConflict
+		}
+		var err error
+		job, err = enqueueJob(state, nodeID, "", protocol.JobUpdateSystem, protocol.UpdateSystemPayload{PackageManager: "apt"})
+		if err != nil {
+			return err
+		}
+		s.addAudit(state, "warning", "node.system-update.queued", "APT 软件包与 Nginx 更新任务已加入队列", nodeID, "", job.ID)
+		return nil
+	})
+	if errors.Is(err, errConflict) {
+		writeError(w, http.StatusConflict, "该节点已有系统更新任务", "job_exists", nil)
+		return
+	}
+	if errors.Is(err, errNotFound) {
+		writeError(w, http.StatusNotFound, "节点不存在", "not_found", nil)
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "无法创建系统更新任务", "system_update_unavailable", map[string]string{"reason": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusAccepted, job)
+}
+
+func normalizeNodeArch(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "amd64", "x86_64":
+		return "amd64"
+	case "arm64", "aarch64":
+		return "arm64"
+	default:
+		return strings.ToLower(strings.TrimSpace(value))
+	}
+}
+
+func hasActiveNodeJob(state *model.State, nodeID, jobType string) bool {
+	for _, job := range state.Jobs {
+		if job.NodeID == nodeID && job.Type == jobType && (job.Status == model.JobQueued || job.Status == model.JobRunning) {
+			return true
+		}
+	}
+	return false
+}

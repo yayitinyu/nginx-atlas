@@ -1,20 +1,22 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { APIError, api, clearToken, getToken } from './api'
-import type { ACMEAccount, CertificateRecord, DashboardData, DNSAccount, DomainRecord, EnrollmentResponse, NodeRecord } from './types'
+import { APIError, api, clearToken, getToken, setToken } from './api'
+import type { ACMEAccount, CertificateRecord, DashboardData, DNSAccount, DomainRecord, EnrollmentResponse, NginxSiteMeta, NodeRecord, ReleaseInfo, UninstallCommand } from './types'
+import { usePreferences, type LanguageMode, type ThemeMode } from './preferences'
 import { Icon } from './components/Icon'
 import { LoginGate } from './components/LoginGate'
 import { MobileHeader, MobileMenu, MobileNavigation, NavigationRail, type PageKey } from './components/Navigation'
 import { ConfirmDialog, LoadingState, ToastRegion, type ToastMessage } from './components/Primitives'
 import { DomainDrawer, type DomainSubmission } from './components/DomainDrawer'
-import { ACMEAccountDialog, DNSAccountDialog, NodeDialog, SyncDialog } from './components/Dialogs'
+import { ACMEAccountDialog, CertificateAutomationDialog, CertificateDialog, DNSAccountDialog, NodeDialog, NodeManageDialog, PasswordDialog, SyncDialog, type ACMEAccountInput, type CertificateAutomationSettingsInput, type CertificateSubmission, type DNSAccountInput } from './components/Dialogs'
+import { SelectField } from './components/SelectField'
 import { Overview } from './views/Overview'
 import { AccountsPage, AuditPage, CertificatesPage, DomainsPage, NodesPage, SettingsPage } from './views/Operations'
 
 type AuthState = 'checking' | 'anonymous' | 'authenticated'
-
 const emptyDashboard: DashboardData = { nodes: [], domains: [], certificates: [], audit: [], jobs: [], server_time: new Date().toISOString() }
 
 export default function App() {
+  const { t, theme, language, effectiveLanguage, setTheme, setLanguage } = usePreferences()
   const [auth, setAuth] = useState<AuthState>(getToken() ? 'checking' : 'anonymous')
   const [page, setPage] = useState<PageKey>('overview')
   const [data, setData] = useState<DashboardData>(emptyDashboard)
@@ -23,13 +25,23 @@ export default function App() {
   const [loading, setLoading] = useState(true)
   const [mobileMenu, setMobileMenu] = useState(false)
   const [domainDrawer, setDomainDrawer] = useState(false)
+  const [certificateDialog, setCertificateDialog] = useState(false)
   const [nodeDialog, setNodeDialog] = useState(false)
   const [nodeResult, setNodeResult] = useState<EnrollmentResponse>()
   const [dnsDialog, setDNSDialog] = useState(false)
+  const [editingDNS, setEditingDNS] = useState<DNSAccount>()
   const [acmeDialog, setACMEDialog] = useState(false)
+  const [editingACME, setEditingACME] = useState<ACMEAccount>()
+  const [passwordDialog, setPasswordDialog] = useState(false)
   const [syncCertificate, setSyncCertificate] = useState<CertificateRecord>()
+  const [automationCertificate, setAutomationCertificate] = useState<CertificateRecord>()
+  const [confirmCertificate, setConfirmCertificate] = useState<CertificateRecord>()
   const [confirmDomain, setConfirmDomain] = useState<DomainRecord>()
   const [confirmNode, setConfirmNode] = useState<NodeRecord>()
+  const [managedNode, setManagedNode] = useState<NodeRecord>()
+  const [releaseInfo, setReleaseInfo] = useState<ReleaseInfo>()
+  const [uninstallCommand, setUninstallCommand] = useState<UninstallCommand>()
+  const [confirmTakeover, setConfirmTakeover] = useState<{ node: NodeRecord; site: NginxSiteMeta }>()
   const [busy, setBusy] = useState('')
   const [toasts, setToasts] = useState<ToastMessage[]>([])
 
@@ -40,44 +52,27 @@ export default function App() {
   }, [])
 
   const logout = useCallback(() => {
-    clearToken()
-    setAuth('anonymous')
-    setData(emptyDashboard)
-    setMobileMenu(false)
+    clearToken(); setAuth('anonymous'); setData(emptyDashboard); setMobileMenu(false)
   }, [])
 
   const handleError = useCallback((error: unknown, fallback: string) => {
-    if (error instanceof APIError && error.status === 401) {
-      logout()
-      return
-    }
-    toast('error', error instanceof Error ? error.message : fallback)
-  }, [logout, toast])
+    if (error instanceof APIError && error.status === 401) { logout(); return }
+    const message = error instanceof Error && effectiveLanguage === 'zh' ? error.message : fallback
+    toast('error', message)
+  }, [effectiveLanguage, logout, toast])
 
   const refresh = useCallback(async (silent = false) => {
     if (!silent) setLoading(true)
     try {
       const [dashboard, dns, acme] = await Promise.all([api.dashboard(), api.dnsAccounts(), api.acmeAccounts()])
-      setData(dashboard)
-      setDNSAccounts(dns)
-      setACMEAccounts(acme)
-    } catch (error) {
-      handleError(error, '无法读取主控状态')
-    } finally {
-      if (!silent) setLoading(false)
-    }
-  }, [handleError])
+      setData(dashboard); setDNSAccounts(dns); setACMEAccounts(acme)
+    } catch (error) { handleError(error, t('error.dashboard')) } finally { if (!silent) setLoading(false) }
+  }, [handleError, t])
 
-  const verify = useCallback(async () => {
-    await api.verifySession()
-    setAuth('authenticated')
-  }, [])
+  const verify = useCallback(async () => { await api.verifySession(); setAuth('authenticated') }, [])
+  const login = useCallback(async (password: string) => { const session = await api.login(password); setToken(session.token); setAuth('authenticated') }, [])
 
-  useEffect(() => {
-    if (auth !== 'checking') return
-    verify().catch(() => logout())
-  }, [auth, verify, logout])
-
+  useEffect(() => { if (auth === 'checking') verify().catch(() => logout()) }, [auth, verify, logout])
   useEffect(() => {
     if (auth !== 'authenticated') return
     void refresh()
@@ -86,112 +81,192 @@ export default function App() {
   }, [auth, refresh])
 
   useEffect(() => {
-    document.body.classList.toggle('overlay-active', domainDrawer || nodeDialog || dnsDialog || acmeDialog || Boolean(syncCertificate) || Boolean(confirmDomain) || Boolean(confirmNode) || mobileMenu)
-    return () => document.body.classList.remove('overlay-active')
-  }, [domainDrawer, nodeDialog, dnsDialog, acmeDialog, syncCertificate, confirmDomain, confirmNode, mobileMenu])
+    window.scrollTo(0, 0)
+    document.querySelector<HTMLElement>('.workspace')?.scrollTo(0, 0)
+  }, [page])
+
+  const overlayActive = domainDrawer || certificateDialog || nodeDialog || dnsDialog || acmeDialog || passwordDialog || Boolean(syncCertificate) || Boolean(automationCertificate) || Boolean(confirmCertificate) || Boolean(confirmDomain) || Boolean(confirmNode) || Boolean(managedNode) || Boolean(confirmTakeover) || mobileMenu
+  useEffect(() => {
+    if (!overlayActive) return
+
+    const root = document.documentElement
+    const body = document.body
+    const workspace = document.querySelector<HTMLElement>('.workspace')
+    const pageScroll = window.scrollY
+    const workspaceScroll = workspace?.scrollTop ?? 0
+    const previousBodyStyle = {
+      position: body.style.position,
+      top: body.style.top,
+      left: body.style.left,
+      right: body.style.right,
+      width: body.style.width,
+    }
+
+    root.classList.add('overlay-active')
+    body.classList.add('overlay-active')
+    body.style.position = 'fixed'
+    body.style.top = `-${pageScroll}px`
+    body.style.left = '0'
+    body.style.right = '0'
+    body.style.width = '100%'
+
+    return () => {
+      root.classList.remove('overlay-active')
+      body.classList.remove('overlay-active')
+      body.style.position = previousBodyStyle.position
+      body.style.top = previousBodyStyle.top
+      body.style.left = previousBodyStyle.left
+      body.style.right = previousBodyStyle.right
+      body.style.width = previousBodyStyle.width
+      window.scrollTo(0, pageScroll)
+      workspace?.scrollTo(0, workspaceScroll)
+    }
+  }, [overlayActive])
 
   const allHealthy = useMemo(() => data.nodes.length > 0 && data.nodes.every((node) => node.status === 'online' && node.nginx_healthy), [data.nodes])
 
   async function createDomain(submission: DomainSubmission) {
     setBusy('domain')
     try {
-      const input = { ...submission.input }
-      if (input.certificate_mode === 'upload' && submission.fullchain && submission.privkey) {
-        const certificate = await api.uploadCertificate(input.domain, submission.fullchain, submission.privkey)
-        input.certificate_id = certificate.id
-      }
-      await api.createDomain(input)
-      setDomainDrawer(false)
-      setPage('domains')
-      toast('success', '域名已加入部署队列；节点将先验证 Nginx 配置。')
-      await refresh(true)
-    } catch (error) {
-      handleError(error, '无法创建域名')
-      throw error
-    } finally {
-      setBusy('')
-    }
+      await api.createDomain(submission.input)
+      setDomainDrawer(false); setPage('domains'); toast('success', t('toast.domainQueued')); await refresh(true)
+    } catch (error) { handleError(error, t('error.domain')) } finally { setBusy('') }
+  }
+
+  async function adoptDomain(node: NodeRecord, site: NginxSiteMeta, takeover = false) {
+    if (takeover) { setConfirmTakeover({ node, site }); return }
+    setBusy(`adopt-${node.id}-${site.domain}`)
+    try { await api.adoptDomain({ node_id: node.id, domain: site.domain, config_path: site.config_path, takeover: false }); toast('success', t('toast.domainObserved')); await refresh(true) }
+    catch (error) { handleError(error, t('error.adopt')) } finally { setBusy('') }
+  }
+
+  async function takeoverDomain() {
+    if (!confirmTakeover) return
+    const { node, site } = confirmTakeover
+    setBusy('takeover')
+    try { await api.adoptDomain({ node_id: node.id, domain: site.domain, config_path: site.config_path, takeover: true }); setConfirmTakeover(undefined); toast('success', t('toast.domainTakeoverQueued')); await refresh(true) }
+    catch (error) { handleError(error, t('error.takeover')) } finally { setBusy('') }
+  }
+
+  async function submitCertificate(submission: CertificateSubmission) {
+    setBusy('certificate')
+    try {
+      if (submission.mode === 'upload') { await api.uploadCertificate(submission.input, submission.fullchain, submission.privkey); toast('success', t('toast.certUploaded')) }
+      else if (submission.mode === 'issue') { await api.issueCertificate(submission.input); toast('success', t('toast.certQueued')) }
+      else { await api.importCertificate(submission.input); toast('success', t('toast.certQueued')) }
+      setCertificateDialog(false); setPage('certificates'); await refresh(true)
+    } catch (error) { handleError(error, t('error.certificate')) } finally { setBusy('') }
+  }
+
+  async function saveCertificateAutomation(input: CertificateAutomationSettingsInput) {
+    if (!automationCertificate) return
+    setBusy('certificate-automation')
+    try { const updated = await api.updateCertificateAutomation(automationCertificate.id, input); setData((current) => ({ ...current, certificates: current.certificates.map((item) => item.id === updated.id ? updated : item) })); setAutomationCertificate(undefined); toast('success', t('toast.certificateAutomationSaved')); await refresh(true) }
+    catch (error) { handleError(error, t('error.certificateAutomation')) } finally { setBusy('') }
   }
 
   async function createNode(name: string) {
     setBusy('node')
-    try {
-      setNodeResult(await api.createEnrollment(name.trim()))
-    } catch (error) {
-      handleError(error, '无法生成节点命令')
-    } finally {
-      setBusy('')
-    }
+    try { setNodeResult(await api.createEnrollment(name.trim())) } catch (error) { handleError(error, t('error.node')) } finally { setBusy('') }
   }
 
-  async function createDNS(input: { name: string; provider: string; credentials: Record<string, string> }) {
+  async function saveDNS(input: DNSAccountInput, accountID?: string) {
     setBusy('dns')
-    try {
-      await api.createDNSAccount(input)
-      setDNSDialog(false)
-      toast('success', 'DNS 账户已加密保存。')
-      await refresh(true)
-    } catch (error) {
-      handleError(error, '无法保存 DNS 账户')
-    } finally { setBusy('') }
+    try { if (accountID) await api.updateDNSAccount(accountID, input); else await api.createDNSAccount(input); setDNSDialog(false); setEditingDNS(undefined); toast('success', t('toast.dnsSaved')); await refresh(true) }
+    catch (error) { handleError(error, t('error.dns')) } finally { setBusy('') }
   }
 
-  async function createACME(input: { name: string; email: string; directory_url: string; eab_kid: string; eab_hmac: string }) {
+  async function saveACME(input: ACMEAccountInput, accountID?: string) {
     setBusy('acme')
-    try {
-      await api.createACMEAccount(input)
-      setACMEDialog(false)
-      toast('success', 'ACME 账户已保存。')
-      await refresh(true)
-    } catch (error) {
-      handleError(error, '无法保存 ACME 账户')
-    } finally { setBusy('') }
+    try { if (accountID) await api.updateACMEAccount(accountID, input); else await api.createACMEAccount(input); setACMEDialog(false); setEditingACME(undefined); toast('success', t('toast.acmeSaved')); await refresh(true) }
+    catch (error) { handleError(error, t('error.acme')) } finally { setBusy('') }
+  }
+
+  async function changePassword(currentPassword: string, newPassword: string) {
+    setBusy('password')
+    try { const session = await api.changeAdminPassword(currentPassword, newPassword); setToken(session.token); setPasswordDialog(false); toast('success', t('toast.passwordChanged')) }
+    catch (error) { handleError(error, t('error.password')) } finally { setBusy('') }
   }
 
   async function deleteDomain() {
     if (!confirmDomain) return
     setBusy('confirm')
-    try {
-      await api.deleteDomain(confirmDomain.id)
-      toast('info', '域名移除任务已排队，配置通过验证后才会重载。')
-      setConfirmDomain(undefined)
-      await refresh(true)
-    } catch (error) { handleError(error, '无法移除域名') } finally { setBusy('') }
+    try { const response = await api.deleteDomain(confirmDomain.id); toast('info', t(response.queued ? 'toast.domainRemoved' : 'toast.observationRemoved')); setConfirmDomain(undefined); await refresh(true) }
+    catch (error) { handleError(error, t('error.removeDomain')) } finally { setBusy('') }
   }
 
   async function revokeNode() {
     if (!confirmNode) return
     setBusy('confirm')
-    try {
-      await api.revokeNode(confirmNode.id)
-      toast('success', '节点凭据已撤销。')
-      setConfirmNode(undefined)
-      await refresh(true)
-    } catch (error) { handleError(error, '无法撤销节点') } finally { setBusy('') }
+    try { await api.revokeNode(confirmNode.id); toast('success', t('toast.nodeRevoked')); setConfirmNode(undefined); await refresh(true) }
+    catch (error) { handleError(error, t('error.revokeNode')) } finally { setBusy('') }
   }
 
-  async function renewCertificate(certificate: CertificateRecord) {
-    setBusy(`renew-${certificate.id}`)
+  async function openNodeManager(node: NodeRecord) {
+    setManagedNode(node); setReleaseInfo(undefined); setUninstallCommand(undefined)
+    setBusy('node-details')
+    const [release, uninstall] = await Promise.allSettled([api.releaseInfo(), api.nodeUninstallCommand(node.id)])
+    if (release.status === 'fulfilled') setReleaseInfo(release.value)
+    else handleError(release.reason, t('error.release'))
+    if (uninstall.status === 'fulfilled') setUninstallCommand(uninstall.value)
+    else handleError(uninstall.reason, t('error.uninstallCommand'))
+    setBusy('')
+  }
+
+  async function checkRelease() {
+    setBusy('release')
+    try { setReleaseInfo(await api.releaseInfo()); toast('info', t('toast.releaseChecked')) }
+    catch (error) { handleError(error, t('error.release')) } finally { setBusy('') }
+  }
+
+  async function renameManagedNode(name: string) {
+    if (!managedNode) return
+    setBusy('rename')
+    try { const updated = await api.renameNode(managedNode.id, name); setManagedNode(updated); setData((current) => ({ ...current, nodes: current.nodes.map((node) => node.id === updated.id ? updated : node) })); toast('success', t('toast.nodeRenamed')) }
+    catch (error) { handleError(error, t('error.renameNode')) } finally { setBusy('') }
+  }
+
+  async function updateManagedNodeAtlas() {
+    if (!managedNode) return
+    setBusy('atlas')
+    try { await api.updateNodeAtlas(managedNode.id); toast('success', t('toast.atlasUpdateQueued')); setManagedNode(undefined); await refresh(true) }
+    catch (error) { handleError(error, t('error.atlasUpdate')) } finally { setBusy('') }
+  }
+
+  async function updateManagedNodeSystem() {
+    if (!managedNode) return
+    setBusy('system')
+    try { await api.updateNodeSystem(managedNode.id); toast('success', t('toast.systemUpdateQueued')); setManagedNode(undefined); await refresh(true) }
+    catch (error) { handleError(error, t('error.systemUpdate')) } finally { setBusy('') }
+  }
+
+  async function setCertificateAutoRenew(certificate: CertificateRecord, enabled: boolean) {
+    setBusy(`auto-renew-${certificate.id}`)
     try {
-      await api.renewCertificate(certificate.id)
-      toast('success', `${certificate.domain} 已加入 DNS-01 续期队列。`)
+      const updated = await api.setCertificateAutoRenew(certificate.id, enabled)
+      setData((current) => ({ ...current, certificates: current.certificates.map((item) => item.id === updated.id ? updated : item) }))
+      toast('success', t(enabled ? 'toast.autoRenewEnabled' : 'toast.autoRenewDisabled', { domain: certificate.domain }))
       await refresh(true)
-    } catch (error) { handleError(error, '无法创建续期任务') } finally { setBusy('') }
+    } catch (error) { handleError(error, t('error.autoRenew')) } finally { setBusy('') }
+  }
+
+  async function renewCertificate() {
+    if (!confirmCertificate) return
+    const certificate = confirmCertificate
+    setBusy(`renew-${certificate.id}`)
+    try { await api.renewCertificate(certificate.id); setConfirmCertificate(undefined); toast('success', t('toast.renewQueued', { domain: certificate.domain })); await refresh(true) }
+    catch (error) { handleError(error, t('error.renew')) } finally { setBusy('') }
   }
 
   async function syncSelectedNodes(nodeIDs: string[]) {
     if (!syncCertificate) return
     setBusy('sync')
-    try {
-      await api.syncCertificate(syncCertificate.id, nodeIDs)
-      toast('success', `证书已加入 ${nodeIDs.length} 个节点的同步队列。`)
-      setSyncCertificate(undefined)
-      await refresh(true)
-    } catch (error) { handleError(error, '无法创建同步任务') } finally { setBusy('') }
+    try { await api.syncCertificate(syncCertificate.id, nodeIDs); toast('success', t('toast.syncQueued', { count: nodeIDs.length })); setSyncCertificate(undefined); await refresh(true) }
+    catch (error) { handleError(error, t('error.sync')) } finally { setBusy('') }
   }
 
-  if (auth === 'checking') return <div className="app-loading"><LoadingState label="正在验证管理员会话" /></div>
-  if (auth === 'anonymous') return <LoginGate onVerify={verify} />
+  if (auth === 'checking') return <div className="app-loading"><LoadingState /></div>
+  if (auth === 'anonymous') return <LoginGate onLogin={login} />
 
   return (
     <div className="app-shell">
@@ -199,37 +274,37 @@ export default function App() {
       <MobileHeader onMenu={() => setMobileMenu(true)} />
       <div className="workspace">
         <header className="command-bar">
-          <span className="system-state"><span className={`pulse-dot ${allHealthy ? '' : 'pulse-warning'}`} />{allHealthy ? '所有系统正常运行' : data.nodes.length === 0 ? '等待添加首个节点' : '部分节点需要检查'}</span>
-          <div className="command-proof"><Icon name="terminal" size={17} /><code>nginx -t</code><span><Icon name={allHealthy ? 'check' : 'warning'} size={16} />{allHealthy ? '配置已验证' : '状态已同步'}</span><button onClick={() => void refresh()} aria-label="立即刷新"><Icon name="refresh" size={18} /></button></div>
+          <span className="system-state"><span className={`pulse-dot ${allHealthy ? '' : 'pulse-warning'}`} />{allHealthy ? t('app.allHealthy') : data.nodes.length === 0 ? t('app.waitingNode') : t('app.needsAttention')}</span>
+          <div className="command-tools">
+            <div className="command-proof"><Icon name="terminal" size={18} weight="light" /><code>nginx -t</code><span><Icon name={allHealthy ? 'check' : 'warning'} size={16} />{allHealthy ? t('app.configVerified') : t('app.statusSynced')}</span><button onClick={() => void refresh()} aria-label={t('app.refreshNow')}><Icon name="refresh" size={18} /></button></div>
+            <SelectField ariaLabel={t('app.language')} value={language} onChange={(value) => setLanguage(value as LanguageMode)} icon="language" className="utility-select" options={[{ value: 'system', label: t('common.system') }, { value: 'zh', label: t('common.chinese') }, { value: 'en', label: t('common.english') }]} />
+            <SelectField ariaLabel={t('app.theme')} value={theme} onChange={(value) => setTheme(value as ThemeMode)} icon={theme === 'light' ? 'sun' : theme === 'dark' ? 'moon' : 'system'} className="utility-select" options={[{ value: 'system', label: t('common.system') }, { value: 'light', label: t('common.light') }, { value: 'dark', label: t('common.dark') }]} />
+          </div>
         </header>
-        <main className="workspace-content">
-          {loading ? <LoadingState /> : renderPage(page, {
-            data,
-            dnsAccounts,
-            acmeAccounts,
-            onAddDomain: () => setDomainDrawer(true),
-            onPage: setPage,
-            onDeleteDomain: setConfirmDomain,
-            onAddNode: () => { setNodeResult(undefined); setNodeDialog(true) },
-            onRevokeNode: setConfirmNode,
-            onRenew: (certificate) => void renewCertificate(certificate),
-            onSync: setSyncCertificate,
-            onAddDNS: () => setDNSDialog(true),
-            onAddACME: () => setACMEDialog(true),
-            onLogout: logout,
-          })}
-        </main>
+        <main className="workspace-content">{loading ? <LoadingState /> : renderPage(page, {
+          data, dnsAccounts, acmeAccounts, onAddDomain: () => setDomainDrawer(true), onAddCertificate: () => setCertificateDialog(true), onPage: setPage,
+          onDeleteDomain: setConfirmDomain, onAdoptDomain: adoptDomain, onAddNode: () => { setNodeResult(undefined); setNodeDialog(true) }, onRevokeNode: setConfirmNode, onManageNode: (node) => void openNodeManager(node),
+          onRenew: setConfirmCertificate, onToggleAutoRenew: (certificate, enabled) => void setCertificateAutoRenew(certificate, enabled), onSync: setSyncCertificate, onEditCertificate: setAutomationCertificate, busy,
+          onAddDNS: () => { setEditingDNS(undefined); setDNSDialog(true) }, onEditDNS: (account) => { setEditingDNS(account); setDNSDialog(true) },
+          onAddACME: () => { setEditingACME(undefined); setACMEDialog(true) }, onEditACME: (account) => { setEditingACME(account); setACMEDialog(true) },
+          onPassword: () => setPasswordDialog(true), onLogout: logout,
+        })}</main>
       </div>
       <MobileNavigation page={page} onChange={setPage} />
       <MobileMenu open={mobileMenu} page={page} onChange={setPage} onClose={() => setMobileMenu(false)} onLogout={logout} />
-
       <DomainDrawer open={domainDrawer} nodes={data.nodes} certificates={data.certificates} dnsAccounts={dnsAccounts} acmeAccounts={acmeAccounts} busy={busy === 'domain'} onClose={() => !busy && setDomainDrawer(false)} onSubmit={createDomain} />
+      <CertificateDialog open={certificateDialog} nodes={data.nodes} dnsAccounts={dnsAccounts} acmeAccounts={acmeAccounts} busy={busy === 'certificate'} onClose={() => !busy && setCertificateDialog(false)} onSubmit={submitCertificate} />
+      <CertificateAutomationDialog open={Boolean(automationCertificate)} certificate={automationCertificate} nodes={data.nodes} dnsAccounts={dnsAccounts} acmeAccounts={acmeAccounts} busy={busy === 'certificate-automation'} onClose={() => !busy && setAutomationCertificate(undefined)} onSave={saveCertificateAutomation} />
       <NodeDialog open={nodeDialog} busy={busy === 'node'} result={nodeResult} onClose={() => { setNodeDialog(false); setNodeResult(undefined) }} onCreate={createNode} />
-      <DNSAccountDialog open={dnsDialog} busy={busy === 'dns'} onClose={() => setDNSDialog(false)} onCreate={createDNS} />
-      <ACMEAccountDialog open={acmeDialog} busy={busy === 'acme'} onClose={() => setACMEDialog(false)} onCreate={createACME} />
+      <NodeManageDialog open={Boolean(managedNode)} node={managedNode} release={releaseInfo} uninstall={uninstallCommand} busy={busy} onClose={() => !busy && setManagedNode(undefined)} onRename={renameManagedNode} onCheckRelease={checkRelease} onUpdateAtlas={updateManagedNodeAtlas} onUpdateSystem={updateManagedNodeSystem} />
+      <DNSAccountDialog open={dnsDialog} account={editingDNS} busy={busy === 'dns'} onClose={() => { setDNSDialog(false); setEditingDNS(undefined) }} onSave={saveDNS} />
+      <ACMEAccountDialog open={acmeDialog} account={editingACME} busy={busy === 'acme'} onClose={() => { setACMEDialog(false); setEditingACME(undefined) }} onSave={saveACME} />
+      <PasswordDialog open={passwordDialog} busy={busy === 'password'} onClose={() => setPasswordDialog(false)} onSave={changePassword} />
       <SyncDialog open={Boolean(syncCertificate)} certificate={syncCertificate} nodes={data.nodes} busy={busy === 'sync'} onClose={() => setSyncCertificate(undefined)} onSync={syncSelectedNodes} />
-      <ConfirmDialog open={Boolean(confirmDomain)} title="移除域名配置？" description={`节点将删除 ${confirmDomain?.name ?? ''} 的托管配置，通过 nginx -t 后才会重载。证书文件不会自动删除。`} confirmLabel="移除域名" onCancel={() => setConfirmDomain(undefined)} onConfirm={() => void deleteDomain()} busy={busy === 'confirm'} />
-      <ConfirmDialog open={Boolean(confirmNode)} title="撤销节点访问？" description={`${confirmNode?.name ?? ''} 将无法继续领取任务。节点本地现有 Nginx 配置与证书不会被删除。`} confirmLabel="撤销节点" onCancel={() => setConfirmNode(undefined)} onConfirm={() => void revokeNode()} busy={busy === 'confirm'} />
+      <ConfirmDialog open={Boolean(confirmCertificate)} title={t('certificate.renewConfirmTitle')} description={t('certificate.renewConfirmDescription', { domain: confirmCertificate?.domain ?? '' })} confirmLabel={t('certificate.renewConfirmAction')} onCancel={() => setConfirmCertificate(undefined)} onConfirm={() => void renewCertificate()} busy={busy === `renew-${confirmCertificate?.id}`} busyLabel={t('common.queueing')} tone="primary" icon="refresh" />
+      <ConfirmDialog open={Boolean(confirmDomain)} title={t(confirmDomain?.observed_only ? 'domain.removeObservedTitle' : confirmDomain?.taken_over ? 'domain.removeTakenOverTitle' : 'domain.removeTitle')} description={t(confirmDomain?.observed_only ? 'domain.removeObservedDescription' : confirmDomain?.taken_over ? 'domain.removeTakenOverDescription' : 'domain.removeDescription', { domain: confirmDomain?.name ?? '' })} confirmLabel={t(confirmDomain?.observed_only ? 'domain.stopManaging' : confirmDomain?.taken_over ? 'domain.restoreOriginal' : 'domain.removeAction')} onCancel={() => setConfirmDomain(undefined)} onConfirm={() => void deleteDomain()} busy={busy === 'confirm'} />
+      <ConfirmDialog open={Boolean(confirmNode)} title={t('nodes.revokeTitle')} description={t('nodes.revokeDescription', { node: confirmNode?.name ?? '' })} confirmLabel={t('nodes.revoke')} onCancel={() => setConfirmNode(undefined)} onConfirm={() => void revokeNode()} busy={busy === 'confirm'} />
+      <ConfirmDialog open={Boolean(confirmTakeover)} title={t('domain.takeoverConfirmTitle')} description={t('domain.takeoverConfirmDescription', { domain: confirmTakeover?.site.domain ?? '', path: confirmTakeover?.site.config_path ?? '' })} confirmLabel={t('domain.takeoverConfirmAction')} onCancel={() => setConfirmTakeover(undefined)} onConfirm={() => void takeoverDomain()} busy={busy === 'takeover'} busyLabel={t('common.queueing')} tone="primary" icon="download" />
       <ToastRegion messages={toasts} dismiss={(id) => setToasts((items) => items.filter((item) => item.id !== id))} />
     </div>
   )
@@ -240,25 +315,34 @@ interface PageProps {
   dnsAccounts: DNSAccount[]
   acmeAccounts: ACMEAccount[]
   onAddDomain: () => void
+  onAddCertificate: () => void
   onPage: (page: PageKey) => void
   onDeleteDomain: (domain: DomainRecord) => void
+  onAdoptDomain: (node: NodeRecord, site: NginxSiteMeta, takeover: boolean) => void
   onAddNode: () => void
   onRevokeNode: (node: NodeRecord) => void
+  onManageNode: (node: NodeRecord) => void
   onRenew: (certificate: CertificateRecord) => void
+  onToggleAutoRenew: (certificate: CertificateRecord, enabled: boolean) => void
   onSync: (certificate: CertificateRecord) => void
+  onEditCertificate: (certificate: CertificateRecord) => void
+  busy: string
   onAddDNS: () => void
+  onEditDNS: (account: DNSAccount) => void
   onAddACME: () => void
+  onEditACME: (account: ACMEAccount) => void
+  onPassword: () => void
   onLogout: () => void
 }
 
 function renderPage(page: PageKey, props: PageProps) {
   switch (page) {
-    case 'overview': return <Overview data={props.data} onAddDomain={props.onAddDomain} onNavigate={props.onPage} />
-    case 'domains': return <DomainsPage domains={props.data.domains} onAdd={props.onAddDomain} onDelete={props.onDeleteDomain} />
-    case 'certificates': return <CertificatesPage certificates={props.data.certificates} nodes={props.data.nodes} onRenew={props.onRenew} onSync={props.onSync} />
-    case 'nodes': return <NodesPage nodes={props.data.nodes} onAdd={props.onAddNode} onRevoke={props.onRevokeNode} />
-    case 'accounts': return <AccountsPage dnsAccounts={props.dnsAccounts} acmeAccounts={props.acmeAccounts} onAddDNS={props.onAddDNS} onAddACME={props.onAddACME} />
+    case 'overview': return <Overview data={props.data} onNavigate={props.onPage} />
+    case 'domains': return <DomainsPage domains={props.data.domains} nodes={props.data.nodes} onAdd={props.onAddDomain} onDelete={props.onDeleteDomain} onAdopt={props.onAdoptDomain} />
+    case 'certificates': return <CertificatesPage certificates={props.data.certificates} nodes={props.data.nodes} onAdd={props.onAddCertificate} onRenew={props.onRenew} onToggleAutoRenew={props.onToggleAutoRenew} onSync={props.onSync} onEdit={props.onEditCertificate} busy={props.busy} />
+    case 'nodes': return <NodesPage nodes={props.data.nodes} onAdd={props.onAddNode} onRevoke={props.onRevokeNode} onManage={props.onManageNode} />
+    case 'accounts': return <AccountsPage dnsAccounts={props.dnsAccounts} acmeAccounts={props.acmeAccounts} onAddDNS={props.onAddDNS} onAddACME={props.onAddACME} onEditDNS={props.onEditDNS} onEditACME={props.onEditACME} />
     case 'audit': return <AuditPage events={props.data.audit} domains={props.data.domains} nodes={props.data.nodes} />
-    case 'settings': return <SettingsPage onLogout={props.onLogout} />
+    case 'settings': return <SettingsPage onPassword={props.onPassword} onLogout={props.onLogout} />
   }
 }

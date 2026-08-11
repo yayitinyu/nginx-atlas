@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/mail"
 	"net/url"
+	"path"
 	"regexp"
 	"sort"
 	"strconv"
@@ -41,24 +42,26 @@ type domainView struct {
 }
 
 type certificateView struct {
-	ID              string                  `json:"id"`
-	Domain          string                  `json:"domain"`
-	Source          model.CertificateSource `json:"source"`
-	Fingerprint     string                  `json:"fingerprint_sha256"`
-	Issuer          string                  `json:"issuer"`
-	SerialNumber    string                  `json:"serial_number"`
-	NotBefore       time.Time               `json:"not_before"`
-	NotAfter        time.Time               `json:"not_after"`
-	DNSNames        []string                `json:"dns_names"`
-	AutoRenew       bool                    `json:"auto_renew"`
-	ACMEAccountID   string                  `json:"acme_account_id,omitempty"`
-	DNSAccountID    string                  `json:"dns_account_id,omitempty"`
-	IssuerNodeID    string                  `json:"issuer_node_id,omitempty"`
-	DeployedNodeIDs []string                `json:"deployed_node_ids"`
-	DaysRemaining   int                     `json:"days_remaining"`
-	Status          string                  `json:"status"`
-	CreatedAt       time.Time               `json:"created_at"`
-	UpdatedAt       time.Time               `json:"updated_at"`
+	ID                string                  `json:"id"`
+	Domain            string                  `json:"domain"`
+	Source            model.CertificateSource `json:"source"`
+	Fingerprint       string                  `json:"fingerprint_sha256"`
+	Issuer            string                  `json:"issuer"`
+	SerialNumber      string                  `json:"serial_number"`
+	NotBefore         time.Time               `json:"not_before"`
+	NotAfter          time.Time               `json:"not_after"`
+	DNSNames          []string                `json:"dns_names"`
+	RequestedDNSNames []string                `json:"requested_dns_names"`
+	AutoRenew         bool                    `json:"auto_renew"`
+	RenewBeforeDays   int                     `json:"renew_before_days"`
+	ACMEAccountID     string                  `json:"acme_account_id,omitempty"`
+	DNSAccountID      string                  `json:"dns_account_id,omitempty"`
+	IssuerNodeID      string                  `json:"issuer_node_id,omitempty"`
+	DeployedNodeIDs   []string                `json:"deployed_node_ids"`
+	DaysRemaining     int                     `json:"days_remaining"`
+	Status            string                  `json:"status"`
+	CreatedAt         time.Time               `json:"created_at"`
+	UpdatedAt         time.Time               `json:"updated_at"`
 }
 
 type dnsAccountView struct {
@@ -71,9 +74,10 @@ type dnsAccountView struct {
 }
 
 type dnsAccountRequest struct {
-	Name        string            `json:"name"`
-	Provider    string            `json:"provider"`
-	Credentials map[string]string `json:"credentials"`
+	Name            string            `json:"name"`
+	Provider        string            `json:"provider"`
+	Credentials     map[string]string `json:"credentials"`
+	KeepCredentials bool              `json:"keep_credentials"`
 }
 
 type acmeAccountView struct {
@@ -216,17 +220,22 @@ func (s *Server) handleRevokeNode(w http.ResponseWriter, r *http.Request) {
 }
 
 type createDomainRequest struct {
-	Domain          string   `json:"domain"`
-	NodeID          string   `json:"node_id"`
-	UpstreamHost    string   `json:"upstream_host"`
-	UpstreamPort    int      `json:"upstream_port"`
-	CertificateMode string   `json:"certificate_mode"`
-	CertificateID   string   `json:"certificate_id"`
-	ACMEAccountID   string   `json:"acme_account_id"`
-	DNSAccountID    string   `json:"dns_account_id"`
-	AutoRenew       bool     `json:"auto_renew"`
-	RenewBeforeDays int      `json:"renew_before_days"`
-	SyncNodeIDs     []string `json:"sync_node_ids"`
+	Domain                  string   `json:"domain"`
+	NodeID                  string   `json:"node_id"`
+	UpstreamHost            string   `json:"upstream_host"`
+	UpstreamPort            int      `json:"upstream_port"`
+	CertificateMode         string   `json:"certificate_mode"`
+	CertificateID           string   `json:"certificate_id"`
+	ACMEAccountID           string   `json:"acme_account_id"`
+	DNSAccountID            string   `json:"dns_account_id"`
+	AutoRenew               bool     `json:"auto_renew"`
+	RenewBeforeDays         int      `json:"renew_before_days"`
+	SyncNodeIDs             []string `json:"sync_node_ids"`
+	CloudflareEnabled       bool     `json:"cloudflare_enabled"`
+	CloudflareDNSAccountID  string   `json:"cloudflare_dns_account_id"`
+	CloudflareProxied       bool     `json:"cloudflare_proxied"`
+	CloudflareRecordType    string   `json:"cloudflare_record_type"`
+	CloudflareRecordContent string   `json:"cloudflare_record_content"`
 }
 
 type applyDomainSpec struct {
@@ -234,10 +243,32 @@ type applyDomainSpec struct {
 	CertificateID       string `json:"certificate_id,omitempty"`
 	UseLocalCertificate bool   `json:"use_local_certificate"`
 	CaptureCertificate  bool   `json:"capture_certificate"`
+	ReplaceConfigPath   string `json:"replace_config_path,omitempty"`
 }
 
 type issueCertificateSpec struct {
-	DomainID string `json:"domain_id"`
+	DomainID        string   `json:"domain_id,omitempty"`
+	Domain          string   `json:"domain,omitempty"`
+	DNSNames        []string `json:"dns_names,omitempty"`
+	CertificateID   string   `json:"certificate_id,omitempty"`
+	ACMEAccountID   string   `json:"acme_account_id,omitempty"`
+	DNSAccountID    string   `json:"dns_account_id,omitempty"`
+	AutoRenew       bool     `json:"auto_renew"`
+	RenewBeforeDays int      `json:"renew_before_days"`
+	Install         bool     `json:"install"`
+	ReloadNginx     bool     `json:"reload_nginx"`
+	SyncNodeIDs     []string `json:"sync_node_ids,omitempty"`
+}
+
+type captureCertificateSpec struct {
+	DomainID        string   `json:"domain_id,omitempty"`
+	Domain          string   `json:"domain"`
+	CertificateID   string   `json:"certificate_id,omitempty"`
+	ACMEAccountID   string   `json:"acme_account_id,omitempty"`
+	DNSAccountID    string   `json:"dns_account_id,omitempty"`
+	AutoRenew       bool     `json:"auto_renew"`
+	RenewBeforeDays int      `json:"renew_before_days"`
+	SyncNodeIDs     []string `json:"sync_node_ids,omitempty"`
 }
 
 type syncCertificateSpec struct {
@@ -247,8 +278,9 @@ type syncCertificateSpec struct {
 }
 
 type deleteDomainSpec struct {
-	DomainID string `json:"domain_id"`
-	Domain   string `json:"domain"`
+	DomainID          string `json:"domain_id"`
+	Domain            string `json:"domain"`
+	RestoreConfigPath string `json:"restore_config_path,omitempty"`
 }
 
 func (s *Server) handleCreateDomain(w http.ResponseWriter, r *http.Request) {
@@ -271,6 +303,13 @@ func (s *Server) handleCreateDomain(w http.ResponseWriter, r *http.Request) {
 	if request.RenewBeforeDays < 7 || request.RenewBeforeDays > 60 {
 		writeError(w, http.StatusBadRequest, "自动续期阈值需为 7–60 天", "invalid_renewal_window", nil)
 		return
+	}
+	dependencies := s.store.Snapshot()
+	if request.CertificateMode == "acme" && request.ACMEAccountID == "" {
+		request.ACMEAccountID = firstACMEAccountID(dependencies)
+	}
+	if request.CertificateMode == "acme" && request.DNSAccountID == "" {
+		request.DNSAccountID = firstDNSAccountID(dependencies)
 	}
 	var source model.CertificateSource
 	switch request.CertificateMode {
@@ -300,6 +339,17 @@ func (s *Server) handleCreateDomain(w http.ResponseWriter, r *http.Request) {
 	if request.AutoRenew && source != "" && (request.ACMEAccountID == "" || request.DNSAccountID == "") {
 		writeError(w, http.StatusBadRequest, "自动续期需要 DNS 与 ACME 账户", "renewal_accounts_required", nil)
 		return
+	}
+	if request.CloudflareEnabled {
+		cloudflare, err := s.upsertCloudflareRecord(r.Context(), dependencies, request)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "无法创建或更新 Cloudflare DNS 记录", "cloudflare_record_unavailable", map[string]string{"reason": err.Error()})
+			return
+		}
+		request.CloudflareDNSAccountID = cloudflare.DNSAccountID
+		request.CloudflareRecordType = cloudflare.RecordType
+		request.CloudflareRecordContent = cloudflare.Content
+		request.CloudflareProxied = cloudflare.Proxied
 	}
 	domainID, err := id.New("dom")
 	if err != nil {
@@ -337,6 +387,7 @@ func (s *Server) handleCreateDomain(w http.ResponseWriter, r *http.Request) {
 		if request.CertificateID != "" && request.AutoRenew {
 			certificate := state.Certificates[request.CertificateID]
 			certificate.AutoRenew = true
+			certificate.RenewBeforeDays = request.RenewBeforeDays
 			certificate.ACMEAccountID = request.ACMEAccountID
 			certificate.DNSAccountID = request.DNSAccountID
 			certificate.UpdatedAt = now
@@ -353,11 +404,14 @@ func (s *Server) handleCreateDomain(w http.ResponseWriter, r *http.Request) {
 			ACMEAccountID: request.ACMEAccountID, DNSAccountID: request.DNSAccountID,
 			AutoRenew: request.AutoRenew, RenewBeforeDays: request.RenewBeforeDays,
 			SyncNodeIDs: syncNodeIDs, CreatedAt: now, UpdatedAt: now,
+			CloudflareEnabled: request.CloudflareEnabled, CloudflareDNSAccountID: request.CloudflareDNSAccountID,
+			CloudflareProxied: request.CloudflareProxied, CloudflareRecordType: request.CloudflareRecordType,
+			CloudflareRecordContent: request.CloudflareRecordContent,
 		}
 		state.Domains[domainID] = created
 		var job model.Job
 		if source == model.CertificateACME {
-			job, err = enqueueJob(state, request.NodeID, domainID, protocol.JobIssueCertificate, issueCertificateSpec{DomainID: domainID})
+			job, err = enqueueJob(state, request.NodeID, domainID, protocol.JobIssueCertificate, issueCertificateSpec{DomainID: domainID, DNSNames: []string{request.Domain}})
 		} else {
 			job, err = enqueueJob(state, request.NodeID, domainID, protocol.JobApplyDomain, applyDomainSpec{
 				DomainID: domainID, CertificateID: request.CertificateID,
@@ -387,14 +441,183 @@ func (s *Server) handleCreateDomain(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, created)
 }
 
+func firstACMEAccountID(state model.State) string {
+	ids := make([]string, 0, len(state.ACMEAccounts))
+	for id := range state.ACMEAccounts {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	if len(ids) == 0 {
+		return ""
+	}
+	return ids[0]
+}
+
+func firstDNSAccountID(state model.State) string {
+	ids := make([]string, 0, len(state.DNSAccounts))
+	for id := range state.DNSAccounts {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	if len(ids) == 0 {
+		return ""
+	}
+	return ids[0]
+}
+
+func (s *Server) handleAdoptDomain(w http.ResponseWriter, r *http.Request) {
+	var request struct {
+		NodeID     string `json:"node_id"`
+		Domain     string `json:"domain"`
+		ConfigPath string `json:"config_path"`
+		Takeover   bool   `json:"takeover"`
+	}
+	if !decodeJSON(w, r, &request) {
+		return
+	}
+	request.Domain = strings.ToLower(strings.TrimSpace(request.Domain))
+	request.ConfigPath = strings.TrimSpace(request.ConfigPath)
+	if _, err := nginxconfig.ConfigFileName(request.Domain); err != nil || len(request.ConfigPath) > 1024 || (request.Takeover && !validReportedTakeoverPath(request.ConfigPath)) {
+		writeError(w, http.StatusBadRequest, "节点域名或配置路径无效", "invalid_discovered_domain", nil)
+		return
+	}
+	domainID, err := id.New("dom")
+	if err != nil {
+		wrapStoreError(w, err)
+		return
+	}
+	now := time.Now().UTC()
+	var adopted model.Domain
+	err = s.store.Update(func(state *model.State) error {
+		node, ok := state.Nodes[request.NodeID]
+		if !ok || node.Status == model.NodeRevoked {
+			return fmt.Errorf("%w: node", errNotFound)
+		}
+		var discovered model.NginxSiteMeta
+		found := false
+		for _, site := range node.NginxSites {
+			if site.Domain == request.Domain && (request.ConfigPath == "" || site.ConfigPath == request.ConfigPath) {
+				discovered = site
+				found = true
+				break
+			}
+		}
+		if !found {
+			return errors.New("node has not reported this Nginx server block")
+		}
+		if request.Takeover {
+			if discovered.ManagedByAtlas {
+				return errors.New("the discovered rule is already managed by Atlas")
+			}
+			if err := nginxconfig.ValidateSite(nginxconfig.Site{
+				Domain: request.Domain, UpstreamHost: discovered.UpstreamHost, UpstreamPort: discovered.UpstreamPort,
+				TLS: discovered.TLS, CertificateDir: "/etc/ssl/" + request.Domain,
+			}); err != nil {
+				return fmt.Errorf("the discovered rule cannot be safely rendered: %w", err)
+			}
+			if discovered.TLS && !nodeHasValidCertificate(node, request.Domain) {
+				return errors.New("a valid /etc/ssl/<domain> certificate is required before takeover")
+			}
+		}
+		for _, domain := range state.Domains {
+			if domain.Name == request.Domain {
+				return errConflict
+			}
+		}
+		var source model.CertificateSource
+		if discovered.TLS {
+			source = model.CertificateLocal
+		}
+		adopted = model.Domain{
+			ID: domainID, Name: request.Domain, NodeID: request.NodeID,
+			UpstreamHost: discovered.UpstreamHost, UpstreamPort: discovered.UpstreamPort,
+			CertificateMode: source, RenewBeforeDays: 30, Enabled: true,
+			ObservedOnly: !request.Takeover, TakenOver: request.Takeover,
+			ConfigPath: discovered.ConfigPath, CreatedAt: now, UpdatedAt: now,
+		}
+		state.Domains[adopted.ID] = adopted
+		if request.Takeover {
+			job, err := enqueueJob(state, node.ID, adopted.ID, protocol.JobApplyDomain, applyDomainSpec{
+				DomainID: adopted.ID, UseLocalCertificate: discovered.TLS, CaptureCertificate: discovered.TLS,
+				ReplaceConfigPath: discovered.ConfigPath,
+			})
+			if err != nil {
+				return err
+			}
+			adopted.LastJobID = job.ID
+			state.Domains[adopted.ID] = adopted
+		} else if discovered.TLS && nodeHasValidCertificate(node, request.Domain) {
+			job, err := enqueueJob(state, node.ID, adopted.ID, protocol.JobCaptureCertificate, captureCertificateSpec{
+				DomainID: adopted.ID, Domain: adopted.Name, RenewBeforeDays: 30,
+			})
+			if err != nil {
+				return err
+			}
+			adopted.LastJobID = job.ID
+			state.Domains[adopted.ID] = adopted
+		}
+		if request.Takeover {
+			s.addAudit(state, "warning", "domain.takeover.queued", "现有 Nginx 规则接管任务已加入队列；原配置将先备份", node.ID, adopted.ID, adopted.LastJobID)
+		} else {
+			s.addAudit(state, "info", "domain.observation.adopted", "已开始监控节点现有 Nginx 域名；原配置未修改", node.ID, adopted.ID, adopted.LastJobID)
+		}
+		return nil
+	})
+	if errors.Is(err, errConflict) {
+		writeError(w, http.StatusConflict, "域名已在管理列表中", "domain_exists", nil)
+		return
+	}
+	if errors.Is(err, errNotFound) {
+		writeError(w, http.StatusBadRequest, "节点不存在", "dependency_not_found", nil)
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "无法接管节点域名", "adopt_unavailable", map[string]string{"reason": err.Error()})
+		return
+	}
+	for _, view := range domainViews(s.store.Snapshot()) {
+		if view.ID == adopted.ID {
+			writeJSON(w, http.StatusCreated, view)
+			return
+		}
+	}
+	writeJSON(w, http.StatusCreated, adopted)
+}
+
+func validReportedTakeoverPath(value string) bool {
+	cleaned := path.Clean(strings.TrimSpace(value))
+	return strings.HasPrefix(cleaned, "/etc/nginx/conf.d/") ||
+		strings.HasPrefix(cleaned, "/etc/nginx/sites-enabled/")
+}
+
+func nodeHasValidCertificate(node model.Node, domain string) bool {
+	for _, certificate := range node.Certificates {
+		if certificate.Domain == domain && certificate.KeyMatches && certificate.Error == "" {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Server) handleDeleteDomain(w http.ResponseWriter, r *http.Request) {
 	domainID := r.PathValue("id")
+	queued := true
 	err := s.store.Update(func(state *model.State) error {
 		domain, ok := state.Domains[domainID]
 		if !ok {
 			return errNotFound
 		}
-		job, err := enqueueJob(state, domain.NodeID, domain.ID, protocol.JobDeleteDomain, deleteDomainSpec{DomainID: domain.ID, Domain: domain.Name})
+		if domain.ObservedOnly {
+			queued = false
+			delete(state.Domains, domain.ID)
+			s.addAudit(state, "info", "domain.observation.removed", "已停止管理节点现有域名；原 Nginx 配置未修改", domain.NodeID, domain.ID)
+			return nil
+		}
+		restorePath := ""
+		if domain.TakenOver {
+			restorePath = domain.ConfigPath
+		}
+		job, err := enqueueJob(state, domain.NodeID, domain.ID, protocol.JobDeleteDomain, deleteDomainSpec{DomainID: domain.ID, Domain: domain.Name, RestoreConfigPath: restorePath})
 		if err != nil {
 			return err
 		}
@@ -413,7 +636,210 @@ func (s *Server) handleDeleteDomain(w http.ResponseWriter, r *http.Request) {
 		wrapStoreError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusAccepted, map[string]bool{"queued": true})
+	writeJSON(w, http.StatusAccepted, map[string]bool{"queued": queued})
+}
+
+type certificateAutomationRequest struct {
+	Domain          string   `json:"domain"`
+	DNSNames        []string `json:"dns_names"`
+	NodeID          string   `json:"node_id"`
+	AutoRenew       bool     `json:"auto_renew"`
+	RenewBeforeDays int      `json:"renew_before_days"`
+	ACMEAccountID   string   `json:"acme_account_id"`
+	DNSAccountID    string   `json:"dns_account_id"`
+	SyncNodeIDs     []string `json:"sync_node_ids"`
+}
+
+func (s *Server) handleIssueCertificate(w http.ResponseWriter, r *http.Request) {
+	var request certificateAutomationRequest
+	if !decodeJSON(w, r, &request) {
+		return
+	}
+	request.Domain = strings.ToLower(strings.TrimSpace(request.Domain))
+	if _, err := nginxconfig.ConfigFileName(request.Domain); err != nil {
+		writeError(w, http.StatusBadRequest, "域名无效", "invalid_domain", nil)
+		return
+	}
+	dnsNames, err := normalizeCertificateNames(request.Domain, request.DNSNames)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "证书域名列表无效", "invalid_dns_names", map[string]string{"reason": err.Error()})
+		return
+	}
+	request.DNSNames = dnsNames
+	request.RenewBeforeDays = normalizeRenewBeforeDays(request.RenewBeforeDays)
+	if request.RenewBeforeDays < 7 || request.RenewBeforeDays > 60 || request.ACMEAccountID == "" || request.DNSAccountID == "" {
+		writeError(w, http.StatusBadRequest, "自动签发需要有效续期窗口、DNS 与 ACME 账户", "invalid_automation", nil)
+		return
+	}
+	var job model.Job
+	err = s.store.Update(func(state *model.State) error {
+		if node, ok := state.Nodes[request.NodeID]; !ok || node.Status == model.NodeRevoked {
+			return fmt.Errorf("%w: node", errNotFound)
+		}
+		if _, ok := state.ACMEAccounts[request.ACMEAccountID]; !ok {
+			return fmt.Errorf("%w: acme", errNotFound)
+		}
+		if _, ok := state.DNSAccounts[request.DNSAccountID]; !ok {
+			return fmt.Errorf("%w: dns", errNotFound)
+		}
+		syncNodeIDs, err := validateNodeIDs(state, request.SyncNodeIDs, request.NodeID)
+		if err != nil {
+			return err
+		}
+		certificateID := certificateIDForDomain(*state, request.Domain)
+		job, err = enqueueJob(state, request.NodeID, "", protocol.JobIssueCertificate, issueCertificateSpec{
+			Domain: request.Domain, DNSNames: request.DNSNames, CertificateID: certificateID,
+			ACMEAccountID: request.ACMEAccountID, DNSAccountID: request.DNSAccountID,
+			AutoRenew: request.AutoRenew, RenewBeforeDays: request.RenewBeforeDays,
+			Install: true, ReloadNginx: true, SyncNodeIDs: syncNodeIDs,
+		})
+		if err != nil {
+			return err
+		}
+		s.addAudit(state, "info", "certificate.issue.queued", "独立证书签发任务已加入队列", request.NodeID, "", job.ID)
+		return nil
+	})
+	if errors.Is(err, errNotFound) {
+		writeError(w, http.StatusBadRequest, "节点、DNS 或 ACME 账户不存在", "dependency_not_found", nil)
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "无法创建签发任务", "issuance_unavailable", map[string]string{"reason": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusAccepted, job)
+}
+
+func (s *Server) handleImportCertificate(w http.ResponseWriter, r *http.Request) {
+	var request certificateAutomationRequest
+	if !decodeJSON(w, r, &request) {
+		return
+	}
+	request.Domain = strings.ToLower(strings.TrimSpace(request.Domain))
+	if _, err := nginxconfig.ConfigFileName(request.Domain); err != nil {
+		writeError(w, http.StatusBadRequest, "域名无效", "invalid_domain", nil)
+		return
+	}
+	request.RenewBeforeDays = normalizeRenewBeforeDays(request.RenewBeforeDays)
+	if request.RenewBeforeDays < 7 || request.RenewBeforeDays > 60 {
+		writeError(w, http.StatusBadRequest, "自动续期阈值需为 7–60 天", "invalid_renewal_window", nil)
+		return
+	}
+	var job model.Job
+	err := s.store.Update(func(state *model.State) error {
+		node, ok := state.Nodes[request.NodeID]
+		if !ok || node.Status == model.NodeRevoked {
+			return fmt.Errorf("%w: node", errNotFound)
+		}
+		found := false
+		for _, meta := range node.Certificates {
+			if meta.Domain == request.Domain && meta.KeyMatches && meta.Error == "" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return errors.New("node has not reported a valid certificate for this domain")
+		}
+		if request.AutoRenew {
+			if _, ok := state.ACMEAccounts[request.ACMEAccountID]; !ok {
+				return fmt.Errorf("%w: acme", errNotFound)
+			}
+			if _, ok := state.DNSAccounts[request.DNSAccountID]; !ok {
+				return fmt.Errorf("%w: dns", errNotFound)
+			}
+		} else {
+			request.ACMEAccountID = ""
+			request.DNSAccountID = ""
+		}
+		syncNodeIDs, err := validateNodeIDs(state, request.SyncNodeIDs, request.NodeID)
+		if err != nil {
+			return err
+		}
+		job, err = enqueueJob(state, request.NodeID, "", protocol.JobCaptureCertificate, captureCertificateSpec{
+			Domain: request.Domain, CertificateID: certificateIDForDomain(*state, request.Domain),
+			ACMEAccountID: request.ACMEAccountID, DNSAccountID: request.DNSAccountID,
+			AutoRenew: request.AutoRenew, RenewBeforeDays: request.RenewBeforeDays, SyncNodeIDs: syncNodeIDs,
+		})
+		if err != nil {
+			return err
+		}
+		s.addAudit(state, "info", "certificate.capture.queued", "节点现有证书接管任务已加入队列", request.NodeID, "", job.ID)
+		return nil
+	})
+	if errors.Is(err, errNotFound) {
+		writeError(w, http.StatusBadRequest, "节点、DNS 或 ACME 账户不存在", "dependency_not_found", nil)
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "无法接管节点证书", "capture_unavailable", map[string]string{"reason": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusAccepted, job)
+}
+
+func normalizeRenewBeforeDays(value int) int {
+	if value == 0 {
+		return 30
+	}
+	return value
+}
+
+func normalizeCertificateNames(primary string, values []string) ([]string, error) {
+	primary = strings.ToLower(strings.TrimSpace(primary))
+	all := append([]string{primary}, values...)
+	result := make([]string, 0, len(all))
+	seen := make(map[string]bool)
+	for _, value := range all {
+		value = strings.ToLower(strings.TrimSpace(value))
+		if value == "" || seen[value] {
+			continue
+		}
+		base := value
+		if strings.HasPrefix(value, "*.") {
+			base = strings.TrimPrefix(value, "*.")
+		} else if strings.Contains(value, "*") {
+			return nil, fmt.Errorf("通配符只能位于最左侧标签：%s", value)
+		}
+		if _, err := nginxconfig.ConfigFileName(base); err != nil {
+			return nil, fmt.Errorf("无效域名：%s", value)
+		}
+		seen[value] = true
+		result = append(result, value)
+		if len(result) > 20 {
+			return nil, errors.New("单张证书最多支持 20 个域名")
+		}
+	}
+	if len(result) == 0 || result[0] != primary {
+		return nil, errors.New("主域名不能为空")
+	}
+	return result, nil
+}
+
+func certificateIDForDomain(state model.State, domain string) string {
+	for _, certificate := range state.Certificates {
+		if certificate.Domain == domain {
+			return certificate.ID
+		}
+	}
+	return ""
+}
+
+func desiredCertificateNames(certificate model.Certificate) []string {
+	if len(certificate.RequestedDNSNames) > 0 {
+		return append([]string(nil), certificate.RequestedDNSNames...)
+	}
+	if len(certificate.DNSNames) > 0 {
+		return append([]string(nil), certificate.DNSNames...)
+	}
+	return []string{certificate.Domain}
+}
+
+func desiredNamesForDomain(state model.State, domain model.Domain) []string {
+	if certificate, ok := state.Certificates[domain.CertificateID]; ok {
+		return desiredCertificateNames(certificate)
+	}
+	return []string{domain.Name}
 }
 
 func (s *Server) handleUploadCertificate(w http.ResponseWriter, r *http.Request) {
@@ -442,6 +868,34 @@ func (s *Server) handleUploadCertificate(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, "证书校验失败", "certificate_invalid", map[string]string{"reason": err.Error()})
 		return
 	}
+	autoRenew, err := strconv.ParseBool(defaultString(r.FormValue("auto_renew"), "false"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "自动续期选项无效", "invalid_automation", nil)
+		return
+	}
+	renewBeforeDays, err := strconv.Atoi(defaultString(r.FormValue("renew_before_days"), "30"))
+	if err != nil || renewBeforeDays < 7 || renewBeforeDays > 60 {
+		writeError(w, http.StatusBadRequest, "自动续期阈值需为 7–60 天", "invalid_renewal_window", nil)
+		return
+	}
+	issuerNodeID := strings.TrimSpace(r.FormValue("node_id"))
+	acmeAccountID := strings.TrimSpace(r.FormValue("acme_account_id"))
+	dnsAccountID := strings.TrimSpace(r.FormValue("dns_account_id"))
+	var requestedSyncNodeIDs []string
+	if value := strings.TrimSpace(r.FormValue("sync_node_ids")); value != "" {
+		if err := json.Unmarshal([]byte(value), &requestedSyncNodeIDs); err != nil {
+			writeError(w, http.StatusBadRequest, "同步节点列表无效", "invalid_sync_nodes", nil)
+			return
+		}
+	}
+	if autoRenew && (issuerNodeID == "" || acmeAccountID == "" || dnsAccountID == "") {
+		writeError(w, http.StatusBadRequest, "自动续期需要签发节点、DNS 与 ACME 账户", "renewal_accounts_required", nil)
+		return
+	}
+	if !autoRenew {
+		acmeAccountID = ""
+		dnsAccountID = ""
+	}
 	certificateID, err := id.New("crt")
 	if err != nil {
 		wrapStoreError(w, err)
@@ -462,18 +916,242 @@ func (s *Server) handleUploadCertificate(w http.ResponseWriter, r *http.Request)
 		ID: certificateID, Domain: domain, Source: model.CertificateUpload,
 		FullchainCiphertext: fullchainCiphertext, PrivateKeyCiphertext: privateKeyCiphertext,
 		FingerprintSHA256: info.FingerprintSHA256, Issuer: info.Issuer, SerialNumber: info.SerialNumber,
-		NotBefore: info.NotBefore, NotAfter: info.NotAfter, DNSNames: info.DNSNames,
+		NotBefore: info.NotBefore, NotAfter: info.NotAfter, DNSNames: info.DNSNames, RequestedDNSNames: info.DNSNames,
+		AutoRenew: autoRenew, RenewBeforeDays: renewBeforeDays,
+		ACMEAccountID: acmeAccountID, DNSAccountID: dnsAccountID, IssuerNodeID: issuerNodeID,
 		CreatedAt: now, UpdatedAt: now,
 	}
 	if err := s.store.Update(func(state *model.State) error {
+		if issuerNodeID != "" {
+			if node, ok := state.Nodes[issuerNodeID]; !ok || node.Status == model.NodeRevoked {
+				return fmt.Errorf("%w: node", errNotFound)
+			}
+		}
+		if autoRenew {
+			if _, ok := state.ACMEAccounts[acmeAccountID]; !ok {
+				return fmt.Errorf("%w: acme", errNotFound)
+			}
+			if _, ok := state.DNSAccounts[dnsAccountID]; !ok {
+				return fmt.Errorf("%w: dns", errNotFound)
+			}
+		}
+		syncNodeIDs, err := validateNodeIDs(state, requestedSyncNodeIDs, "")
+		if err != nil {
+			return err
+		}
 		state.Certificates[certificate.ID] = certificate
+		for _, nodeID := range syncNodeIDs {
+			if _, err := enqueueJob(state, nodeID, "", protocol.JobSyncCertificate, syncCertificateSpec{
+				CertificateID: certificate.ID, Domain: certificate.Domain, ReloadNginx: true,
+			}); err != nil {
+				return err
+			}
+		}
 		s.addAudit(state, "info", "certificate.uploaded", "证书已上传并完成私钥匹配校验")
 		return nil
 	}); err != nil {
-		wrapStoreError(w, err)
+		if errors.Is(err, errNotFound) {
+			writeError(w, http.StatusBadRequest, "节点、DNS 或 ACME 账户不存在", "dependency_not_found", nil)
+		} else {
+			writeError(w, http.StatusBadRequest, "无法保存上传证书", "upload_unavailable", map[string]string{"reason": err.Error()})
+		}
 		return
 	}
 	writeJSON(w, http.StatusCreated, makeCertificateView(certificate, time.Now()))
+}
+
+func defaultString(value, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return strings.TrimSpace(value)
+}
+
+func (s *Server) handleSetCertificateAutoRenew(w http.ResponseWriter, r *http.Request) {
+	var request struct {
+		Enabled *bool `json:"enabled"`
+	}
+	if !decodeJSON(w, r, &request) {
+		return
+	}
+	if request.Enabled == nil {
+		writeError(w, http.StatusBadRequest, "缺少自动续期开关状态", "invalid_auto_renew", nil)
+		return
+	}
+
+	certificateID := r.PathValue("id")
+	now := time.Now().UTC()
+	var updated model.Certificate
+	err := s.store.Update(func(state *model.State) error {
+		certificate, ok := state.Certificates[certificateID]
+		if !ok {
+			return errNotFound
+		}
+
+		if *request.Enabled {
+			issuerNodeID, acmeAccountID, dnsAccountID := certificateAutomationDependencies(state, certificate)
+			if issuerNodeID == "" || acmeAccountID == "" || dnsAccountID == "" {
+				return errors.New("certificate is not linked to a signing node, DNS account, and ACME account")
+			}
+			node, ok := state.Nodes[issuerNodeID]
+			if !ok || node.Status == model.NodeRevoked {
+				return errors.New("signing node is unavailable or revoked")
+			}
+			if _, ok := state.ACMEAccounts[acmeAccountID]; !ok {
+				return errors.New("ACME account no longer exists")
+			}
+			if _, ok := state.DNSAccounts[dnsAccountID]; !ok {
+				return errors.New("DNS account no longer exists")
+			}
+			certificate.IssuerNodeID = issuerNodeID
+			certificate.ACMEAccountID = acmeAccountID
+			certificate.DNSAccountID = dnsAccountID
+			certificate.RenewBeforeDays = normalizeRenewBeforeDays(certificate.RenewBeforeDays)
+		}
+
+		certificate.AutoRenew = *request.Enabled
+		certificate.UpdatedAt = now
+		state.Certificates[certificate.ID] = certificate
+
+		// A certificate is renewed once. Only its exact managed domain may own
+		// the domain-level schedule; SAN aliases rely on the certificate schedule.
+		for id, domain := range state.Domains {
+			if domain.CertificateID != certificate.ID {
+				continue
+			}
+			domain.AutoRenew = *request.Enabled && domain.Name == certificate.Domain &&
+				domain.NodeID == certificate.IssuerNodeID && domain.ACMEAccountID == certificate.ACMEAccountID &&
+				domain.DNSAccountID == certificate.DNSAccountID
+			domain.UpdatedAt = now
+			state.Domains[id] = domain
+		}
+
+		updated = certificate
+		action := "certificate.auto-renew.disabled"
+		message := "证书自动续期已关闭"
+		if certificate.AutoRenew {
+			action = "certificate.auto-renew.enabled"
+			message = "证书自动续期已启用"
+		}
+		s.addAudit(state, "info", action, message, certificate.IssuerNodeID, "", "")
+		return nil
+	})
+	if errors.Is(err, errNotFound) {
+		writeError(w, http.StatusNotFound, "证书不存在", "not_found", nil)
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "无法更改自动续期", "auto_renew_unavailable", map[string]string{"reason": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, makeCertificateView(updated, time.Now()))
+}
+
+func (s *Server) handleUpdateCertificateAutomation(w http.ResponseWriter, r *http.Request) {
+	var request struct {
+		NodeID          string   `json:"node_id"`
+		AutoRenew       bool     `json:"auto_renew"`
+		RenewBeforeDays int      `json:"renew_before_days"`
+		ACMEAccountID   string   `json:"acme_account_id"`
+		DNSAccountID    string   `json:"dns_account_id"`
+		DNSNames        []string `json:"dns_names"`
+	}
+	if !decodeJSON(w, r, &request) {
+		return
+	}
+	request.NodeID = strings.TrimSpace(request.NodeID)
+	request.ACMEAccountID = strings.TrimSpace(request.ACMEAccountID)
+	request.DNSAccountID = strings.TrimSpace(request.DNSAccountID)
+	request.RenewBeforeDays = normalizeRenewBeforeDays(request.RenewBeforeDays)
+	if request.RenewBeforeDays < 7 || request.RenewBeforeDays > 60 {
+		writeError(w, http.StatusBadRequest, "自动续期阈值需为 7–60 天", "invalid_renewal_window", nil)
+		return
+	}
+	certificateID := r.PathValue("id")
+	var updated model.Certificate
+	err := s.store.Update(func(state *model.State) error {
+		certificate, ok := state.Certificates[certificateID]
+		if !ok {
+			return errNotFound
+		}
+		dnsNames, err := normalizeCertificateNames(certificate.Domain, request.DNSNames)
+		if err != nil {
+			return err
+		}
+		if request.NodeID == "" {
+			request.NodeID = certificate.IssuerNodeID
+		}
+		if request.ACMEAccountID == "" {
+			request.ACMEAccountID = certificate.ACMEAccountID
+		}
+		if request.DNSAccountID == "" {
+			request.DNSAccountID = certificate.DNSAccountID
+		}
+		if request.AutoRenew && (request.NodeID == "" || request.ACMEAccountID == "" || request.DNSAccountID == "") {
+			return errors.New("自动续期需要签发节点、DNS 与 ACME 账户")
+		}
+		if request.NodeID != "" {
+			node, ok := state.Nodes[request.NodeID]
+			if !ok || node.Status == model.NodeRevoked {
+				return fmt.Errorf("%w: node", errNotFound)
+			}
+		}
+		if request.ACMEAccountID != "" {
+			if _, ok := state.ACMEAccounts[request.ACMEAccountID]; !ok {
+				return fmt.Errorf("%w: acme", errNotFound)
+			}
+		}
+		if request.DNSAccountID != "" {
+			if _, ok := state.DNSAccounts[request.DNSAccountID]; !ok {
+				return fmt.Errorf("%w: dns", errNotFound)
+			}
+		}
+		now := time.Now().UTC()
+		certificate.IssuerNodeID = request.NodeID
+		certificate.ACMEAccountID = request.ACMEAccountID
+		certificate.DNSAccountID = request.DNSAccountID
+		certificate.AutoRenew = request.AutoRenew
+		certificate.RenewBeforeDays = request.RenewBeforeDays
+		certificate.RequestedDNSNames = dnsNames
+		certificate.UpdatedAt = now
+		state.Certificates[certificate.ID] = certificate
+		for id, domain := range state.Domains {
+			if domain.CertificateID != certificate.ID || domain.Name != certificate.Domain {
+				continue
+			}
+			domain.ACMEAccountID = certificate.ACMEAccountID
+			domain.DNSAccountID = certificate.DNSAccountID
+			domain.RenewBeforeDays = certificate.RenewBeforeDays
+			domain.AutoRenew = certificate.AutoRenew && domain.NodeID == certificate.IssuerNodeID
+			domain.UpdatedAt = now
+			state.Domains[id] = domain
+		}
+		updated = certificate
+		s.addAudit(state, "info", "certificate.automation.updated", "证书签发账户、域名与续期设置已更新", certificate.IssuerNodeID)
+		return nil
+	})
+	if errors.Is(err, errNotFound) {
+		writeError(w, http.StatusNotFound, "证书、节点或账户不存在", "not_found", nil)
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "无法更新证书自动化设置", "automation_update_unavailable", map[string]string{"reason": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, makeCertificateView(updated, time.Now()))
+}
+
+func certificateAutomationDependencies(state *model.State, certificate model.Certificate) (string, string, string) {
+	if certificate.IssuerNodeID != "" && certificate.ACMEAccountID != "" && certificate.DNSAccountID != "" {
+		return certificate.IssuerNodeID, certificate.ACMEAccountID, certificate.DNSAccountID
+	}
+	for _, domain := range state.Domains {
+		if domain.CertificateID == certificate.ID && domain.Name == certificate.Domain &&
+			domain.NodeID != "" && domain.ACMEAccountID != "" && domain.DNSAccountID != "" {
+			return domain.NodeID, domain.ACMEAccountID, domain.DNSAccountID
+		}
+	}
+	return certificate.IssuerNodeID, certificate.ACMEAccountID, certificate.DNSAccountID
 }
 
 func (s *Server) handleRenewCertificate(w http.ResponseWriter, r *http.Request) {
@@ -487,23 +1165,72 @@ func (s *Server) handleRenewCertificate(w http.ResponseWriter, r *http.Request) 
 		var domain model.Domain
 		found := false
 		for _, candidate := range state.Domains {
-			if candidate.CertificateID == certificate.ID {
+			if candidate.CertificateID == certificate.ID && candidate.Name == certificate.Domain {
 				domain, found = candidate, true
 				break
 			}
 		}
-		if !found || domain.ACMEAccountID == "" || domain.DNSAccountID == "" {
-			return errors.New("certificate is not linked to DNS and ACME accounts")
-		}
 		var err error
-		job, err = enqueueJob(state, domain.NodeID, domain.ID, protocol.JobIssueCertificate, issueCertificateSpec{DomainID: domain.ID})
+		if found && domain.ACMEAccountID != "" && domain.DNSAccountID != "" {
+			node, nodeExists := state.Nodes[domain.NodeID]
+			if !nodeExists {
+				return errors.New("domain node no longer exists")
+			}
+			if node.Status == model.NodeRevoked {
+				return errors.New("domain node has been revoked")
+			}
+			if _, ok := state.ACMEAccounts[domain.ACMEAccountID]; !ok {
+				return errors.New("ACME account no longer exists")
+			}
+			if _, ok := state.DNSAccounts[domain.DNSAccountID]; !ok {
+				return errors.New("DNS account no longer exists")
+			}
+			if hasActiveJob(state, domain.ID, protocol.JobIssueCertificate) {
+				return errors.New("certificate renewal is already queued")
+			}
+			job, err = enqueueJob(state, domain.NodeID, domain.ID, protocol.JobIssueCertificate, issueCertificateSpec{DomainID: domain.ID, DNSNames: desiredNamesForDomain(*state, domain)})
+			if err == nil {
+				domain.LastJobID = job.ID
+				domain.UpdatedAt = time.Now().UTC()
+				state.Domains[domain.ID] = domain
+			}
+		} else {
+			if certificate.ACMEAccountID == "" || certificate.DNSAccountID == "" || certificate.IssuerNodeID == "" {
+				return errors.New("certificate is not linked to a signing node, DNS account, and ACME account")
+			}
+			node, ok := state.Nodes[certificate.IssuerNodeID]
+			if !ok {
+				return errors.New("issuer node no longer exists")
+			}
+			if node.Status == model.NodeRevoked {
+				return errors.New("issuer node has been revoked")
+			}
+			if _, ok := state.ACMEAccounts[certificate.ACMEAccountID]; !ok {
+				return errors.New("ACME account no longer exists")
+			}
+			if _, ok := state.DNSAccounts[certificate.DNSAccountID]; !ok {
+				return errors.New("DNS account no longer exists")
+			}
+			if hasActiveCertificateJob(state, certificate.ID) {
+				return errors.New("certificate renewal is already queued")
+			}
+			syncNodeIDs := make([]string, 0, len(certificate.DeployedNodeIDs))
+			for _, nodeID := range certificate.DeployedNodeIDs {
+				if nodeID != certificate.IssuerNodeID {
+					syncNodeIDs = append(syncNodeIDs, nodeID)
+				}
+			}
+			job, err = enqueueJob(state, certificate.IssuerNodeID, "", protocol.JobIssueCertificate, issueCertificateSpec{
+				Domain: certificate.Domain, DNSNames: desiredCertificateNames(certificate), CertificateID: certificate.ID,
+				ACMEAccountID: certificate.ACMEAccountID, DNSAccountID: certificate.DNSAccountID,
+				AutoRenew: certificate.AutoRenew, RenewBeforeDays: normalizeRenewBeforeDays(certificate.RenewBeforeDays),
+				Install: true, ReloadNginx: true, SyncNodeIDs: syncNodeIDs,
+			})
+		}
 		if err != nil {
 			return err
 		}
-		domain.LastJobID = job.ID
-		domain.UpdatedAt = time.Now().UTC()
-		state.Domains[domain.ID] = domain
-		s.addAudit(state, "info", "certificate.renew.queued", "证书续期任务已加入队列", domain.NodeID, domain.ID, job.ID)
+		s.addAudit(state, "info", "certificate.renew.queued", "证书续期任务已加入队列", job.NodeID, job.DomainID, job.ID)
 		return nil
 	})
 	if errors.Is(err, errNotFound) {
@@ -583,6 +1310,10 @@ func (s *Server) handleCreateDNSAccount(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
+	if request.KeepCredentials {
+		writeError(w, http.StatusBadRequest, "新 DNS 账户必须提交凭据", "invalid_credentials", nil)
+		return
+	}
 	accountID, err := id.New("dns")
 	if err != nil {
 		wrapStoreError(w, err)
@@ -614,26 +1345,27 @@ func (s *Server) handleUpdateDNSAccount(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
-	plaintext, _ := json.Marshal(request.Credentials)
-	ciphertext, err := s.mustSeal("dns-account:"+accountID, plaintext)
-	if err != nil {
-		wrapStoreError(w, err)
-		return
-	}
 	now := time.Now().UTC()
 	var account model.DNSAccount
-	err = s.store.Update(func(state *model.State) error {
+	err := s.store.Update(func(state *model.State) error {
 		existing, exists := state.DNSAccounts[accountID]
 		if !exists {
 			return errNotFound
 		}
 		existing.Name = request.Name
 		existing.Provider = request.Provider
-		existing.CredentialsCiphertext = ciphertext
+		if !request.KeepCredentials {
+			plaintext, _ := json.Marshal(request.Credentials)
+			ciphertext, err := s.mustSeal("dns-account:"+accountID, plaintext)
+			if err != nil {
+				return err
+			}
+			existing.CredentialsCiphertext = ciphertext
+		}
 		existing.UpdatedAt = now
 		state.DNSAccounts[accountID] = existing
 		account = existing
-		s.addAudit(state, "info", "dns-account.updated", "DNS 账户凭据已重新加密保存")
+		s.addAudit(state, "info", "dns-account.updated", "DNS 账户已更新")
 		return nil
 	})
 	if errors.Is(err, errNotFound) {
@@ -644,7 +1376,7 @@ func (s *Server) handleUpdateDNSAccount(w http.ResponseWriter, r *http.Request) 
 		wrapStoreError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, dnsAccountView{ID: account.ID, Name: account.Name, Provider: account.Provider, CredentialKeys: credentialKeys(request.Credentials), CreatedAt: account.CreatedAt, UpdatedAt: account.UpdatedAt})
+	writeJSON(w, http.StatusOK, dnsAccountView{ID: account.ID, Name: account.Name, Provider: account.Provider, CredentialKeys: dnsAccountCredentialKeys(s, account), CreatedAt: account.CreatedAt, UpdatedAt: account.UpdatedAt})
 }
 
 func decodeDNSAccountRequest(w http.ResponseWriter, r *http.Request) (dnsAccountRequest, bool) {
@@ -658,7 +1390,11 @@ func decodeDNSAccountRequest(w http.ResponseWriter, r *http.Request) (dnsAccount
 		writeError(w, http.StatusBadRequest, "DNS 账户名称或提供商无效", "invalid_dns_account", nil)
 		return request, false
 	}
-	if len(request.Credentials) == 0 || len(request.Credentials) > 32 {
+	if request.KeepCredentials && len(request.Credentials) > 0 {
+		writeError(w, http.StatusBadRequest, "保留凭据时不能同时提交新凭据", "invalid_credentials", nil)
+		return request, false
+	}
+	if !request.KeepCredentials && (len(request.Credentials) == 0 || len(request.Credentials) > 32) {
 		writeError(w, http.StatusBadRequest, "DNS 凭据不能为空且最多包含 32 项", "invalid_credentials", nil)
 		return request, false
 	}
@@ -671,6 +1407,18 @@ func decodeDNSAccountRequest(w http.ResponseWriter, r *http.Request) (dnsAccount
 		request.Credentials[key] = value
 	}
 	return request, true
+}
+
+func dnsAccountCredentialKeys(s *Server, account model.DNSAccount) []string {
+	plaintext, err := s.box.Open("dns-account:"+account.ID, account.CredentialsCiphertext)
+	if err != nil {
+		return nil
+	}
+	var credentials map[string]string
+	if json.Unmarshal(plaintext, &credentials) != nil {
+		return nil
+	}
+	return credentialKeys(credentials)
 }
 
 func credentialKeys(credentials map[string]string) []string {
@@ -692,38 +1440,18 @@ func (s *Server) handleACMEAccounts(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, views)
 }
 
+type acmeAccountRequest struct {
+	Name         string `json:"name"`
+	Email        string `json:"email"`
+	DirectoryURL string `json:"directory_url"`
+	EABKID       string `json:"eab_kid"`
+	EABHMAC      string `json:"eab_hmac"`
+	KeepEAB      bool   `json:"keep_eab"`
+}
+
 func (s *Server) handleCreateACMEAccount(w http.ResponseWriter, r *http.Request) {
-	var request struct {
-		Name         string `json:"name"`
-		Email        string `json:"email"`
-		DirectoryURL string `json:"directory_url"`
-		EABKID       string `json:"eab_kid"`
-		EABHMAC      string `json:"eab_hmac"`
-	}
-	if !decodeJSON(w, r, &request) {
-		return
-	}
-	request.Name = strings.TrimSpace(request.Name)
-	request.Email = strings.TrimSpace(request.Email)
-	request.DirectoryURL = strings.TrimSpace(request.DirectoryURL)
-	if request.DirectoryURL == "" {
-		request.DirectoryURL = letsEncryptDirectory
-	}
-	if len(request.Name) < 2 || len(request.Name) > 64 {
-		writeError(w, http.StatusBadRequest, "ACME 账户名称无效", "invalid_acme_account", nil)
-		return
-	}
-	if _, err := mail.ParseAddress(request.Email); err != nil {
-		writeError(w, http.StatusBadRequest, "ACME 邮箱无效", "invalid_email", nil)
-		return
-	}
-	directory, err := url.Parse(request.DirectoryURL)
-	if err != nil || directory.Scheme != "https" || directory.Host == "" {
-		writeError(w, http.StatusBadRequest, "ACME 目录必须是 HTTPS URL", "invalid_directory", nil)
-		return
-	}
-	if (request.EABKID == "") != (request.EABHMAC == "") {
-		writeError(w, http.StatusBadRequest, "EAB KID 与 HMAC 必须同时填写", "invalid_eab", nil)
+	request, ok := decodeACMEAccountRequest(w, r)
+	if !ok {
 		return
 	}
 	accountID, err := id.New("acme")
@@ -753,6 +1481,132 @@ func (s *Server) handleCreateACMEAccount(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	writeJSON(w, http.StatusCreated, acmeAccountView{ID: account.ID, Name: account.Name, Email: account.Email, DirectoryURL: account.DirectoryURL, HasEAB: account.EABKID != "", CreatedAt: now, UpdatedAt: now})
+}
+
+func (s *Server) handleUpdateACMEAccount(w http.ResponseWriter, r *http.Request) {
+	accountID := r.PathValue("id")
+	request, ok := decodeACMEAccountRequest(w, r)
+	if !ok {
+		return
+	}
+	now := time.Now().UTC()
+	var updated model.ACMEAccount
+	err := s.store.Update(func(state *model.State) error {
+		account, exists := state.ACMEAccounts[accountID]
+		if !exists {
+			return errNotFound
+		}
+		account.Name = request.Name
+		account.Email = request.Email
+		account.DirectoryURL = request.DirectoryURL
+		switch {
+		case request.KeepEAB:
+			// Keep the encrypted HMAC and KID exactly as stored.
+		case request.EABKID == "":
+			account.EABKID = ""
+			account.EABHMACCiphertext = ""
+		default:
+			ciphertext, err := s.mustSeal("acme-account:"+account.ID+":eab", []byte(request.EABHMAC))
+			if err != nil {
+				return err
+			}
+			account.EABKID = request.EABKID
+			account.EABHMACCiphertext = ciphertext
+		}
+		account.UpdatedAt = now
+		state.ACMEAccounts[account.ID] = account
+		updated = account
+		s.addAudit(state, "info", "acme-account.updated", "ACME 账户已更新")
+		return nil
+	})
+	if errors.Is(err, errNotFound) {
+		writeError(w, http.StatusNotFound, "ACME 账户不存在", "not_found", nil)
+		return
+	}
+	if err != nil {
+		wrapStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, acmeAccountView{ID: updated.ID, Name: updated.Name, Email: updated.Email, DirectoryURL: updated.DirectoryURL, HasEAB: updated.EABKID != "", CreatedAt: updated.CreatedAt, UpdatedAt: updated.UpdatedAt})
+}
+
+func decodeACMEAccountRequest(w http.ResponseWriter, r *http.Request) (acmeAccountRequest, bool) {
+	var request acmeAccountRequest
+	if !decodeJSON(w, r, &request) {
+		return request, false
+	}
+	request.Name = strings.TrimSpace(request.Name)
+	request.Email = strings.TrimSpace(request.Email)
+	request.DirectoryURL = strings.TrimSpace(request.DirectoryURL)
+	request.EABKID = strings.TrimSpace(request.EABKID)
+	if request.DirectoryURL == "" {
+		request.DirectoryURL = letsEncryptDirectory
+	}
+	if len(request.Name) < 2 || len(request.Name) > 64 {
+		writeError(w, http.StatusBadRequest, "ACME 账户名称无效", "invalid_acme_account", nil)
+		return request, false
+	}
+	if _, err := mail.ParseAddress(request.Email); err != nil {
+		writeError(w, http.StatusBadRequest, "ACME 邮箱无效", "invalid_email", nil)
+		return request, false
+	}
+	directory, err := url.Parse(request.DirectoryURL)
+	if err != nil || directory.Scheme != "https" || directory.Host == "" {
+		writeError(w, http.StatusBadRequest, "ACME 目录必须是 HTTPS URL", "invalid_directory", nil)
+		return request, false
+	}
+	if request.KeepEAB && (request.EABKID != "" || request.EABHMAC != "") {
+		writeError(w, http.StatusBadRequest, "保留 EAB 时不能同时提交新凭据", "invalid_eab", nil)
+		return request, false
+	}
+	if !request.KeepEAB && (request.EABKID == "") != (request.EABHMAC == "") {
+		writeError(w, http.StatusBadRequest, "EAB KID 与 HMAC 必须同时填写", "invalid_eab", nil)
+		return request, false
+	}
+	return request, true
+}
+
+func (s *Server) handleChangeAdminPassword(w http.ResponseWriter, r *http.Request) {
+	var request struct {
+		CurrentPassword string `json:"current_password"`
+		NewPassword     string `json:"new_password"`
+	}
+	if !decodeJSON(w, r, &request) {
+		return
+	}
+	if !s.verifyAdminCredential(request.CurrentPassword) {
+		writeError(w, http.StatusUnauthorized, "当前管理员密码不正确", "current_password_invalid", nil)
+		return
+	}
+	if len(request.NewPassword) < 12 || len(request.NewPassword) > 256 {
+		writeError(w, http.StatusBadRequest, "新密码需为 12–256 个字符", "invalid_new_password", nil)
+		return
+	}
+	if request.NewPassword == request.CurrentPassword {
+		writeError(w, http.StatusBadRequest, "新密码不能与当前密码相同", "password_unchanged", nil)
+		return
+	}
+	encoded, err := hashAdminPassword(request.NewPassword)
+	if err != nil {
+		wrapStoreError(w, err)
+		return
+	}
+	err = s.store.Update(func(state *model.State) error {
+		state.AdminPasswordHash = encoded
+		s.addAudit(state, "warning", "admin.password.changed", "管理员面板密码已更改")
+		return nil
+	})
+	if err != nil {
+		wrapStoreError(w, err)
+		return
+	}
+	s.clearAdminSessions()
+	token, expiresAt, err := s.createAdminSession()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "密码已更改，但无法创建新会话", "session_error", nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"changed": true, "token": token, "expires_at": expiresAt})
 }
 
 func safeNodes(state model.State) []model.Node {
@@ -820,7 +1674,9 @@ func makeCertificateView(certificate model.Certificate, now time.Time) certifica
 		ID: certificate.ID, Domain: certificate.Domain, Source: certificate.Source,
 		Fingerprint: certificate.FingerprintSHA256, Issuer: certificate.Issuer, SerialNumber: certificate.SerialNumber,
 		NotBefore: certificate.NotBefore, NotAfter: certificate.NotAfter, DNSNames: certificate.DNSNames,
-		AutoRenew: certificate.AutoRenew, ACMEAccountID: certificate.ACMEAccountID, DNSAccountID: certificate.DNSAccountID,
+		RequestedDNSNames: certificate.RequestedDNSNames,
+		AutoRenew:         certificate.AutoRenew, RenewBeforeDays: normalizeRenewBeforeDays(certificate.RenewBeforeDays),
+		ACMEAccountID: certificate.ACMEAccountID, DNSAccountID: certificate.DNSAccountID,
 		IssuerNodeID: certificate.IssuerNodeID, DeployedNodeIDs: certificate.DeployedNodeIDs,
 		DaysRemaining: days, Status: certificateState(certificate.NotAfter, now), CreatedAt: certificate.CreatedAt, UpdatedAt: certificate.UpdatedAt,
 	}

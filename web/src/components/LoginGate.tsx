@@ -1,27 +1,27 @@
 import { useState, type FormEvent } from 'react'
-import { setToken } from '../api'
+import { usePreferences, type LanguageMode, type ThemeMode } from '../preferences'
 import { Icon } from './Icon'
 import { ActionButton, Logo } from './Primitives'
+import { SelectField } from './SelectField'
 
-export function LoginGate({ onVerify }: { onVerify: () => Promise<void> }) {
-  const [token, setValue] = useState('')
+export function LoginGate({ onLogin }: { onLogin: (password: string) => Promise<void> }) {
+  const { t, theme, language, setTheme, setLanguage } = usePreferences()
+  const [password, setPassword] = useState('')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
 
   async function submit(event: FormEvent) {
     event.preventDefault()
-    if (token.trim().length < 24) {
-      setError('请输入安装时生成的管理员令牌')
+    if (password.length < 12) {
+      setError(t('login.tooShort'))
       return
     }
     setBusy(true)
     setError('')
-    setToken(token)
     try {
-      await onVerify()
+      await onLogin(password)
     } catch {
-      sessionStorage.removeItem('nginx-atlas-token')
-      setError('令牌无效，或主控暂时无法连接')
+      setError(t('login.invalid'))
     } finally {
       setBusy(false)
     }
@@ -29,32 +29,41 @@ export function LoginGate({ onVerify }: { onVerify: () => Promise<void> }) {
 
   return (
     <main className="login-screen">
-      <div className="login-field-light" aria-hidden="true" />
+      <div className="login-preferences">
+        <SelectField ariaLabel={t('app.language')} value={language} onChange={(value) => setLanguage(value as LanguageMode)} icon="language" options={[
+          { value: 'system', label: t('common.system') }, { value: 'zh', label: t('common.chinese') }, { value: 'en', label: t('common.english') },
+        ]} />
+        <SelectField ariaLabel={t('app.theme')} value={theme} onChange={(value) => setTheme(value as ThemeMode)} icon={theme === 'light' ? 'sun' : theme === 'dark' ? 'moon' : 'system'} options={[
+          { value: 'system', label: t('common.system') }, { value: 'light', label: t('common.light') }, { value: 'dark', label: t('common.dark') },
+        ]} />
+      </div>
       <section className="login-copy">
         <Logo />
-        <h1>基础设施，<br />一目了然</h1>
-        <p>在同一个安全平面中编排域名、证书与 Linux 节点。</p>
+        <span className="login-eyebrow">{t('login.eyebrow')}</span>
+        <h1>{t('login.title').split('\n').map((line) => <span key={line}>{line}</span>)}</h1>
+        <p>{t('login.description')}</p>
       </section>
       <div className="login-shell">
         <form className="login-card" onSubmit={submit}>
-          <span className="login-key"><Icon name="key" size={24} /></span>
-          <h2>进入控制台</h2>
-          <p>管理员令牌只保存在当前浏览器会话中。</p>
-          <label htmlFor="admin-token">管理员令牌</label>
+          <span className="login-key"><Icon name="lock" size={25} weight="light" /></span>
+          <h2>{t('login.cardTitle')}</h2>
+          <p>{t('login.cardDescription')}</p>
+          <label htmlFor="admin-password">{t('login.password')}</label>
           <div className={`login-input ${error ? 'field-error' : ''}`}>
-            <Icon name="terminal" size={18} />
+            <Icon name="key" size={18} />
             <input
-              id="admin-token"
+              id="admin-password"
               type="password"
               autoComplete="current-password"
-              value={token}
-              onChange={(event) => setValue(event.target.value)}
-              placeholder="粘贴 ATLAS_ADMIN_TOKEN"
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+              placeholder={t('login.passwordPlaceholder')}
               autoFocus
             />
           </div>
           {error && <span className="form-error" role="alert">{error}</span>}
-          <ActionButton wide disabled={busy}>{busy ? '正在验证' : '验证并进入'}</ActionButton>
+          <ActionButton wide disabled={busy}>{busy ? t('login.submitting') : t('login.submit')}</ActionButton>
+          <small className="login-security"><Icon name="shield" size={15} />{t('login.secure')}</small>
         </form>
       </div>
     </main>
