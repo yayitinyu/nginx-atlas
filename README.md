@@ -45,9 +45,16 @@ flowchart LR
 
 ## 快速开始
 
-### 一键安装主控
+### 从 GitHub 一键部署主节点
 
-面板域名的证书已经位于 `/etc/ssl/<面板域名>/fullchain.pem` 与 `privkey.pem` 时，可直接执行：
+面板域名的证书建议先放到：
+
+```text
+/etc/ssl/<面板域名>/fullchain.pem
+/etc/ssl/<面板域名>/privkey.pem
+```
+
+然后在主控 VPS 上执行（将 URL/域名换成你的）：
 
 ```bash
 curl -fsSL https://github.com/yayitinyu/nginx-atlas/releases/latest/download/install.sh \
@@ -56,14 +63,44 @@ curl -fsSL https://github.com/yayitinyu/nginx-atlas/releases/latest/download/ins
       --panel-domain atlas.example.com
 ```
 
-安装器会从最新 GitHub Release 下载当前 CPU 架构的程序并校验 SHA-256。重复执行同一条命令可更新程序；已有主密钥、管理员令牌、节点身份和状态文件会被保留。
+安装器会：
+
+1. 从最新 GitHub Release 下载当前 CPU 架构（amd64/arm64）安装包并校验 SHA-256；
+2. 安装/更新 `nginx-atlas` 二进制与 lego；
+3. 启动主控服务与本机节点代理；
+4. 若面板证书存在，创建 HTTPS 反向代理站点。
+
+**重复执行同一条命令即可原地升级**；已有主密钥、管理员令牌、节点身份和状态文件会被保留。
 
 若面板证书尚不存在，主控和本机 Agent 仍会启动，但不会创建公网 Nginx 站点。此时可使用已有反向代理，或先通过 DNS-01 签发证书再重新运行安装命令。
 
 一键检查服务：
 
 ```bash
-sudo bash -c 'nginx -t && systemctl is-active nginx nginx-atlas-server nginx-atlas-agent'
+sudo bash -c 'nginx -t && systemctl is-active nginx nginx-atlas-server nginx-atlas-agent && nginx-atlas version'
+```
+
+### 一键卸载主节点
+
+仅移除主控、本机 Agent、systemd 单元与共享二进制；**保留**配置/状态（便于重装恢复），且**不会**删除 Nginx 软件包、托管站点 `atlas-*.conf` 或 `/etc/ssl` 证书：
+
+```bash
+curl -fsSL https://github.com/yayitinyu/nginx-atlas/releases/latest/download/install.sh \
+  | sudo bash -s -- uninstall-server
+```
+
+若需连同配置、状态与主密钥一并清除（不可恢复）：
+
+```bash
+curl -fsSL https://github.com/yayitinyu/nginx-atlas/releases/latest/download/install.sh \
+  | sudo bash -s -- uninstall-server --purge-state
+```
+
+仅卸载普通节点上的 Agent（保留 Nginx 与证书）时使用：
+
+```bash
+curl -fsSL https://github.com/yayitinyu/nginx-atlas/releases/latest/download/install.sh \
+  | sudo bash -s -- uninstall-agent
 ```
 
 添加其他 VPS 时不应复用固定令牌。请在面板“节点 → 添加节点”中生成一次性命令；它会自动采用正确的主控地址、短期令牌和节点名称。

@@ -21,6 +21,7 @@ BINARY_URL="${ATLAS_BINARY_URL:-}"
 BINARY_SHA256="${ATLAS_BINARY_SHA256:-}"
 REPOSITORY="${ATLAS_REPO:-$DEFAULT_REPOSITORY}"
 SKIP_LEGO="false"
+PURGE_STATE="false"
 BACKUP_DIR=""
 WORK_DIR=""
 
@@ -34,6 +35,7 @@ Usage:
   install.sh server --public-url https://atlas.example.com [--panel-domain atlas.example.com]
   install.sh agent --server https://atlas.example.com --token TOKEN [--name Tokyo-02]
   install.sh uninstall-agent
+  install.sh uninstall-server
 
 Options:
   --binary-file PATH       Install a locally built nginx-atlas binary.
@@ -41,9 +43,15 @@ Options:
   --binary-sha256 SHA256   Required with --binary-url.
   --repo OWNER/REPO        GitHub repository used for the latest release.
   --skip-lego              Do not install the lego DNS-01 client.
+  --purge-state            With uninstall-server: also remove /var/lib/nginx-atlas
+                           and /etc/nginx-atlas (irreversible).
 
 The server mode also installs a local node agent. Existing state, secrets, and
 service configuration are preserved on reruns.
+
+uninstall-server stops the controller and local agent, removes systemd units,
+the shared binary, installer-managed panel nginx config, and optionally state.
+It never removes Nginx packages, user site configs, or /etc/ssl certificates.
 EOF
 }
 
@@ -65,7 +73,7 @@ parse_args() {
   MODE="$1"
   shift
   case "$MODE" in
-    server|agent|uninstall-agent) ;;
+    server|agent|uninstall-agent|uninstall-server) ;;
     -h|--help|help) usage; exit 0 ;;
     *) die "未知安装模式：$MODE" ;;
   esac
@@ -81,6 +89,7 @@ parse_args() {
       --binary-sha256) [[ $# -ge 2 ]] || die "--binary-sha256 缺少参数"; BINARY_SHA256="$2"; shift 2 ;;
       --repo) [[ $# -ge 2 ]] || die "--repo 缺少参数"; REPOSITORY="$2"; shift 2 ;;
       --skip-lego) SKIP_LEGO="true"; shift ;;
+      --purge-state) PURGE_STATE="true"; shift ;;
       -h|--help) usage; exit 0 ;;
       *) die "未知参数：$1" ;;
     esac
@@ -88,8 +97,14 @@ parse_args() {
 }
 
 validate_args() {
-  if [[ "$MODE" == "uninstall-agent" ]]; then
+  if [[ "$MODE" == "uninstall-agent" || "$MODE" == "uninstall-server" ]]; then
+    if [[ "$PURGE_STATE" == "true" && "$MODE" != "uninstall-server" ]]; then
+      die "--purge-state 仅可与 uninstall-server 一起使用。"
+    fi
     return
+  fi
+  if [[ "$PURGE_STATE" == "true" ]]; then
+    die "--purge-state 仅可与 uninstall-server 一起使用。"
   fi
   [[ "$REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || die "GitHub 仓库必须使用 OWNER/REPO 格式。"
   [[ "$NODE_NAME" =~ ^[^[:cntrl:]]{2,64}$ ]] || die "节点名称必须为 2–64 个可见字符。"
@@ -129,6 +144,44 @@ uninstall_agent_mode() {
   fi
   systemctl daemon-reload
   log "节点代理已卸载；Nginx 配置、软件包及 /etc/ssl 证书均未修改。"
+}
+
+uninstall_server_mode() {
+  log "停止并移除 Nginx Atlas 主控与本机节点代理"
+  systemctl disable --now nginx-atlas-agent.service >/dev/null 2>&1 || true
+  systemctl disable --now nginx-atlas-server.service >/dev/null 2>&1 || true
+  rm -f -- \
+    "$SYSTEMD_DIR/nginx-atlas-agent.service" \
+    "$SYSTEMD_DIR/nginx-atlas-server.service"
+  if [[ -f "$NGINX_PANEL_CONFIG" ]] && grep -Fq 'Managed by the Nginx Atlas installer.' "$NGINX_PANEL_CONFIG"; then
+    rm -f -- "$NGINX_PANEL_CONFIG"
+    if command -v nginx >/dev/null 2>&1 && nginx -t >/dev/null 2>&1; then
+      systemctl reload nginx >/dev/null 2>&1 || true
+      log "已移除安装器创建的面板 Nginx 站点配置并重载 Nginx。"
+    else
+      warn "已移除面板 Nginx 配置，但 nginx -t/reload 未成功；请手动检查 Nginx。"
+    fi
+  fi
+  rm -f -- "$INSTALL_DIR/$PROGRAM"
+  if [[ "$PURGE_STATE" == "true" ]]; then
+    case "$CONFIG_DIR" in
+      /etc/nginx-atlas) rm -rf -- "$CONFIG_DIR" ;;
+      *) die "拒绝清理异常配置目录：$CONFIG_DIR" ;;
+    esac
+    case "$STATE_ROOT" in
+      /var/lib/nginx-atlas) rm -rf -- "$STATE_ROOT" ;;
+      *) die "拒绝清理异常状态目录：$STATE_ROOT" ;;
+    esac
+    if id nginx-atlas >/dev/null 2>&1; then
+      userdel nginx-atlas >/dev/null 2>&1 || warn "无法删除系统用户 nginx-atlas，可稍后手动处理。"
+    fi
+    log "已清除配置、状态与主密钥（--purge-state）。"
+  else
+    log "已保留 $CONFIG_DIR 与 $STATE_ROOT；重新安装可恢复同一主密钥与状态。"
+    log "若需彻底删除，请追加 --purge-state。"
+  fi
+  systemctl daemon-reload
+  log "主控已卸载；Nginx 软件包、托管站点配置 atlas-*.conf 与 /etc/ssl 证书均未修改。"
 }
 
 detect_package_manager() {
@@ -528,6 +581,10 @@ main() {
   validate_args
   if [[ "$MODE" == "uninstall-agent" ]]; then
     uninstall_agent_mode
+    return
+  fi
+  if [[ "$MODE" == "uninstall-server" ]]; then
+    uninstall_server_mode
     return
   fi
   detect_package_manager
