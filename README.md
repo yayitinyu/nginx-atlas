@@ -4,7 +4,7 @@ Nginx Atlas 是一个面向 Linux VPS 集群的 Nginx、域名路由与 TLS 证�
 
 ![Nginx Atlas dashboard](docs/screenshots/dashboard.png)
 
-> 当前仓库包含可运行的主控、节点代理、React 管理界面和安装器。首次公开发布前，请用本地二进制安装方式；发布 Release 后，安装器会自动下载并校验对应架构的包。
+> 当前仓库包含可运行的主控、节点代理、React 管理界面和安装器。生产部署可直接使用最新 Release 的一键安装命令；安装器会自动下载并校验对应架构的包。
 
 ## 能做什么
 
