@@ -313,7 +313,7 @@ export default function App() {
       <ConfirmDialog open={Boolean(confirmCertificate)} title={t('certificate.renewConfirmTitle')} description={t('certificate.renewConfirmDescription', { domain: confirmCertificate?.domain ?? '' })} confirmLabel={t('certificate.renewConfirmAction')} onCancel={() => setConfirmCertificate(undefined)} onConfirm={() => void renewCertificate()} busy={busy === `renew-${confirmCertificate?.id}`} busyLabel={t('common.queueing')} tone="primary" icon="refresh" />
       <ConfirmDialog open={Boolean(confirmDomain)} title={t(confirmDomain?.observed_only ? 'domain.removeObservedTitle' : confirmDomain?.taken_over ? 'domain.removeTakenOverTitle' : 'domain.removeTitle')} description={t(confirmDomain?.observed_only ? 'domain.removeObservedDescription' : confirmDomain?.taken_over ? 'domain.removeTakenOverDescription' : 'domain.removeDescription', { domain: confirmDomain?.name ?? '' })} confirmLabel={t(confirmDomain?.observed_only ? 'domain.stopManaging' : confirmDomain?.taken_over ? 'domain.restoreOriginal' : 'domain.removeAction')} onCancel={() => setConfirmDomain(undefined)} onConfirm={() => void deleteDomain()} busy={busy === 'confirm'} />
       <ConfirmDialog open={Boolean(confirmNode)} title={t('nodes.revokeTitle')} description={t('nodes.revokeDescription', { node: confirmNode?.name ?? '' })} confirmLabel={t('nodes.revoke')} onCancel={() => setConfirmNode(undefined)} onConfirm={() => void revokeNode()} busy={busy === 'confirm'} />
-      <ConfirmDialog open={Boolean(confirmTakeover)} title={t('domain.takeoverConfirmTitle')} description={t('domain.takeoverConfirmDescription', { domain: confirmTakeover?.site.domain ?? '', path: confirmTakeover?.site.config_path ?? '' })} confirmLabel={t('domain.takeoverConfirmAction')} onCancel={() => setConfirmTakeover(undefined)} onConfirm={() => void takeoverDomain()} busy={busy === 'takeover'} busyLabel={t('common.queueing')} tone="primary" icon="download" />
+      <ConfirmDialog open={Boolean(confirmTakeover)} title={t('domain.takeoverConfirmTitle')} description={t('domain.takeoverConfirmDescription', { domain: confirmTakeover?.site.domain ?? '', path: confirmTakeover?.site.config_path ?? '' })} confirmLabel={t('domain.takeoverConfirmAction')} onCancel={() => setConfirmTakeover(undefined)} onConfirm={() => void takeoverDomain()} busy={busy === 'takeover'} busyLabel={t('common.queueing')} tone="primary" icon="takeover" />
       <ToastRegion messages={toasts} dismiss={(id) => setToasts((items) => items.filter((item) => item.id !== id))} />
     </div>
   )
@@ -347,7 +347,7 @@ interface PageProps {
 
 function renderPage(page: PageKey, props: PageProps) {
   switch (page) {
-    case 'overview': return <Overview data={props.data} onNavigate={props.onPage} />
+    case 'overview': return <Overview data={props.data} onNavigate={props.onPage} onAddDomain={props.onAddDomain} />
     case 'domains': return <DomainsPage domains={props.data.domains} nodes={props.data.nodes} onAdd={props.onAddDomain} onEdit={props.onEditDomain} onDelete={props.onDeleteDomain} onAdopt={props.onAdoptDomain} />
     case 'certificates': return <CertificatesPage certificates={props.data.certificates} nodes={props.data.nodes} onAdd={props.onAddCertificate} onRenew={props.onRenew} onToggleAutoRenew={props.onToggleAutoRenew} onSync={props.onSync} onEdit={props.onEditCertificate} busy={props.busy} />
     case 'nodes': return <NodesPage nodes={props.data.nodes} onAdd={props.onAddNode} onRevoke={props.onRevokeNode} onManage={props.onManageNode} />

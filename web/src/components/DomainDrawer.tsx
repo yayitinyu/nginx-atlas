@@ -179,7 +179,14 @@ export function DomainDrawer({ open, nodes, certificates, dnsAccounts, acmeAccou
 
           <section className="form-section">
             <div className="form-section-heading"><span>02</span><div><strong>{t('domain.stepCertificate')}</strong><small>{t('domain.certificateHint')}</small></div></div>
-            <div className="segmented-control certificate-choice"><button type="button" className={choice === 'existing' ? 'selected' : ''} onClick={() => setChoice('existing')}><Icon name="shield" size={18} />{t('domain.existingCertificate')}</button><button type="button" className={choice === 'acme' ? 'selected' : ''} onClick={() => setChoice('acme')}><Icon name="certificate" size={18} />{t('domain.letsencrypt')}</button></div>
+            <div className="segmented-control certificate-choice">
+              <button type="button" className={choice === 'existing' ? 'selected' : ''} onClick={() => setChoice('existing')}>
+                <Icon name="shield" size={17} /><span>{t('domain.existingCertificate')}</span>
+              </button>
+              <button type="button" className={choice === 'acme' ? 'selected' : ''} onClick={() => setChoice('acme')}>
+                <Icon name="certificate" size={17} /><span>{t('domain.letsencryptShort')}</span>
+              </button>
+            </div>
             {choice === 'existing' ? <label className="source-select"><span>{t('domain.certificateLocation')}</span><SelectField ariaLabel={t('domain.certificateLocation')} value={certificateID} onChange={setCertificateID} placeholder={eligibleCertificates.length ? t('common.select') : t('domain.noMatchingCertificate')} icon="shield" options={eligibleCertificates.map((certificate) => ({ value: certificate.id, label: certificate.domain, description: t('domain.controllerCertificate', { domain: certificate.domain, days: certificate.days_remaining }) }))} /></label> : <div className="acme-compact-panel"><div className="account-fields"><label><span>{t('certificate.dnsAccount')}</span><SelectField ariaLabel={t('certificate.dnsAccount')} value={dnsAccountID} onChange={setDNSAccountID} placeholder={t('common.select')} icon="dns" options={dnsAccounts.map((account) => ({ value: account.id, label: account.name, description: account.provider }))} /></label><label><span>{t('certificate.acmeAccount')}</span><SelectField ariaLabel={t('certificate.acmeAccount')} value={acmeAccountID} onChange={setACMEAccountID} placeholder={t('common.select')} icon="key" options={acmeAccounts.map((account) => ({ value: account.id, label: account.name, description: account.email }))} /></label></div><label className="switch-row"><button type="button" role="switch" aria-checked={autoRenew} className={autoRenew ? 'switch-on' : ''} onClick={() => setAutoRenew((value) => !value)}><i /></button><span><strong>{t('certificate.renewToggle')}</strong><small>{t('certificate.renewHint', { days: 30 })}</small></span></label></div>}
           </section>
 
@@ -193,7 +200,12 @@ export function DomainDrawer({ open, nodes, certificates, dnsAccounts, acmeAccou
           {selectedNode?.status !== 'online' && nodeID && <div className="form-warning"><Icon name="warning" size={18} />{t('domain.offlineWarning')}</div>}
           {error && <div className="form-error drawer-error" role="alert"><Icon name="warning" size={17} />{error}</div>}
         </div>
-        <footer className="drawer-footer"><button className="cancel-button" type="button" onClick={onClose} disabled={busy}>{t('common.cancel')}</button><ActionButton type="submit" wide disabled={busy || availableNodes.length === 0}>{busy ? t('common.queueing') : editingDomain ? t('domain.updateSubmit') : t('domain.submit')}</ActionButton></footer>
+        <footer className="drawer-footer">
+          <button className="cancel-button" type="button" onClick={onClose} disabled={busy}>{t('common.cancel')}</button>
+          <ActionButton type="submit" wide plain disabled={busy || availableNodes.length === 0}>
+            {busy ? t('common.queueing') : editingDomain ? t('domain.updateSubmit') : t('domain.submit')}
+          </ActionButton>
+        </footer>
       </form>
     </div>
   )

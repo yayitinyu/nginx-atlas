@@ -7,9 +7,10 @@ import { Bezel, EmptyState, IconButton, SectionHeading, StatusDot, StatusIcon } 
 interface Props {
   data: DashboardData
   onNavigate: (page: 'domains' | 'certificates' | 'nodes' | 'audit') => void
+  onAddDomain?: () => void
 }
 
-export function Overview({ data, onNavigate }: Props) {
+export function Overview({ data, onNavigate, onAddDomain }: Props) {
   const { t } = usePreferences()
   const [query, setQuery] = useState('')
   const domains = useMemo(() => {
@@ -22,66 +23,68 @@ export function Overview({ data, onNavigate }: Props) {
   return (
     <div className="overview-page page-enter">
       <section className="overview-hero">
-        <div><span className="page-kicker">ATLAS / STATUS</span><h1>{t('overview.title')}</h1><p>{t('overview.description')}</p></div>
+        <div>
+          <span className="page-kicker">{t('page.kickerStatus')}</span>
+          <h1>{t('overview.title')}</h1>
+          <p>{t('overview.description')}</p>
+        </div>
+        {onAddDomain && (
+          <button type="button" className="hero-cta" onClick={onAddDomain}>
+            <Icon name="plus" size={18} weight="bold" />
+            <span>{t('domain.add')}</span>
+          </button>
+        )}
       </section>
       <section className="mobile-status-strip" aria-label={t('overview.description')}>
-        <div><StatusDot tone={onlineNodes === data.nodes.length && data.nodes.length ? 'good' : 'warning'} /><span>{t('overview.nodesOnline')}</span><strong>{onlineNodes} / {data.nodes.length}</strong><small>{onlineNodes === data.nodes.length ? t('overview.allNormal') : t('overview.checkNeeded')}</small></div>
-        <div><StatusDot tone={expiring > 0 ? 'warning' : 'good'} /><span>{t('overview.certRisk')}</span><strong>{expiring}</strong><small>{expiring > 0 ? t('overview.within30') : t('overview.noRisk')}</small></div>
+        <div>
+          <StatusDot tone={onlineNodes === data.nodes.length && data.nodes.length ? 'good' : 'warning'} />
+          <span>{t('overview.nodesOnline')}</span>
+          <strong>{onlineNodes}/{data.nodes.length || 0}</strong>
+          <small>{onlineNodes === data.nodes.length && data.nodes.length ? t('overview.allNormal') : t('overview.checkNeeded')}</small>
+        </div>
+        <div>
+          <StatusDot tone={expiring > 0 ? 'warning' : 'good'} />
+          <span>{t('overview.certRisk')}</span>
+          <strong>{expiring}</strong>
+          <small>{expiring > 0 ? t('overview.within30') : t('overview.noRisk')}</small>
+        </div>
       </section>
       <div className="overview-grid">
         <div className="overview-primary">
           <Bezel className="domain-panel">
-            <div className="panel-toolbar"><h2>{t('overview.routes')}</h2><div className="toolbar-actions"><label className="search-field"><Icon name="search" size={17} /><span className="sr-only">{t('overview.searchDomain')}</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t('overview.searchDomain')} /></label></div></div>
-            {domains.length > 0 ? <DomainTable domains={domains.slice(0, 6)} onOpen={() => onNavigate('domains')} /> : <EmptyState icon="globe" title={t('overview.noDomain')} description={query ? t('overview.adjustSearch') : t('overview.noDomainDescription')} />}
-            {data.domains.length > 0 && <div className="panel-footer"><span>{t('overview.total', { count: data.domains.length })}</span><button className="text-link" onClick={() => onNavigate('domains')}>{t('overview.viewAll')} <Icon name="arrow" size={17} /></button></div>}
+            <div className="panel-toolbar">
+              <h2>{t('overview.routes')}</h2>
+              <label className="search-field">
+                <Icon name="search" size={17} />
+                <span className="sr-only">{t('overview.searchDomain')}</span>
+                <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t('overview.searchDomain')} />
+              </label>
+            </div>
+            {domains.length > 0 ? (
+              <DomainTable domains={domains.slice(0, 6)} onOpen={() => onNavigate('domains')} />
+            ) : (
+              <EmptyState
+                icon="globe"
+                title={t('overview.noDomain')}
+                description={query ? t('overview.adjustSearch') : t('overview.noDomainDescription')}
+                action={onAddDomain ? <button type="button" className="inline-action" onClick={onAddDomain}><Icon name="plus" size={16} />{t('domain.add')}</button> : undefined}
+              />
+            )}
+            {data.domains.length > 0 && (
+              <div className="panel-footer">
+                <span>{t('overview.total', { count: data.domains.length })}</span>
+                <button type="button" className="text-link" onClick={() => onNavigate('domains')}>{t('overview.viewAll')} <Icon name="arrow" size={16} /></button>
+              </div>
+            )}
           </Bezel>
           <CertificateTimeline data={data} onOpen={() => onNavigate('certificates')} />
-          <OverviewQuickActions data={data} onNavigate={onNavigate} />
         </div>
-        <aside className="overview-rail"><NodeHealth nodes={data.nodes} onOpen={() => onNavigate('nodes')} /><ActivityFeed events={data.audit} domains={data.domains} nodes={data.nodes} onOpen={() => onNavigate('audit')} /></aside>
+        <aside className="overview-rail">
+          <NodeHealth nodes={data.nodes} onOpen={() => onNavigate('nodes')} />
+          <ActivityFeed events={data.audit} domains={data.domains} nodes={data.nodes} onOpen={() => onNavigate('audit')} />
+        </aside>
       </div>
     </div>
-  )
-}
-
-function OverviewQuickActions({ data, onNavigate }: { data: DashboardData; onNavigate: (page: 'domains' | 'certificates' | 'nodes' | 'audit') => void }) {
-  const { t } = usePreferences()
-  const activeDomains = data.domains.filter((domain) => domain.enabled).length
-  const autoRenewCerts = data.certificates.filter((certificate) => certificate.auto_renew).length
-  return (
-    <Bezel className="overview-summary-card">
-      <SectionHeading title={t('overview.quickActions')} />
-      <div className="overview-summary-body">
-        <div className="summary-widgets">
-          <div className="summary-widget-item">
-            <span className="widget-icon"><Icon name="globe" size={18} /></span>
-            <div>
-              <strong>{activeDomains} / {data.domains.length}</strong>
-              <small>{t('overview.activeRoutes')}</small>
-            </div>
-          </div>
-          <div className="summary-widget-item">
-            <span className="widget-icon"><Icon name="refresh" size={18} /></span>
-            <div>
-              <strong>{autoRenewCerts} / {data.certificates.length}</strong>
-              <small>{t('overview.autoRenewCerts')}</small>
-            </div>
-          </div>
-          <div className="summary-widget-item">
-            <span className="widget-icon"><Icon name="check" size={18} /></span>
-            <div>
-              <strong>nginx -t</strong>
-              <small>{t('app.configVerified')}</small>
-            </div>
-          </div>
-        </div>
-        <div className="summary-actions-bar">
-          <button className="inline-action" onClick={() => onNavigate('domains')}><Icon name="plus" size={15} />{t('domain.add')}</button>
-          <button className="inline-action quiet-action" onClick={() => onNavigate('certificates')}><Icon name="shield" size={15} />{t('certificate.add')}</button>
-          <button className="inline-action quiet-action" onClick={() => onNavigate('nodes')}><Icon name="server" size={15} />{t('nodes.add')}</button>
-        </div>
-      </div>
-    </Bezel>
   )
 }
 
@@ -89,12 +92,43 @@ export function DomainTable({ domains, onOpen, showActions }: { domains: DomainR
   const { t } = usePreferences()
   return (
     <div className="domain-table" role="table" aria-label={t('nav.domains')}>
-      <div className="domain-table-head" role="row"><span role="columnheader">{t('domain.columnDomain')}</span><span role="columnheader">{t('domain.columnRoute')}</span><span role="columnheader">{t('domain.columnCert')}</span><span role="columnheader">{t('domain.columnNode')}</span><span role="columnheader">{t('domain.columnState')}</span><span aria-hidden="true" /></div>
+      <div className="domain-table-head" role="row">
+        <span role="columnheader">{t('domain.columnDomain')}</span>
+        <span role="columnheader">{t('domain.columnRoute')}</span>
+        <span role="columnheader">{t('domain.columnCert')}</span>
+        <span role="columnheader">{t('domain.columnNode')}</span>
+        <span role="columnheader">{t('domain.columnState')}</span>
+        <span aria-hidden="true" />
+      </div>
       {domains.map((domain) => {
         const certificate = certificateLabel(domain, t)
         const route = domain.upstream_host && domain.upstream_port ? `${domain.upstream_host}:${domain.upstream_port}` : '—'
-        const runtime = domain.job_status === 'queued' ? t('domain.runtimeQueued') : domain.job_status === 'running' ? t('domain.runtimeRunning') : domain.job_status === 'failed' ? t('domain.runtimeFailed') : domain.enabled ? t('domain.runtimeActive') : t('domain.runtimePending')
-        return <div className="domain-row" role="row" key={domain.id}><button className="domain-name" role="cell" onClick={() => onOpen?.(domain)}>{domain.name}{domain.observed_only && <small>{t('domain.localConfig')}</small>}</button><span className="route-target" role="cell">{route}<Icon name="link" size={14} /></span><span className={`certificate-cell certificate-${domain.certificate_status}`} role="cell"><StatusDot tone={certificate.tone} />{certificate.label}</span><span className="node-cell" role="cell"><Icon name="server" size={15} />{domain.node_name || t('domain.unconnected')}</span><span className="runtime-cell" role="cell"><StatusDot tone={domain.enabled && domain.job_status !== 'failed' ? 'good' : domain.job_status === 'failed' ? 'danger' : 'warning'} />{runtime}</span><span className="row-action" role="cell">{showActions?.(domain) ?? <IconButton name="more" label={domain.name} onClick={() => onOpen?.(domain)} />}</span></div>
+        const runtime = domain.job_status === 'queued' ? t('domain.runtimeQueued')
+          : domain.job_status === 'running' ? t('domain.runtimeRunning')
+          : domain.job_status === 'failed' ? t('domain.runtimeFailed')
+          : domain.enabled ? t('domain.runtimeActive')
+          : t('domain.runtimePending')
+        return (
+          <div className="domain-row" role="row" key={domain.id}>
+            <button type="button" className="domain-name" role="cell" onClick={() => onOpen?.(domain)}>
+              {domain.name}
+              {domain.observed_only && <small>{t('domain.localConfig')}</small>}
+              {domain.taken_over && <small>{t('domain.takenOverBadge')}</small>}
+            </button>
+            <span className="route-target" role="cell">{route}</span>
+            <span className={`certificate-cell certificate-${domain.certificate_status}`} role="cell">
+              <StatusDot tone={certificate.tone} />{certificate.label}
+            </span>
+            <span className="node-cell" role="cell"><Icon name="server" size={15} />{domain.node_name || t('domain.unconnected')}</span>
+            <span className="runtime-cell" role="cell">
+              <StatusDot tone={domain.enabled && domain.job_status !== 'failed' ? 'good' : domain.job_status === 'failed' ? 'danger' : 'warning'} />
+              {runtime}
+            </span>
+            <span className="row-action" role="cell">
+              {showActions?.(domain) ?? (onOpen ? <IconButton name="chevron" label={domain.name} onClick={() => onOpen(domain)} /> : null)}
+            </span>
+          </div>
+        )
       })}
     </div>
   )
@@ -103,19 +137,104 @@ export function DomainTable({ domains, onOpen, showActions }: { domains: DomainR
 function CertificateTimeline({ data, onOpen }: { data: DashboardData; onOpen: () => void }) {
   const { t } = usePreferences()
   const certificates = data.certificates.slice(0, 4)
-  return <Bezel className="timeline-panel"><SectionHeading title={t('overview.timeline')} action={<span className="section-context">{t('overview.next90')}</span>} />{certificates.length === 0 ? <EmptyState icon="shield" title={t('overview.noCertificates')} description={t('overview.noCertificatesDescription')} /> : <div className="timeline-list">{certificates.map((certificate) => { const width = Math.max(6, Math.min(100, (certificate.days_remaining / 90) * 100)); return <div className="timeline-row" key={certificate.id}><div><Icon name="shield" size={17} /><span><strong>{certificate.domain}</strong><small>{certificateSource(certificate.source, t)}</small></span></div><div className="timeline-track"><span className={`timeline-fill timeline-${certificate.status}`} style={{ transform: `scaleX(${width / 100})` }} /></div><span className={`timeline-days timeline-${certificate.status}`}>{certificate.days_remaining > 0 ? t('common.days', { count: certificate.days_remaining }) : t('common.expired')}</span></div>})}</div>}<div className="panel-footer timeline-footer"><span className="timeline-legend"><StatusDot tone="good" />{t('common.valid')} <StatusDot tone="warning" />{t('common.expiring')} <StatusDot tone="danger" />{t('common.expired')}</span><button className="text-link" onClick={onOpen}>{t('overview.viewCertificates')} <Icon name="arrow" size={17} /></button></div></Bezel>
+  return (
+    <Bezel className="timeline-panel">
+      <SectionHeading title={t('overview.timeline')} action={<span className="section-context">{t('overview.next90')}</span>} />
+      {certificates.length === 0 ? (
+        <EmptyState icon="shield" title={t('overview.noCertificates')} description={t('overview.noCertificatesDescription')} />
+      ) : (
+        <div className="timeline-list">
+          {certificates.map((certificate) => {
+            const width = Math.max(6, Math.min(100, (certificate.days_remaining / 90) * 100))
+            return (
+              <div className="timeline-row" key={certificate.id}>
+                <div>
+                  <Icon name="certificate" size={17} />
+                  <span>
+                    <strong>{certificate.domain}</strong>
+                    <small>{certificateSource(certificate.source, t)}</small>
+                  </span>
+                </div>
+                <div className="timeline-track">
+                  <span className={`timeline-fill timeline-${certificate.status}`} style={{ transform: `scaleX(${width / 100})` }} />
+                </div>
+                <span className={`timeline-days timeline-${certificate.status}`}>
+                  {certificate.days_remaining > 0 ? t('common.days', { count: certificate.days_remaining }) : t('common.expired')}
+                </span>
+              </div>
+            )
+          })}
+        </div>
+      )}
+      <div className="panel-footer timeline-footer">
+        <span className="timeline-legend">
+          <StatusDot tone="good" />{t('common.valid')}
+          <StatusDot tone="warning" />{t('common.expiring')}
+          <StatusDot tone="danger" />{t('common.expired')}
+        </span>
+        <button type="button" className="text-link" onClick={onOpen}>{t('overview.viewCertificates')} <Icon name="arrow" size={16} /></button>
+      </div>
+    </Bezel>
+  )
 }
 
 function NodeHealth({ nodes, onOpen }: { nodes: NodeRecord[]; onOpen: () => void }) {
   const { t } = usePreferences()
-  return <Bezel className="node-health-panel"><SectionHeading title={t('overview.nodeHealth')} />{nodes.length === 0 ? <EmptyState icon="server" title={t('overview.noNodes')} description={t('overview.noNodesDescription')} /> : <div className="node-health-list">{nodes.slice(0, 5).map((node) => <button className="node-health-row" key={node.id} onClick={onOpen}><StatusDot tone={node.status === 'online' && node.nginx_healthy ? 'good' : node.status === 'offline' ? 'danger' : 'warning'} /><span><strong>{node.name}</strong><small>{node.ip_addresses?.[0] ?? node.hostname ?? t('overview.waitingReport')}</small><small>{node.nginx_version || t('overview.nginxUndetected')}</small></span><span className={node.status === 'online' ? 'node-online' : 'node-offline'}>{node.status === 'online' ? t('common.online') : t('common.offline')}<strong>{node.nginx_healthy ? '100%' : '—'}</strong></span></button>)}</div>}{nodes.length > 0 && <button className="rail-link" onClick={onOpen}>{t('overview.viewNodes')} <Icon name="arrow" size={17} /></button>}</Bezel>
+  return (
+    <Bezel className="node-health-panel">
+      <SectionHeading title={t('overview.nodeHealth')} />
+      {nodes.length === 0 ? (
+        <EmptyState icon="server" title={t('overview.noNodes')} description={t('overview.noNodesDescription')} />
+      ) : (
+        <div className="node-health-list">
+          {nodes.slice(0, 5).map((node) => (
+            <button type="button" className="node-health-row" key={node.id} onClick={onOpen}>
+              <StatusDot tone={node.status === 'online' && node.nginx_healthy ? 'good' : node.status === 'offline' ? 'danger' : 'warning'} />
+              <span>
+                <strong>{node.name}</strong>
+                <small>{node.ip_addresses?.[0] ?? node.hostname ?? t('overview.waitingReport')}</small>
+                <small>{node.nginx_version || t('overview.nginxUndetected')}</small>
+              </span>
+              <span className={node.status === 'online' ? 'node-online' : 'node-offline'}>
+                {node.status === 'online' ? t('common.online') : t('common.offline')}
+                <strong>{node.nginx_healthy ? t('overview.nginxOk') : t('overview.nginxBad')}</strong>
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
+      {nodes.length > 0 && (
+        <button type="button" className="rail-link" onClick={onOpen}>{t('overview.viewNodes')} <Icon name="arrow" size={16} /></button>
+      )}
+    </Bezel>
+  )
 }
 
 function ActivityFeed({ events, domains, nodes, onOpen }: { events: AuditEvent[]; domains: DomainRecord[]; nodes: NodeRecord[]; onOpen: () => void }) {
   const { t, locale, effectiveLanguage } = usePreferences()
   const domainNames = Object.fromEntries(domains.map((domain) => [domain.id, domain.name]))
   const nodeNames = Object.fromEntries(nodes.map((node) => [node.id, node.name]))
-  return <Bezel className="activity-panel"><SectionHeading title={t('overview.activity')} action={<button className="plain-link" onClick={onOpen}>{t('overview.viewAll')}</button>} />{events.length === 0 ? <EmptyState icon="log" title={t('overview.noActivity')} description={t('overview.noActivityDescription')} /> : <div className="activity-list">{events.slice(0, 6).map((event, index) => <button className="activity-row" key={event.id || `${event.action}-${index}`} onClick={onOpen}><StatusIcon tone={event.level === 'error' ? 'error' : event.level} /><span><strong>{effectiveLanguage === 'zh' ? event.message : event.action.replaceAll('.', ' · ')}</strong><small>{domainNames[event.domain_id ?? ''] || nodeNames[event.node_id ?? ''] || event.action}</small></span><time>{relativeTime(event.created_at, locale)}</time></button>)}</div>}</Bezel>
+  return (
+    <Bezel className="activity-panel">
+      <SectionHeading title={t('overview.activity')} action={<button type="button" className="plain-link" onClick={onOpen}>{t('overview.viewAll')}</button>} />
+      {events.length === 0 ? (
+        <EmptyState icon="log" title={t('overview.noActivity')} description={t('overview.noActivityDescription')} />
+      ) : (
+        <div className="activity-list">
+          {events.slice(0, 6).map((event, index) => (
+            <button type="button" className="activity-row" key={event.id || `${event.action}-${index}`} onClick={onOpen}>
+              <StatusIcon tone={event.level === 'error' ? 'error' : event.level} />
+              <span>
+                <strong>{effectiveLanguage === 'zh' ? event.message : event.action.replaceAll('.', ' · ')}</strong>
+                <small>{domainNames[event.domain_id ?? ''] || nodeNames[event.node_id ?? ''] || event.action}</small>
+              </span>
+              <time>{relativeTime(event.created_at, locale)}</time>
+            </button>
+          ))}
+        </div>
+      )}
+    </Bezel>
+  )
 }
 
 function certificateSource(source: string, t: (key: string, variables?: Record<string, string | number>) => string): string {

@@ -21,15 +21,19 @@ export function Bezel({ children, className = '', ...props }: HTMLAttributes<HTM
 
 type ActionButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & {
   icon?: IconName
+  leadingIcon?: IconName
   tone?: 'primary' | 'quiet' | 'danger'
   wide?: boolean
+  /** Hide the trailing icon badge (cleaner for short mobile CTAs). */
+  plain?: boolean
 }
 
-export function ActionButton({ children, icon = 'arrow', tone = 'primary', wide, className = '', ...props }: ActionButtonProps) {
+export function ActionButton({ children, icon = 'arrow', leadingIcon, tone = 'primary', wide, plain, className = '', ...props }: ActionButtonProps) {
   return (
-    <button className={`action-button action-${tone} ${wide ? 'action-wide' : ''} ${className}`} {...props}>
-      <span>{children}</span>
-      <span className="action-icon"><Icon name={icon} size={18} /></span>
+    <button className={`action-button action-${tone} ${wide ? 'action-wide' : ''} ${plain ? 'action-plain' : ''} ${leadingIcon ? 'action-leading' : ''} ${className}`} {...props}>
+      {leadingIcon && <span className="action-leading-icon"><Icon name={leadingIcon} size={18} weight="bold" /></span>}
+      <span className="action-label">{children}</span>
+      {!plain && <span className="action-icon"><Icon name={icon} size={17} weight="bold" /></span>}
     </button>
   )
 }
@@ -125,7 +129,7 @@ export function ConfirmDialog({ title, description, confirmLabel, open, onCancel
         <p>{description}</p>
         <div className="confirm-actions">
           <button className="text-button" onClick={onCancel} disabled={busy}>{t('common.cancel')}</button>
-          <ActionButton tone={tone} icon={icon} onClick={onConfirm} disabled={busy}>{busy ? busyLabel ?? t('common.saving') : confirmLabel}</ActionButton>
+          <ActionButton tone={tone} plain onClick={onConfirm} disabled={busy}>{busy ? busyLabel ?? t('common.saving') : confirmLabel}</ActionButton>
         </div>
       </div>
     </div>

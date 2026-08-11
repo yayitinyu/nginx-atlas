@@ -62,7 +62,7 @@ export function LoginGate({ onLogin }: { onLogin: (password: string) => Promise<
             />
           </div>
           {error && <span className="form-error" role="alert">{error}</span>}
-          <ActionButton wide disabled={busy}>{busy ? t('login.submitting') : t('login.submit')}</ActionButton>
+          <ActionButton wide plain disabled={busy}>{busy ? t('login.submitting') : t('login.submit')}</ActionButton>
           <small className="login-security"><Icon name="shield" size={15} />{t('login.secure')}</small>
         </form>
       </div>
