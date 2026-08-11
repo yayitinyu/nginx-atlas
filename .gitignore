@@ -1,0 +1,25 @@
+# Build output
+/bin/
+/dist-release/
+/internal/ui/dist/
+/web/dist/
+
+# Frontend dependencies and local tooling
+/web/node_modules/
+/web/.vite/
+
+# Runtime state and secrets
+/.data/
+/*.env
+!/configs/*.env.example
+
+# Local QA artifacts
+/tmp/
+/playwright-report/
+/test-results/
+
+# Editors and operating systems
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

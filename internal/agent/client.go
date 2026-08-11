@@ -1,0 +1,280 @@
+package agent
+
+import (
+	"bytes"
+	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"net"
+	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"time"
+
+	"github.com/yayitinyu/nginx-atlas/internal/protocol"
+)
+
+const maxAgentResponseBytes = 8 << 20
+
+type ClientConfig struct {
+	ServerURL       string
+	NodeName        string
+	EnrollmentToken string
+	StatePath       string
+	CACertPath      string
+	PollInterval    time.Duration
+	Version         string
+}
+
+type Client struct {
+	config   ClientConfig
+	executor *Executor
+	runner   CommandRunner
+	http     *http.Client
+	logger   *slog.Logger
+	state    clientState
+}
+
+type clientState struct {
+	NodeID string `json:"node_id"`
+	Secret string `json:"secret"`
+}
+
+func NewClient(config ClientConfig, executor *Executor, runner CommandRunner, logger *slog.Logger) (*Client, error) {
+	if config.ServerURL == "" {
+		return nil, errors.New("server URL is required")
+	}
+	parsed, err := url.Parse(config.ServerURL)
+	if err != nil || (parsed.Scheme != "https" && !(parsed.Scheme == "http" && isLoopbackHost(parsed.Hostname()))) {
+		return nil, errors.New("server URL must use HTTPS; HTTP is allowed only for loopback development")
+	}
+	config.ServerURL = strings.TrimRight(parsed.String(), "/")
+	if strings.TrimSpace(config.NodeName) == "" {
+		hostname, _ := os.Hostname()
+		config.NodeName = hostname
+	}
+	if config.StatePath == "" {
+		config.StatePath = "/var/lib/nginx-atlas/agent.json"
+	}
+	if config.PollInterval < 3*time.Second {
+		config.PollInterval = 10 * time.Second
+	}
+	if executor == nil {
+		return nil, errors.New("executor is required")
+	}
+	if runner == nil {
+		runner = OSCommandRunner{}
+	}
+	if logger == nil {
+		logger = slog.Default()
+	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+	if config.CACertPath != "" {
+		pemData, err := os.ReadFile(config.CACertPath)
+		if err != nil {
+			return nil, fmt.Errorf("read custom CA certificate: %w", err)
+		}
+		roots, err := x509.SystemCertPool()
+		if err != nil || roots == nil {
+			roots = x509.NewCertPool()
+		}
+		if !roots.AppendCertsFromPEM(pemData) {
+			return nil, errors.New("custom CA file contains no valid certificate")
+		}
+		transport.TLSClientConfig.RootCAs = roots
+	}
+	client := &Client{
+		config: config, executor: executor, runner: runner, logger: logger,
+		http: &http.Client{Timeout: 45 * time.Second, Transport: transport},
+	}
+	if err := client.loadState(); err != nil {
+		return nil, err
+	}
+	return client, nil
+}
+
+func (c *Client) Run(ctx context.Context) error {
+	if c.state.NodeID == "" {
+		if err := c.enroll(ctx); err != nil {
+			return err
+		}
+	}
+	c.logger.Info("agent connected", "server", c.config.ServerURL, "node_id", c.state.NodeID)
+	for {
+		pollAfter, err := c.pollOnce(ctx)
+		if err != nil {
+			c.logger.Error("agent poll failed", "error", err)
+			pollAfter = c.config.PollInterval
+		}
+		if pollAfter < 3*time.Second || pollAfter > 5*time.Minute {
+			pollAfter = c.config.PollInterval
+		}
+		timer := time.NewTimer(pollAfter)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil
+		case <-timer.C:
+		}
+	}
+}
+
+func (c *Client) enroll(ctx context.Context) error {
+	if strings.TrimSpace(c.config.EnrollmentToken) == "" {
+		return errors.New("agent is not enrolled and no enrollment token was provided")
+	}
+	request := protocol.EnrollRequest{Token: c.config.EnrollmentToken, Name: c.config.NodeName, Report: c.report(ctx)}
+	var response protocol.EnrollResponse
+	if err := c.doJSON(ctx, http.MethodPost, "/api/v1/agent/enroll", request, &response, false); err != nil {
+		return fmt.Errorf("enroll agent: %w", err)
+	}
+	if response.NodeID == "" || response.NodeSecret == "" {
+		return errors.New("enrollment response did not contain node credentials")
+	}
+	c.state = clientState{NodeID: response.NodeID, Secret: response.NodeSecret}
+	if err := c.saveState(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (c *Client) pollOnce(ctx context.Context) (time.Duration, error) {
+	var response protocol.PollResponse
+	request := protocol.PollRequest{Report: c.report(ctx)}
+	if err := c.doJSON(ctx, http.MethodPost, "/api/v1/agent/poll", request, &response, true); err != nil {
+		return c.config.PollInterval, err
+	}
+	if response.Job == nil {
+		return time.Duration(response.PollAfter) * time.Second, nil
+	}
+	c.logger.Info("executing job", "job_id", response.Job.ID, "type", response.Job.Type)
+	jobCtx, cancel := context.WithTimeout(ctx, 15*time.Minute)
+	result := c.executor.Execute(jobCtx, *response.Job)
+	cancel()
+	var acknowledgement map[string]any
+	path := "/api/v1/agent/jobs/" + url.PathEscape(response.Job.ID) + "/result"
+	if err := c.doJSON(ctx, http.MethodPost, path, result, &acknowledgement, true); err != nil {
+		return c.config.PollInterval, fmt.Errorf("report job result: %w", err)
+	}
+	c.logger.Info("job completed", "job_id", response.Job.ID, "success", result.Success)
+	return time.Second, nil
+}
+
+func (c *Client) report(ctx context.Context) protocol.NodeReport {
+	hostname, _ := os.Hostname()
+	report := protocol.NodeReport{
+		Hostname: hostname, IPAddresses: interfaceAddresses(), OS: runtime.GOOS, Arch: runtime.GOARCH,
+		AgentVersion: c.config.Version, Certificates: c.executor.InventoryCertificates(),
+	}
+	if output, err := c.runner.Run(ctx, c.executor.config.NginxBinary, []string{"-v"}, nil); err == nil {
+		report.NginxVersion = strings.TrimSpace(string(output))
+	}
+	if output, err := c.runner.Run(ctx, c.executor.config.NginxBinary, []string{"-t"}, nil); err == nil {
+		report.NginxHealthy = true
+	} else {
+		report.LastError = limitOutput(output)
+	}
+	return report
+}
+
+func (c *Client) doJSON(ctx context.Context, method, path string, requestBody, responseBody any, authenticate bool) error {
+	payload, err := json.Marshal(requestBody)
+	if err != nil {
+		return fmt.Errorf("encode request: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, c.config.ServerURL+path, bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	if authenticate {
+		req.Header.Set("Authorization", "AtlasNode "+c.state.NodeID+"."+c.state.Secret)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxAgentResponseBytes+1))
+	if err != nil {
+		return err
+	}
+	if len(body) > maxAgentResponseBytes {
+		return errors.New("server response is too large")
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		var apiError protocol.APIError
+		if json.Unmarshal(body, &apiError) == nil && apiError.Error != "" {
+			return fmt.Errorf("server returned %d: %s", resp.StatusCode, apiError.Error)
+		}
+		return fmt.Errorf("server returned %d", resp.StatusCode)
+	}
+	if responseBody != nil && len(body) > 0 {
+		if err := json.Unmarshal(body, responseBody); err != nil {
+			return fmt.Errorf("decode response: %w", err)
+		}
+	}
+	return nil
+}
+
+func (c *Client) loadState() error {
+	data, err := os.ReadFile(c.config.StatePath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read agent state: %w", err)
+	}
+	if err := json.Unmarshal(data, &c.state); err != nil {
+		return fmt.Errorf("decode agent state: %w", err)
+	}
+	if c.state.NodeID == "" || c.state.Secret == "" {
+		return errors.New("agent state is incomplete")
+	}
+	return nil
+}
+
+func (c *Client) saveState() error {
+	if err := os.MkdirAll(filepath.Dir(c.config.StatePath), 0o700); err != nil {
+		return fmt.Errorf("create agent state directory: %w", err)
+	}
+	data, err := json.MarshalIndent(c.state, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := writeAtomic(c.config.StatePath, data, 0o600); err != nil {
+		return fmt.Errorf("save agent state: %w", err)
+	}
+	return nil
+}
+
+func interfaceAddresses() []string {
+	addresses, _ := net.InterfaceAddrs()
+	result := make([]string, 0, len(addresses))
+	for _, address := range addresses {
+		ip, _, err := net.ParseCIDR(address.String())
+		if err != nil || ip.IsLoopback() || ip.IsUnspecified() {
+			continue
+		}
+		result = append(result, ip.String())
+	}
+	return result
+}
+
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}

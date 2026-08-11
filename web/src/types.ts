@@ -1,0 +1,154 @@
+export type NodeStatus = 'pending' | 'online' | 'offline' | 'revoked'
+export type JobStatus = 'queued' | 'running' | 'succeeded' | 'failed'
+export type CertificateStatus = 'valid' | 'expiring' | 'expired' | 'none'
+
+export interface CertificateMeta {
+  domain: string
+  path: string
+  fingerprint_sha256: string
+  issuer: string
+  not_after: string
+  dns_names?: string[]
+  key_matches: boolean
+  error?: string
+}
+
+export interface NodeRecord {
+  id: string
+  name: string
+  status: NodeStatus
+  hostname?: string
+  ip_addresses?: string[]
+  os?: string
+  arch?: string
+  nginx_version?: string
+  nginx_healthy: boolean
+  agent_version?: string
+  last_seen_at?: string
+  created_at: string
+  certificates?: CertificateMeta[]
+  last_error?: string
+  running_job_id?: string
+}
+
+export interface DomainRecord {
+  id: string
+  name: string
+  node_id: string
+  node_name: string
+  node_status: NodeStatus
+  upstream_host: string
+  upstream_port: number
+  certificate_id?: string
+  certificate_mode: 'local' | 'upload' | 'acme' | ''
+  certificate_issuer?: string
+  certificate_expiry?: string
+  certificate_status: CertificateStatus
+  acme_account_id?: string
+  dns_account_id?: string
+  auto_renew: boolean
+  renew_before_days: number
+  sync_node_ids?: string[]
+  enabled: boolean
+  last_job_id?: string
+  last_error?: string
+  job_status?: JobStatus
+  created_at: string
+  updated_at: string
+}
+
+export interface CertificateRecord {
+  id: string
+  domain: string
+  source: 'local' | 'upload' | 'acme'
+  fingerprint_sha256: string
+  issuer: string
+  serial_number: string
+  not_before: string
+  not_after: string
+  dns_names: string[]
+  auto_renew: boolean
+  acme_account_id?: string
+  dns_account_id?: string
+  issuer_node_id?: string
+  deployed_node_ids: string[]
+  days_remaining: number
+  status: Exclude<CertificateStatus, 'none'>
+  created_at: string
+  updated_at: string
+}
+
+export interface AuditEvent {
+  id: string
+  level: 'success' | 'info' | 'warning' | 'error'
+  action: string
+  message: string
+  node_id?: string
+  domain_id?: string
+  job_id?: string
+  created_at: string
+}
+
+export interface JobRecord {
+  id: string
+  node_id: string
+  domain_id?: string
+  type: string
+  status: JobStatus
+  attempts: number
+  max_attempts: number
+  error?: string
+  created_at: string
+  started_at?: string
+  finished_at?: string
+}
+
+export interface DashboardData {
+  nodes: NodeRecord[]
+  domains: DomainRecord[]
+  certificates: CertificateRecord[]
+  audit: AuditEvent[]
+  jobs: JobRecord[]
+  server_time: string
+}
+
+export interface DNSAccount {
+  id: string
+  name: string
+  provider: string
+  credential_keys: string[]
+  created_at: string
+  updated_at: string
+}
+
+export interface ACMEAccount {
+  id: string
+  name: string
+  email: string
+  directory_url: string
+  has_eab: boolean
+  created_at: string
+  updated_at: string
+}
+
+export interface CreateDomainInput {
+  domain: string
+  node_id: string
+  upstream_host: string
+  upstream_port: number
+  certificate_mode: 'none' | 'local' | 'upload' | 'acme'
+  certificate_id?: string
+  acme_account_id?: string
+  dns_account_id?: string
+  auto_renew: boolean
+  renew_before_days: number
+  sync_node_ids: string[]
+}
+
+export interface EnrollmentResponse {
+  id: string
+  name: string
+  token: string
+  expires_at: string
+  command: string
+}
