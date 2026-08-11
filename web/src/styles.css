@@ -79,9 +79,10 @@ button:focus-visible, input:focus-visible, [role='combobox']:focus-visible { out
 .admin-avatar::after { content: ''; position: absolute; right: 1px; bottom: 1px; width: 9px; height: 9px; border: 2px solid var(--surface); border-radius: 50%; background: var(--accent); }
 .admin-avatar-compact { width: 32px; height: 32px; font-size: 11px; }
 
-.action-button { min-height: 44px; display: inline-flex; align-items: center; justify-content: space-between; gap: 20px; padding: 5px 6px 5px 17px; border: 1px solid transparent; border-radius: 8px; color: #fff; background: var(--accent); font-size: 13px; font-weight: 700; transition: transform .25s var(--spring), background-color .25s var(--spring), box-shadow .25s var(--spring); }
-.action-button:hover:not(:disabled) { transform: translateY(-1px); background: var(--accent-strong); box-shadow: 0 9px 24px color-mix(in srgb, var(--accent) 20%, transparent); }
+.action-button { min-height: 44px; display: inline-flex; align-items: center; justify-content: space-between; gap: 16px; padding: 5px 8px 5px 16px; border: 1px solid transparent; border-radius: 10px; color: #fff; background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 92%, white), var(--accent)); font-size: 13px; font-weight: 600; letter-spacing: .01em; box-shadow: inset 0 1px 0 rgba(255,255,255,.18), 0 1px 2px color-mix(in srgb, var(--accent) 25%, transparent); transition: transform .22s var(--spring), background-color .22s var(--spring), box-shadow .22s var(--spring), filter .22s var(--spring); }
+.action-button:hover:not(:disabled) { transform: translateY(-1px); filter: brightness(1.03); box-shadow: inset 0 1px 0 rgba(255,255,255,.22), 0 10px 22px color-mix(in srgb, var(--accent) 22%, transparent); }
 .action-button:active:not(:disabled) { transform: scale(.985); }
+.action-button:disabled { opacity: .55; filter: grayscale(.15); cursor: not-allowed; }
 .action-wide { width: 100%; }
 .action-icon { width: 32px; height: 32px; display: grid; place-items: center; border-radius: 6px; background: rgba(255,255,255,.14); }
 .action-quiet { color: var(--text); background: var(--surface-soft); border-color: var(--line); }
@@ -361,7 +362,8 @@ button:focus-visible, input:focus-visible, [role='combobox']:focus-visible { out
 .field-state { color: var(--accent-text); }
 .drawer-layer { position: fixed; inset: 0; z-index: 70; display: flex; justify-content: flex-end; background: rgba(4, 8, 6, .52); opacity: 0; pointer-events: none; transition: opacity .25s; }
 .drawer-open { opacity: 1; pointer-events: auto; }
-.domain-drawer { width: min(720px, calc(100vw - 230px)); min-width: 600px; height: 100dvh; display: grid; grid-template-rows: auto auto minmax(0,1fr) auto; border-left: 1px solid var(--line-strong); background: var(--surface); box-shadow: -25px 0 80px rgba(0,0,0,.28); transform: translateX(100%); transition: transform .35s var(--spring); }
+/* header + scrollable body + sticky footer (no intermediate steps row) */
+.domain-drawer { width: min(720px, calc(100vw - 230px)); min-width: 600px; height: 100dvh; display: grid; grid-template-rows: auto minmax(0,1fr) auto; border-left: 1px solid var(--line-strong); background: var(--surface); box-shadow: -25px 0 80px rgba(0,0,0,.28); transform: translateX(100%); transition: transform .35s var(--spring); }
 .drawer-open .domain-drawer { transform: translateX(0); }
 .drawer-header { min-height: 82px; display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 14px 20px; border-bottom: 1px solid var(--line); }
 .drawer-header h2 { margin: 0; font-size: 23px; letter-spacing: -.045em; }
@@ -372,7 +374,7 @@ button:focus-visible, input:focus-visible, [role='combobox']:focus-visible { out
 .drawer-steps b { height: 1px; flex: 1; background: var(--line); }
 .drawer-steps .step-active, .drawer-steps .step-ready { color: var(--accent-text); }
 .drawer-steps .step-active i, .drawer-steps .step-ready i { border-color: var(--accent); background: var(--accent-soft); }
-.drawer-body { overflow-y: auto; padding: 22px 22px 34px; overscroll-behavior: contain; }
+.drawer-body { min-height: 0; overflow-y: auto; padding: 22px 22px 34px; overscroll-behavior: contain; }
 .form-row { display: grid; grid-template-columns: 116px minmax(0,1fr); align-items: start; gap: 14px; margin-bottom: 15px; }
 .form-row > label, .certificate-source > legend { padding-top: 12px; color: var(--muted); font-size: 9px; font-weight: 700; }
 .split-fields { display: grid; grid-template-columns: minmax(0,1fr) 170px; gap: 9px; }
@@ -413,8 +415,9 @@ button[role="switch"].switch-on i, button[role="switch"][aria-checked="true"] i,
 .deploy-note, .form-warning { display: flex; align-items: flex-start; gap: 8px; margin-left: 130px; padding: 10px 12px; border-radius: 8px; color: var(--muted); background: var(--surface-soft); font-size: 8px; line-height: 1.6; }
 .form-warning { margin-top: 8px; color: var(--warning); background: var(--warning-soft); }
 .drawer-error { margin-left: 130px; }
-.drawer-footer { min-height: 70px; display: grid; grid-template-columns: 140px minmax(0,1fr); gap: 9px; padding: 10px 20px; border-top: 1px solid var(--line); background: var(--surface); }
-.cancel-button, .text-button { min-height: 44px; border: 1px solid var(--line); border-radius: 8px; color: var(--text-soft); background: var(--surface-soft); font-size: 11px; font-weight: 700; }
+.drawer-footer { min-height: 70px; display: grid; grid-template-columns: 140px minmax(0,1fr); gap: 9px; padding: 10px 20px; border-top: 1px solid var(--line); background: color-mix(in srgb, var(--surface) 92%, transparent); backdrop-filter: blur(16px); }
+.cancel-button, .text-button { min-height: 44px; border: 1px solid var(--line); border-radius: 10px; color: var(--text-soft); background: var(--surface-soft); font-size: 12px; font-weight: 600; letter-spacing: .01em; }
+.cancel-button:hover:not(:disabled) { background: var(--surface-hover); color: var(--text); }
 
 /* Modal dialogs */
 .modal-layer { position: fixed; inset: 0; z-index: 80; display: flex; align-items: center; justify-content: center; padding: 20px; background: rgba(4,8,6,.56); }

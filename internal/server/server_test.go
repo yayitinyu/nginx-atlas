@@ -665,6 +665,86 @@ func TestTakeoverExistingNginxDomainQueuesTransactionalReplacement(t *testing.T)
 	}
 }
 
+func TestTakeoverPassesSharedWildcardCertificateDirectory(t *testing.T) {
+	stateStore, err := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	box, err := securebox.New(bytes.Repeat([]byte{0x73}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminToken := strings.Repeat("w", 32)
+	controller, err := New(Config{AdminToken: adminToken}, stateStore, box, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if err := stateStore.Update(func(state *model.State) error {
+		state.Nodes["node_wildcard"] = model.Node{
+			ID: "node_wildcard", Name: "Wildcard", Status: model.NodeOnline, CreatedAt: now,
+			Certificates: []model.CertificateMeta{{
+				Domain: "example.com", DNSNames: []string{"*.example.com", "example.com"},
+				NotAfter: now.Add(60 * 24 * time.Hour), KeyMatches: true,
+			}},
+			NginxSites: []model.NginxSiteMeta{{
+				Domain: "api.example.com", ConfigPath: "/etc/nginx/sites-enabled/fandai.conf",
+				UpstreamHost: "127.0.0.1", UpstreamPort: 8080, TLS: true,
+				CertificatePath: "/etc/ssl/example.com/fullchain.pem",
+			}},
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := performJSON(t, controller.Handler(), http.MethodPost, "/api/v1/domains/adopt", map[string]any{
+		"node_id": "node_wildcard", "domain": "api.example.com",
+		"config_path": "/etc/nginx/sites-enabled/fandai.conf", "takeover": true,
+	}, "Bearer "+adminToken)
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("takeover returned %d: %s", recorder.Code, recorder.Body.String())
+	}
+	snapshot := stateStore.Snapshot()
+	var domain model.Domain
+	for _, candidate := range snapshot.Domains {
+		domain = candidate
+	}
+	job := snapshot.Jobs[domain.LastJobID]
+	var spec applyDomainSpec
+	if err := json.Unmarshal(job.Payload, &spec); err != nil {
+		t.Fatal(err)
+	}
+	if spec.LocalCertificateDir != "/etc/ssl/example.com" {
+		t.Fatalf("expected shared cert dir, got %+v", spec)
+	}
+	if !spec.UseLocalCertificate || spec.ReplaceConfigPath != "/etc/nginx/sites-enabled/fandai.conf" {
+		t.Fatalf("unexpected takeover spec: %+v", spec)
+	}
+}
+
+func TestNodeHasValidCertificateRequiresCoverage(t *testing.T) {
+	now := time.Now().UTC()
+	node := model.Node{
+		Certificates: []model.CertificateMeta{{
+			Domain: "other.example.com", DNSNames: []string{"other.example.com"},
+			NotAfter: now.Add(time.Hour),
+		}},
+		NginxSites: []model.NginxSiteMeta{{
+			Domain: "api.example.com", TLS: true,
+		}},
+	}
+	if nodeHasValidCertificate(node, "api.example.com") {
+		t.Fatal("expected missing certificate coverage to fail")
+	}
+	node.Certificates = append(node.Certificates, model.CertificateMeta{
+		Domain: "example.com", DNSNames: []string{"*.example.com", "example.com"},
+	})
+	if !nodeHasValidCertificate(node, "api.example.com") {
+		t.Fatal("expected wildcard coverage to pass")
+	}
+}
+
 func TestRenameNodeUpdatesOnlyDisplayName(t *testing.T) {
 	stateStore, err := store.Open(filepath.Join(t.TempDir(), "state.json"))
 	if err != nil {

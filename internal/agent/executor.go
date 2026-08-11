@@ -166,7 +166,7 @@ func (e *Executor) applyDomain(ctx context.Context, payload protocol.ApplyDomain
 	rollback := func() {
 		_ = restoreFiles(backup)
 		if takeoverChanged {
-			_ = e.restoreTakeoverConfig(payload.ReplaceConfigPath)
+			_, _ = e.restoreTakeoverConfig(payload.ReplaceConfigPath)
 		}
 	}
 
@@ -176,14 +176,18 @@ func (e *Executor) applyDomain(ctx context.Context, payload protocol.ApplyDomain
 			return protocol.JobResultRequest{}, err
 		}
 	} else if payload.TLS && payload.UseLocalCertificate {
-		if _, err := e.readAndValidateCertificate(domain); err != nil {
+		sourceDir := strings.TrimSpace(payload.LocalCertificateDir)
+		if sourceDir == "" {
+			sourceDir = certDir
+		}
+		if err := e.ensureLocalCertificate(domain, sourceDir); err != nil {
 			return protocol.JobResultRequest{}, fmt.Errorf("local certificate is unavailable: %w", err)
 		}
 	} else if payload.TLS {
 		return protocol.JobResultRequest{}, errors.New("TLS is enabled but no certificate was supplied")
 	}
 	if payload.ReplaceConfigPath != "" {
-		takeoverChanged, err = e.disableTakeoverConfig(payload.ReplaceConfigPath, paths[0])
+		takeoverChanged, err = e.disableTakeoverConfig(payload.ReplaceConfigPath, paths[0], domain)
 		if err != nil {
 			rollback()
 			return protocol.JobResultRequest{}, fmt.Errorf("disable original nginx site: %w", err)
@@ -217,7 +221,8 @@ func (e *Executor) applyDomain(ctx context.Context, payload protocol.ApplyDomain
 }
 
 func (e *Executor) deleteDomain(ctx context.Context, payload protocol.DeleteDomainPayload) (protocol.JobResultRequest, error) {
-	filename, err := nginxconfig.ConfigFileName(strings.ToLower(strings.TrimSpace(payload.Domain)))
+	domain := strings.ToLower(strings.TrimSpace(payload.Domain))
+	filename, err := nginxconfig.ConfigFileName(domain)
 	if err != nil {
 		return protocol.JobResultRequest{}, err
 	}
@@ -231,23 +236,24 @@ func (e *Executor) deleteDomain(ctx context.Context, payload protocol.DeleteDoma
 	}
 	restoredTakeover := false
 	if payload.RestoreConfigPath != "" {
-		if err := e.restoreTakeoverConfig(payload.RestoreConfigPath); err != nil {
+		restored, err := e.restoreTakeoverConfig(payload.RestoreConfigPath)
+		if err != nil {
 			_ = restoreFiles(backup)
 			return protocol.JobResultRequest{}, fmt.Errorf("restore original nginx site: %w", err)
 		}
-		restoredTakeover = true
+		restoredTakeover = restored
 	}
 	output, err := e.runner.Run(ctx, e.config.NginxBinary, []string{"-t"}, nil)
 	if err != nil {
 		if restoredTakeover {
-			_, _ = e.disableTakeoverConfig(payload.RestoreConfigPath, path)
+			_, _ = e.disableTakeoverConfig(payload.RestoreConfigPath, path, domain)
 		}
 		_ = restoreFiles(backup)
 		return protocol.JobResultRequest{NginxOutput: limitOutput(output)}, fmt.Errorf("nginx validation after removal failed: %w", err)
 	}
 	if _, err := e.runner.Run(ctx, e.config.Systemctl, []string{"reload", "nginx"}, nil); err != nil {
 		if restoredTakeover {
-			_, _ = e.disableTakeoverConfig(payload.RestoreConfigPath, path)
+			_, _ = e.disableTakeoverConfig(payload.RestoreConfigPath, path, domain)
 		}
 		_ = restoreFiles(backup)
 		return protocol.JobResultRequest{NginxOutput: limitOutput(output)}, fmt.Errorf("reload nginx: %w", err)
@@ -416,19 +422,7 @@ func (e *Executor) installCertificate(domain string, bundle protocol.Certificate
 }
 
 func (e *Executor) readAndValidateCertificate(domain string) (protocol.CertificateBundle, error) {
-	dir := filepath.Join(e.config.SSLRoot, domain)
-	fullchain, err := os.ReadFile(filepath.Join(dir, "fullchain.pem"))
-	if err != nil {
-		return protocol.CertificateBundle{}, fmt.Errorf("read fullchain.pem: %w", err)
-	}
-	privateKey, err := os.ReadFile(filepath.Join(dir, "privkey.pem"))
-	if err != nil {
-		return protocol.CertificateBundle{}, fmt.Errorf("read privkey.pem: %w", err)
-	}
-	if _, err := certutil.Validate(fullchain, privateKey, domain, e.now()); err != nil {
-		return protocol.CertificateBundle{}, err
-	}
-	return protocol.CertificateBundle{FullchainPEM: string(fullchain), PrivateKeyPEM: string(privateKey)}, nil
+	return e.readAndValidateCertificateFrom(filepath.Join(e.config.SSLRoot, domain), domain)
 }
 
 func (e *Executor) InventoryCertificates() []model.CertificateMeta {
@@ -617,7 +611,7 @@ func (e *Executor) updateSystem(ctx context.Context, payload protocol.UpdateSyst
 	return protocol.JobResultRequest{Message: "APT 软件包与 Nginx 已更新，配置验证通过并完成重载", NginxOutput: limitOutput(combined)}, nil
 }
 
-func (e *Executor) disableTakeoverConfig(sourcePath, managedPath string) (bool, error) {
+func (e *Executor) disableTakeoverConfig(sourcePath, managedPath, domain string) (bool, error) {
 	sourcePath, err := validateTakeoverPath(sourcePath)
 	if err != nil {
 		return false, err
@@ -629,44 +623,309 @@ func (e *Executor) disableTakeoverConfig(sourcePath, managedPath string) (bool, 
 	_, sourceErr := os.Lstat(sourcePath)
 	_, backupErr := os.Lstat(backupPath)
 	if errors.Is(sourceErr, os.ErrNotExist) && backupErr == nil {
+		// Whole-file takeover already completed earlier; nothing else to move.
 		return false, nil
 	}
 	if sourceErr != nil {
 		return false, fmt.Errorf("inspect original config: %w", sourceErr)
 	}
 	if backupErr == nil {
-		return false, errors.New("a takeover backup already exists while the original config is still active")
+		// A previous partial/surgical takeover left a backup. Re-apply the
+		// domain removal against the current file without clobbering the
+		// original full-file backup.
+		return e.reapplyTakeoverRemoval(sourcePath, domain)
 	}
 	if !errors.Is(backupErr, os.ErrNotExist) {
 		return false, fmt.Errorf("inspect takeover backup: %w", backupErr)
 	}
+	content, err := os.ReadFile(sourcePath)
+	if err != nil {
+		return false, fmt.Errorf("read original config: %w", err)
+	}
 	if err := os.MkdirAll(filepath.Dir(backupPath), 0o700); err != nil {
 		return false, err
 	}
-	if err := movePath(sourcePath, backupPath); err != nil {
+	// Preserve the pristine original before any mutation.
+	if err := writeAtomic(backupPath, content, 0o600); err != nil {
+		return false, fmt.Errorf("write takeover backup: %w", err)
+	}
+	modified, removed, err := removeServerBlocksForDomain(content, domain)
+	if err != nil {
+		_ = os.Remove(backupPath)
+		return false, err
+	}
+	if removed == 0 {
+		// Domain not found as an isolated server block (unusual). Fall back to
+		// whole-file disable so takeover still progresses safely for single-
+		// site files that use unusual formatting.
+		if err := os.Remove(backupPath); err != nil {
+			return false, err
+		}
+		if err := movePath(sourcePath, backupPath); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	if onlyNginxWhitespace(modified) {
+		if err := os.Remove(sourcePath); err != nil {
+			_ = os.Remove(backupPath)
+			return false, err
+		}
+		return true, nil
+	}
+	info, err := os.Lstat(sourcePath)
+	if err != nil {
+		_ = os.Remove(backupPath)
+		return false, err
+	}
+	mode := info.Mode().Perm()
+	if mode == 0 {
+		mode = 0o644
+	}
+	if err := writeAtomic(sourcePath, modified, mode); err != nil {
+		_ = os.Remove(backupPath)
+		return false, fmt.Errorf("rewrite shared nginx config: %w", err)
+	}
+	return true, nil
+}
+
+// restoreTakeoverConfig restores a previously disabled original site. It
+// returns whether a restore actually happened. Missing backups while the
+// original path still exists are treated as a successful no-op so failed
+// takeovers that never disabled the original site can still be cleaned up.
+func (e *Executor) restoreTakeoverConfig(sourcePath string) (bool, error) {
+	sourcePath, err := validateTakeoverPath(sourcePath)
+	if err != nil {
+		return false, err
+	}
+	backupPath := e.takeoverBackupPath(sourcePath)
+	_, sourceErr := os.Lstat(sourcePath)
+	_, backupErr := os.Lstat(backupPath)
+	if errors.Is(backupErr, os.ErrNotExist) {
+		if sourceErr == nil || errors.Is(sourceErr, os.ErrNotExist) {
+			// Takeover never disabled the original file (or it was already
+			// restored). Nothing destructive remains to undo.
+			return false, nil
+		}
+		return false, fmt.Errorf("inspect original config: %w", sourceErr)
+	}
+	if backupErr != nil {
+		return false, fmt.Errorf("inspect takeover backup: %w", backupErr)
+	}
+	content, err := os.ReadFile(backupPath)
+	if err != nil {
+		return false, fmt.Errorf("read takeover backup: %w", err)
+	}
+	if sourceErr == nil {
+		// Surgical takeovers leave the path occupied with a modified file.
+		// Whole-file takeovers leave it missing. Always prefer the pristine
+		// backup when present.
+		info, err := os.Lstat(sourcePath)
+		mode := fs.FileMode(0o644)
+		if err == nil && info.Mode().IsRegular() {
+			mode = info.Mode().Perm()
+		}
+		if err := writeAtomic(sourcePath, content, mode); err != nil {
+			return false, fmt.Errorf("restore original config: %w", err)
+		}
+		if err := os.Remove(backupPath); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	if !errors.Is(sourceErr, os.ErrNotExist) {
+		return false, sourceErr
+	}
+	if err := movePath(backupPath, sourcePath); err != nil {
 		return false, err
 	}
 	return true, nil
 }
 
-func (e *Executor) restoreTakeoverConfig(sourcePath string) error {
-	sourcePath, err := validateTakeoverPath(sourcePath)
+func (e *Executor) reapplyTakeoverRemoval(sourcePath, domain string) (bool, error) {
+	content, err := os.ReadFile(sourcePath)
+	if err != nil {
+		return false, fmt.Errorf("read shared nginx config: %w", err)
+	}
+	modified, removed, err := removeServerBlocksForDomain(content, domain)
+	if err != nil {
+		return false, err
+	}
+	if removed == 0 {
+		return false, nil
+	}
+	if onlyNginxWhitespace(modified) {
+		if err := os.Remove(sourcePath); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	info, err := os.Lstat(sourcePath)
+	if err != nil {
+		return false, err
+	}
+	mode := info.Mode().Perm()
+	if mode == 0 {
+		mode = 0o644
+	}
+	if err := writeAtomic(sourcePath, modified, mode); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// ensureLocalCertificate makes sure /etc/ssl/<domain> has a usable cert that
+// covers the vhost. When the real material lives in a shared directory (common
+// with wildcard certs), files are linked or copied into the domain directory.
+func (e *Executor) ensureLocalCertificate(domain, sourceDir string) error {
+	domain = strings.ToLower(strings.TrimSpace(domain))
+	sourceDir = filepath.Clean(strings.TrimSpace(sourceDir))
+	if sourceDir == "" || sourceDir == "." || sourceDir == string(filepath.Separator) {
+		return errors.New("local certificate directory is invalid")
+	}
+	targetDir := filepath.Join(e.config.SSLRoot, domain)
+	if _, err := e.readAndValidateCertificateFrom(sourceDir, domain); err != nil {
+		return err
+	}
+	if filepath.Clean(sourceDir) == filepath.Clean(targetDir) {
+		return nil
+	}
+	if err := os.MkdirAll(targetDir, 0o750); err != nil {
+		return fmt.Errorf("create certificate directory: %w", err)
+	}
+	for _, name := range []string{"fullchain.pem", "privkey.pem"} {
+		src := filepath.Join(sourceDir, name)
+		dst := filepath.Join(targetDir, name)
+		if err := linkOrCopyFile(src, dst); err != nil {
+			return fmt.Errorf("materialize %s: %w", name, err)
+		}
+	}
+	if _, err := e.readAndValidateCertificate(domain); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (e *Executor) readAndValidateCertificateFrom(dir, domain string) (protocol.CertificateBundle, error) {
+	fullchain, err := os.ReadFile(filepath.Join(dir, "fullchain.pem"))
+	if err != nil {
+		return protocol.CertificateBundle{}, fmt.Errorf("read fullchain.pem: %w", err)
+	}
+	privateKey, err := os.ReadFile(filepath.Join(dir, "privkey.pem"))
+	if err != nil {
+		return protocol.CertificateBundle{}, fmt.Errorf("read privkey.pem: %w", err)
+	}
+	if _, err := certutil.Validate(fullchain, privateKey, domain, e.now()); err != nil {
+		return protocol.CertificateBundle{}, err
+	}
+	return protocol.CertificateBundle{FullchainPEM: string(fullchain), PrivateKeyPEM: string(privateKey)}, nil
+}
+
+func linkOrCopyFile(source, destination string) error {
+	if err := os.Remove(destination); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := os.Symlink(source, destination); err == nil {
+		return nil
+	}
+	info, err := os.Stat(source)
 	if err != nil {
 		return err
 	}
-	backupPath := e.takeoverBackupPath(sourcePath)
-	if _, err := os.Lstat(sourcePath); err == nil {
-		return errors.New("original config path is already occupied")
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return err
+	mode := info.Mode().Perm()
+	if filepath.Base(destination) == "privkey.pem" {
+		mode = 0o600
+	} else if mode == 0 {
+		mode = 0o644
 	}
-	if _, err := os.Lstat(backupPath); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return errors.New("takeover backup no longer exists")
+	return copyRegularFile(source, destination, mode)
+}
+
+// removeServerBlocksForDomain drops server { ... } blocks whose server_name
+// includes the given domain. Other vhosts in the same file are preserved so
+// multi-site configs (common with sites-enabled aggregates) survive takeover.
+func removeServerBlocksForDomain(content []byte, domain string) ([]byte, int, error) {
+	domain = strings.ToLower(strings.TrimSpace(domain))
+	if domain == "" {
+		return nil, 0, errors.New("domain is required to surgically disable a shared nginx config")
+	}
+	text := strings.ReplaceAll(string(content), "\r\n", "\n")
+	lines := strings.Split(text, "\n")
+	var (
+		output      []string
+		block       []string
+		depth       int
+		inBlock     bool
+		removed     int
+		keepNewline = strings.HasSuffix(text, "\n")
+	)
+	flushBlock := func() {
+		if !inBlock {
+			return
 		}
-		return err
+		joined := strings.Join(block, "\n")
+		if serverBlockNamesDomain(joined, domain) {
+			removed++
+		} else {
+			output = append(output, block...)
+		}
+		block = nil
+		inBlock = false
+		depth = 0
 	}
-	return movePath(backupPath, sourcePath)
+	for _, raw := range lines {
+		if !inBlock {
+			cleaned := stripNginxComment(raw)
+			if serverStartPattern.MatchString(cleaned) {
+				inBlock = true
+				block = []string{raw}
+				depth = braceDelta(cleaned)
+				if depth <= 0 {
+					flushBlock()
+				}
+				continue
+			}
+			output = append(output, raw)
+			continue
+		}
+		block = append(block, raw)
+		depth += braceDelta(stripNginxComment(raw))
+		if depth <= 0 {
+			flushBlock()
+		}
+	}
+	if inBlock {
+		// Unbalanced braces: refuse to rewrite so we never corrupt the file.
+		return nil, 0, errors.New("nginx config has unbalanced braces; refusing surgical takeover")
+	}
+	result := strings.Join(output, "\n")
+	if keepNewline && !strings.HasSuffix(result, "\n") {
+		result += "\n"
+	}
+	return []byte(result), removed, nil
+}
+
+func serverBlockNamesDomain(block, domain string) bool {
+	match := serverNamePattern.FindStringSubmatch(block)
+	if len(match) != 2 {
+		return false
+	}
+	for _, name := range strings.Fields(match[1]) {
+		name = strings.ToLower(strings.Trim(name, `"'`))
+		if name == domain {
+			return true
+		}
+	}
+	return false
+}
+
+func onlyNginxWhitespace(content []byte) bool {
+	for _, line := range strings.Split(string(content), "\n") {
+		if strings.TrimSpace(stripNginxComment(line)) != "" {
+			return false
+		}
+	}
+	return true
 }
 
 func (e *Executor) takeoverBackupPath(sourcePath string) string {

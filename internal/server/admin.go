@@ -243,6 +243,7 @@ type applyDomainSpec struct {
 	CertificateID       string `json:"certificate_id,omitempty"`
 	UseLocalCertificate bool   `json:"use_local_certificate"`
 	CaptureCertificate  bool   `json:"capture_certificate"`
+	LocalCertificateDir string `json:"local_certificate_dir,omitempty"`
 	ReplaceConfigPath   string `json:"replace_config_path,omitempty"`
 }
 
@@ -505,18 +506,19 @@ func (s *Server) handleAdoptDomain(w http.ResponseWriter, r *http.Request) {
 		if !found {
 			return errors.New("node has not reported this Nginx server block")
 		}
+		localCertDir := localCertificateDirFromSite(discovered)
 		if request.Takeover {
 			if discovered.ManagedByAtlas {
 				return errors.New("the discovered rule is already managed by Atlas")
 			}
 			if err := nginxconfig.ValidateSite(nginxconfig.Site{
 				Domain: request.Domain, UpstreamHost: discovered.UpstreamHost, UpstreamPort: discovered.UpstreamPort,
-				TLS: discovered.TLS, CertificateDir: "/etc/ssl/" + request.Domain,
+				TLS: discovered.TLS, CertificateDir: localCertDir,
 			}); err != nil {
 				return fmt.Errorf("the discovered rule cannot be safely rendered: %w", err)
 			}
 			if discovered.TLS && !nodeHasValidCertificate(node, request.Domain) {
-				return errors.New("a valid /etc/ssl/<domain> certificate is required before takeover")
+				return errors.New("a valid certificate covering this domain is required before takeover (shared wildcard directories are supported)")
 			}
 		}
 		for _, domain := range state.Domains {
@@ -539,7 +541,7 @@ func (s *Server) handleAdoptDomain(w http.ResponseWriter, r *http.Request) {
 		if request.Takeover {
 			job, err := enqueueJob(state, node.ID, adopted.ID, protocol.JobApplyDomain, applyDomainSpec{
 				DomainID: adopted.ID, UseLocalCertificate: discovered.TLS, CaptureCertificate: discovered.TLS,
-				ReplaceConfigPath: discovered.ConfigPath,
+				LocalCertificateDir: localCertDir, ReplaceConfigPath: discovered.ConfigPath,
 			})
 			if err != nil {
 				return err
@@ -591,12 +593,43 @@ func validReportedTakeoverPath(value string) bool {
 }
 
 func nodeHasValidCertificate(node model.Node, domain string) bool {
+	domain = strings.ToLower(strings.TrimSpace(domain))
 	for _, certificate := range node.Certificates {
-		if certificate.Error == "" && (certificate.Domain == domain || certutil.CoversHostname(certificate.DNSNames, domain)) {
+		if certificate.Error != "" {
+			continue
+		}
+		if certificate.Domain == domain || certutil.CoversHostname(certificate.DNSNames, domain) {
 			return true
 		}
 	}
-	return true
+	// Fall back to a site-reported certificate path. Inventory may list the
+	// wildcard leaf under a different directory name than the vhost domain.
+	for _, site := range node.NginxSites {
+		if site.Domain != domain || !site.TLS {
+			continue
+		}
+		if strings.TrimSpace(site.CertificatePath) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// localCertificateDirFromSite returns the directory that should hold
+// fullchain.pem / privkey.pem for a discovered site. Shared wildcard certs
+// (e.g. /etc/ssl/suimori.com/fullchain.pem for haru.suimori.com) keep their
+// real directory instead of assuming /etc/ssl/<vhost>.
+func localCertificateDirFromSite(site model.NginxSiteMeta) string {
+	if certPath := strings.TrimSpace(site.CertificatePath); certPath != "" {
+		dir := path.Dir(path.Clean(certPath))
+		if path.IsAbs(dir) && dir != "/" && dir != "." {
+			return dir
+		}
+	}
+	if site.TLS && site.Domain != "" {
+		return "/etc/ssl/" + strings.ToLower(strings.TrimSpace(site.Domain))
+	}
+	return ""
 }
 
 func (s *Server) handleDeleteDomain(w http.ResponseWriter, r *http.Request) {

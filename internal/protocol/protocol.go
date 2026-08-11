@@ -74,6 +74,10 @@ type ApplyDomainPayload struct {
 	UpstreamPort        int                `json:"upstream_port"`
 	TLS                 bool               `json:"tls"`
 	UseLocalCertificate bool               `json:"use_local_certificate"`
+	// LocalCertificateDir is the node path that already holds fullchain.pem /
+	// privkey.pem for this domain (for example a shared wildcard directory).
+	// When empty, the agent falls back to /etc/ssl/<domain>.
+	LocalCertificateDir string             `json:"local_certificate_dir,omitempty"`
 	Certificate         *CertificateBundle `json:"certificate,omitempty"`
 	CaptureCertificate  bool               `json:"capture_certificate"`
 	ReplaceConfigPath   string             `json:"replace_config_path,omitempty"`

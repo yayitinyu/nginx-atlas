@@ -168,7 +168,7 @@ export function DomainDrawer({ open, nodes, certificates, dnsAccounts, acmeAccou
   return (
     <div className="drawer-layer drawer-open" onMouseDown={(event) => event.currentTarget === event.target && !busy && onClose()}>
       <form className="domain-drawer" onSubmit={submit} aria-label={editingDomain ? t('domain.editTitle') : t('domain.add')}>
-        <header className="drawer-header"><div><span className="dialog-kicker">ROUTE DEPLOYMENT</span><h2>{editingDomain ? t('domain.editTitle') : t('domain.add')}</h2><p>{t('domain.drawerSubtitle')}</p></div><IconButton name="close" label={t('common.close')} type="button" onClick={onClose} disabled={busy} /></header>
+        <header className="drawer-header"><div><span className="dialog-kicker">{t('domain.drawerKicker')}</span><h2>{editingDomain ? t('domain.editTitle') : t('domain.add')}</h2><p>{t('domain.drawerSubtitle')}</p></div><IconButton name="close" label={t('common.close')} type="button" onClick={onClose} disabled={busy} /></header>
         <div className="drawer-body">
           <section className="form-section">
             <div className="form-section-heading"><span>01</span><div><strong>{t('domain.stepRoute')}</strong><small>{t('domain.routeHint')}</small></div></div>

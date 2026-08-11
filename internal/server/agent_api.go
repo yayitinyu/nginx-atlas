@@ -226,7 +226,8 @@ func (s *Server) buildWireJob(job model.Job, state model.State) (protocol.WireJo
 		wirePayload := protocol.ApplyDomainPayload{
 			Domain: domain.Name, UpstreamHost: domain.UpstreamHost, UpstreamPort: domain.UpstreamPort,
 			TLS: domain.CertificateMode != "", UseLocalCertificate: spec.UseLocalCertificate,
-			CaptureCertificate: spec.CaptureCertificate, ReplaceConfigPath: spec.ReplaceConfigPath,
+			LocalCertificateDir: spec.LocalCertificateDir, CaptureCertificate: spec.CaptureCertificate,
+			ReplaceConfigPath: spec.ReplaceConfigPath,
 		}
 		if spec.CertificateID != "" {
 			bundle, err := s.decryptCertificate(state, spec.CertificateID)
