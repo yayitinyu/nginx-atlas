@@ -1,133 +1,108 @@
 import { useMemo, useState } from 'react'
-import type { ACMEAccount, AuditEvent, CertificateRecord, DNSAccount, DomainRecord, NodeRecord } from '../types'
+import type { ACMEAccount, AuditEvent, CertificateRecord, DNSAccount, DomainRecord, NginxSiteMeta, NodeRecord } from '../types'
+import { usePreferences, type LanguageMode, type ThemeMode } from '../preferences'
 import { Icon } from '../components/Icon'
 import { ActionButton, Bezel, EmptyState, IconButton, SectionHeading, StatusDot, StatusIcon } from '../components/Primitives'
+import { SelectField } from '../components/SelectField'
 import { DomainTable, relativeTime } from './Overview'
 
-export function DomainsPage({ domains, onAdd, onDelete }: { domains: DomainRecord[]; onAdd: () => void; onDelete: (domain: DomainRecord) => void }) {
+interface DiscoveredSite { node: NodeRecord; site: NginxSiteMeta }
+
+export function DomainsPage({ domains, nodes, onAdd, onDelete, onAdopt }: {
+  domains: DomainRecord[]
+  nodes: NodeRecord[]
+  onAdd: () => void
+  onDelete: (domain: DomainRecord) => void
+  onAdopt: (node: NodeRecord, site: NginxSiteMeta) => void
+}) {
+  const { t } = usePreferences()
   const [query, setQuery] = useState('')
-  const filtered = useMemo(() => {
-    const value = query.trim().toLowerCase()
-    return domains.filter((domain) => !value || domain.name.includes(value) || domain.node_name.toLowerCase().includes(value) || `${domain.upstream_host}:${domain.upstream_port}`.includes(value))
-  }, [domains, query])
-  return (
-    <div className="content-page page-enter">
-      <PageHeader title="域名与路由" description="将外部域名映射到各节点上的项目端口，并以事务方式部署 Nginx 配置。" action={<ActionButton icon="plus" onClick={onAdd}>添加域名</ActionButton>} />
-      <Bezel className="operation-panel">
-        <div className="panel-toolbar">
-          <div className="toolbar-tabs"><button className="active">域名</button><button>部署队列</button></div>
-          <label className="search-field"><Icon name="search" size={17} /><span className="sr-only">搜索域名</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索域名、节点或端口" /></label>
-        </div>
-        {filtered.length ? <DomainTable domains={filtered} showActions={(domain) => <IconButton name="trash" label={`移除 ${domain.name}`} onClick={() => onDelete(domain)} />} /> : <EmptyState icon="globe" title="没有域名" description="创建一条路由后，代理会先运行 nginx -t，再安全重载。" action={<button className="inline-action" onClick={onAdd}><Icon name="plus" size={17} />添加域名</button>} />}
-        <div className="panel-footer"><span>显示 {filtered.length} / {domains.length} 条</span><span className="footer-note"><Icon name="terminal" size={15} />每次变更都需要通过 nginx -t</span></div>
-      </Bezel>
-    </div>
-  )
+  const [tab, setTab] = useState<'managed' | 'discovered'>('managed')
+  const normalized = query.trim().toLowerCase()
+  const filtered = useMemo(() => domains.filter((domain) => !normalized || domain.name.includes(normalized) || domain.node_name.toLowerCase().includes(normalized) || `${domain.upstream_host}:${domain.upstream_port}`.includes(normalized)), [domains, normalized])
+  const discovered = useMemo<DiscoveredSite[]>(() => {
+    const managedNames = new Set(domains.map((domain) => domain.name))
+    return nodes.flatMap((node) => (node.nginx_sites ?? []).map((site) => ({ node, site }))).filter(({ node, site }) => !managedNames.has(site.domain) && (!normalized || site.domain.includes(normalized) || node.name.toLowerCase().includes(normalized) || `${site.upstream_host}:${site.upstream_port}`.includes(normalized)))
+  }, [domains, nodes, normalized])
+  return <div className="content-page page-enter"><PageHeader title={t('domain.title')} description={t('domain.description')} action={<ActionButton icon="plus" onClick={onAdd}>{t('domain.add')}</ActionButton>} /><Bezel className="operation-panel"><div className="panel-toolbar"><div className="toolbar-tabs"><button className={tab === 'managed' ? 'active' : ''} onClick={() => setTab('managed')}>{t('domain.managedTab')} <small>{domains.length}</small></button><button className={tab === 'discovered' ? 'active' : ''} onClick={() => setTab('discovered')}>{t('domain.discoveredTab')} <small>{discovered.length}</small></button></div><label className="search-field"><Icon name="search" size={17} /><span className="sr-only">{t('common.search')}</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t('domain.searchPlaceholder')} /></label></div>{tab === 'managed' ? (filtered.length ? <DomainTable domains={filtered} showActions={(domain) => <IconButton name="trash" label={`${t('common.delete')} ${domain.name}`} onClick={() => onDelete(domain)} />} /> : <EmptyState icon="globe" title={t('domain.empty')} description={t('domain.emptyDescription')} action={<button className="inline-action" onClick={onAdd}><Icon name="plus" size={17} />{t('domain.add')}</button>} />) : <DiscoveredSites sites={discovered} onAdopt={onAdopt} />}<div className="panel-footer"><span>{tab === 'managed' ? t('domain.showing', { shown: filtered.length, total: domains.length }) : t('overview.total', { count: discovered.length })}</span><span className="footer-note"><Icon name="terminal" size={15} />{tab === 'managed' ? t('domain.transactionNote') : 'nginx -T'}</span></div></Bezel></div>
 }
 
-export function CertificatesPage({ certificates, nodes, onRenew, onSync }: {
+function DiscoveredSites({ sites, onAdopt }: { sites: DiscoveredSite[]; onAdopt: (node: NodeRecord, site: NginxSiteMeta) => void }) {
+  const { t } = usePreferences()
+  if (!sites.length) return <EmptyState icon="cloud-download" title={t('domain.noDiscovered')} description={t('domain.noDiscoveredDescription')} />
+  return <div className="discovered-sites"><div className="discovered-intro"><Icon name="eye" size={22} /><span><strong>{t('domain.discoveredTitle')}</strong><small>{t('domain.discoveredDescription')}</small></span></div>{sites.map(({ node, site }) => <article className="discovered-row" key={`${node.id}-${site.config_path}-${site.domain}`}><span className="discovered-state"><StatusDot tone={node.status === 'online' ? 'good' : 'warning'} /></span><span className="discovered-domain"><strong>{site.domain}</strong><small>{site.config_path || 'nginx -T'}</small></span><span className="discovered-route"><small>{t('domain.columnRoute')}</small><strong>{site.upstream_host && site.upstream_port ? `${site.upstream_host}:${site.upstream_port}` : '—'}</strong></span><span className="discovered-route"><small>{t('domain.columnNode')}</small><strong>{node.name}</strong></span><span className="site-badges"><i>{site.tls ? t('domain.tls') : t('domain.http')}</i>{site.managed_by_atlas && <i>{t('domain.managedConfig')}</i>}</span><button className="inline-action" onClick={() => onAdopt(node, site)}><Icon name="download" size={16} />{t('domain.adopt')}</button></article>)}</div>
+}
+
+export function CertificatesPage({ certificates, nodes, onAdd, onRenew, onToggleAutoRenew, onSync, busy }: {
   certificates: CertificateRecord[]
   nodes: NodeRecord[]
+  onAdd: () => void
   onRenew: (certificate: CertificateRecord) => void
+  onToggleAutoRenew: (certificate: CertificateRecord, enabled: boolean) => void
   onSync: (certificate: CertificateRecord) => void
+  busy: string
 }) {
-  return (
-    <div className="content-page page-enter">
-      <PageHeader title="证书" description="检查证书链、私钥匹配与到期窗口，并将同一版本安全同步到多台 VPS。" />
-      <Bezel className="operation-panel certificate-list-panel">
-        <div className="certificate-list-head"><span>域名 / 签发者</span><span>来源</span><span>到期时间</span><span>已部署节点</span><span /></div>
-        {certificates.length === 0 ? <EmptyState icon="shield" title="还没有证书" description="可在添加域名时上传 fullchain.pem 与 privkey.pem，或通过 DNS-01 自动签发。" /> : certificates.map((certificate) => (
-          <div className="certificate-list-row" key={certificate.id}>
-            <span className="cert-identity"><StatusIcon tone={certificate.status === 'valid' ? 'success' : certificate.status === 'expiring' ? 'warning' : 'error'} /><span><strong>{certificate.domain}</strong><small>{certificate.issuer}</small></span></span>
-            <span className="source-label">{certificate.source === 'acme' ? "Let's Encrypt / ACME" : certificate.source === 'upload' ? '手动上传' : '节点已有'}</span>
-            <span className={`expiry-label expiry-${certificate.status}`}><strong>{certificate.days_remaining > 0 ? `${certificate.days_remaining} 天` : '已到期'}</strong><small>{formatDate(certificate.not_after)}</small></span>
-            <span className="deployed-count"><strong>{certificate.deployed_node_ids.length}</strong> / {nodes.length}</span>
-            <span className="certificate-actions"><button onClick={() => onRenew(certificate)}><Icon name="refresh" size={16} />续期</button><button onClick={() => onSync(certificate)}><Icon name="upload" size={16} />同步</button></span>
-          </div>
-        ))}
-      </Bezel>
-    </div>
-  )
+  const { t, locale } = usePreferences()
+  const [query, setQuery] = useState('')
+  const [status, setStatus] = useState<'all' | 'valid' | 'risk'>('all')
+  const normalized = query.trim().toLowerCase()
+  const filtered = certificates.filter((certificate) => (!normalized || certificate.domain.includes(normalized) || certificate.issuer.toLowerCase().includes(normalized) || certificate.fingerprint_sha256.toLowerCase().includes(normalized)) && (status === 'all' || status === 'valid' && certificate.status === 'valid' || status === 'risk' && certificate.status !== 'valid'))
+  const expiring = certificates.filter((certificate) => certificate.status !== 'valid').length
+  const autoRenew = certificates.filter((certificate) => certificate.auto_renew).length
+  const copies = certificates.reduce((total, certificate) => total + certificate.deployed_node_ids.length, 0)
+  return <div className="content-page page-enter"><PageHeader title={t('certificate.title')} description={t('certificate.description')} action={<ActionButton icon="plus" onClick={onAdd}>{t('certificate.add')}</ActionButton>} /><div className="certificate-summary"><SummaryMetric icon="shield" label={t('certificate.total')} value={certificates.length} /><SummaryMetric icon="warning" label={t('certificate.expiringCount')} value={expiring} warning={expiring > 0} /><SummaryMetric icon="refresh" label={t('certificate.autoRenewCount')} value={autoRenew} /><SummaryMetric icon="server" label={t('certificate.nodeCopies')} value={copies} /></div><Bezel className="operation-panel certificate-list-panel"><div className="panel-toolbar certificate-toolbar"><label className="search-field certificate-search"><Icon name="search" size={17} /><span className="sr-only">{t('common.search')}</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t('certificate.searchPlaceholder')} /></label><SelectField ariaLabel={t('certificate.allStatuses')} value={status} onChange={(value) => setStatus(value as typeof status)} icon="filter" options={[{ value: 'all', label: t('certificate.allStatuses') }, { value: 'valid', label: t('certificate.validOnly') }, { value: 'risk', label: t('certificate.expiringOnly') }]} /></div><div className="certificate-list-head"><span>{t('domain.columnDomain')}</span><span>{t('certificate.source')}</span><span>{t('certificate.expiry')}</span><span>{t('certificate.autoRenew')}</span><span>{t('certificate.distribution')}</span><span /></div>{filtered.length === 0 ? <EmptyState icon="shield" title={t('certificate.empty')} description={t('certificate.emptyDescription')} action={<button className="inline-action" onClick={onAdd}><Icon name="plus" size={17} />{t('certificate.add')}</button>} /> : filtered.map((certificate) => {
+    const automationReady = Boolean(certificate.issuer_node_id && certificate.acme_account_id && certificate.dns_account_id && nodes.some((node) => node.id === certificate.issuer_node_id && node.status !== 'revoked'))
+    const toggling = busy === `auto-renew-${certificate.id}`
+    const renewing = busy === `renew-${certificate.id}`
+    const switchLabel = t(certificate.auto_renew ? 'certificate.disableAutoRenew' : 'certificate.enableAutoRenew', { domain: certificate.domain })
+    return <div className="certificate-list-row" key={certificate.id}><span className="cert-identity"><StatusIcon tone={certificate.status === 'valid' ? 'success' : certificate.status === 'expiring' ? 'warning' : 'error'} /><span><strong>{certificate.domain}</strong><small title={certificate.fingerprint_sha256}>{certificate.issuer || '—'}</small></span></span><span className="source-label">{certificateSource(certificate.source, t)}</span><span className={`expiry-label expiry-${certificate.status}`}><strong>{certificate.days_remaining > 0 ? t('certificate.remaining', { count: certificate.days_remaining }) : t('common.expired')}</strong><small>{formatDate(certificate.not_after, locale)}</small></span><span className="renewal-state"><button type="button" role="switch" aria-checked={certificate.auto_renew} aria-label={switchLabel} title={!certificate.auto_renew && !automationReady ? t('certificate.automationUnavailable') : switchLabel} className={certificate.auto_renew ? 'certificate-renew-switch switch-on' : 'certificate-renew-switch'} disabled={toggling || (!certificate.auto_renew && !automationReady)} onClick={() => onToggleAutoRenew(certificate, !certificate.auto_renew)}><i /></button><span>{toggling ? t('common.saving') : certificate.auto_renew ? t('certificate.enabled') : t('certificate.disabled')}</span></span><span className="deployed-count"><strong>{certificate.deployed_node_ids.length}</strong> / {nodes.length}</span><span className="certificate-actions"><button disabled={renewing || !automationReady} onClick={() => onRenew(certificate)}><Icon name="refresh" size={16} />{t('certificate.renew')}</button><button disabled={Boolean(busy)} onClick={() => onSync(certificate)}><Icon name="upload" size={16} />{t('certificate.sync')}</button></span></div>
+  })}</Bezel></div>
+}
+
+function SummaryMetric({ icon, label, value, warning = false }: { icon: 'shield' | 'warning' | 'refresh' | 'server'; label: string; value: number; warning?: boolean }) {
+  return <div className={warning ? 'summary-metric summary-warning' : 'summary-metric'}><span><Icon name={icon} size={19} /></span><strong>{value}</strong><small>{label}</small></div>
 }
 
 export function NodesPage({ nodes, onAdd, onRevoke }: { nodes: NodeRecord[]; onAdd: () => void; onRevoke: (node: NodeRecord) => void }) {
-  return (
-    <div className="content-page page-enter">
-      <PageHeader title="节点" description="节点只需主动连接主控，不必在公网暴露新的管理端口。" action={<ActionButton icon="plus" onClick={onAdd}>添加节点</ActionButton>} />
-      <div className="nodes-canvas">
-        {nodes.length === 0 ? <Bezel><EmptyState icon="server" title="还没有 Linux 节点" description="生成一次性安装命令，并在目标 VPS 上执行。" action={<button className="inline-action" onClick={onAdd}><Icon name="terminal" size={17} />生成添加命令</button>} /></Bezel> : nodes.map((node) => (
-          <Bezel className="node-detail" key={node.id}>
-            <div className="node-detail-top"><span className="node-machine"><Icon name="server" size={22} /></span><span><strong>{node.name}</strong><small>{node.hostname || '等待上报主机名'}</small></span><span className={`node-state node-state-${node.status}`}><StatusDot tone={node.status === 'online' && node.nginx_healthy ? 'good' : node.status === 'offline' ? 'danger' : 'warning'} />{node.status === 'online' ? '在线' : node.status === 'offline' ? '离线' : node.status === 'revoked' ? '已撤销' : '待连接'}</span></div>
-            <div className="node-specs"><span><small>公网 / 内网地址</small><strong>{node.ip_addresses?.join(' · ') || '—'}</strong></span><span><small>Nginx</small><strong>{node.nginx_version || '未检测'}</strong></span><span><small>平台</small><strong>{[node.os, node.arch].filter(Boolean).join(' / ') || '—'}</strong></span><span><small>证书目录</small><strong>{node.certificates?.length ?? 0} 个已发现</strong></span></div>
-            <div className="node-detail-footer"><span><Icon name="clock" size={15} />最后在线：{node.last_seen_at ? relativeTime(node.last_seen_at) : '从未连接'}</span>{node.status !== 'revoked' && <button className="danger-link" onClick={() => onRevoke(node)}><Icon name="trash" size={15} />撤销节点</button>}</div>
-          </Bezel>
-        ))}
-      </div>
-    </div>
-  )
+  const { t, locale } = usePreferences()
+  return <div className="content-page page-enter"><PageHeader title={t('nodes.title')} description={t('nodes.description')} action={<ActionButton icon="plus" onClick={onAdd}>{t('nodes.add')}</ActionButton>} /><div className="nodes-canvas">{nodes.length === 0 ? <Bezel><EmptyState icon="server" title={t('nodes.empty')} description={t('nodes.emptyDescription')} action={<button className="inline-action" onClick={onAdd}><Icon name="terminal" size={17} />{t('nodes.command')}</button>} /></Bezel> : nodes.map((node) => <Bezel className="node-detail" key={node.id}><div className="node-detail-top"><span className="node-machine"><Icon name="server" size={22} /></span><span><strong>{node.name}</strong><small>{node.hostname || t('nodes.hostnamePending')}</small></span><span className={`node-state node-state-${node.status}`}><StatusDot tone={node.status === 'online' && node.nginx_healthy ? 'good' : node.status === 'offline' ? 'danger' : 'warning'} />{t(`common.${node.status}`)}</span></div><div className="node-specs"><span><small>{t('nodes.addresses')}</small><strong>{node.ip_addresses?.join(' · ') || '—'}</strong></span><span><small>{t('nodes.nginx')}</small><strong>{node.nginx_version || t('overview.nginxUndetected')}</strong></span><span><small>{t('nodes.platform')}</small><strong>{[node.os, node.arch].filter(Boolean).join(' / ') || '—'}</strong></span><span><small>{t('nodes.certDirectory')}</small><strong>{t('nodes.certFound', { count: node.certificates?.length ?? 0 })} · {t('nodes.siteFound', { count: node.nginx_sites?.length ?? 0 })}</strong></span></div><div className="node-detail-footer"><span><Icon name="clock" size={15} />{t('nodes.lastSeen', { time: node.last_seen_at ? relativeTime(node.last_seen_at, locale) : t('nodes.never') })}</span>{node.status !== 'revoked' && <button className="danger-link" onClick={() => onRevoke(node)}><Icon name="trash" size={15} />{t('nodes.revoke')}</button>}</div></Bezel>)}</div></div>
 }
 
-export function AccountsPage({ dnsAccounts, acmeAccounts, onAddDNS, onAddACME }: {
+export function AccountsPage({ dnsAccounts, acmeAccounts, onAddDNS, onAddACME, onEditDNS, onEditACME }: {
   dnsAccounts: DNSAccount[]
   acmeAccounts: ACMEAccount[]
   onAddDNS: () => void
   onAddACME: () => void
+  onEditDNS: (account: DNSAccount) => void
+  onEditACME: (account: ACMEAccount) => void
 }) {
-  return (
-    <div className="content-page page-enter">
-      <PageHeader title="DNS / ACME" description="凭据在主控使用 AES-256-GCM 加密，仅在签发任务下发时短暂解密。" />
-      <div className="account-split">
-        <Bezel className="account-panel">
-          <SectionHeading title="DNS 账户" action={<IconButton name="plus" label="添加 DNS 账户" onClick={onAddDNS} />} />
-          {dnsAccounts.length === 0 ? <EmptyState icon="dns" title="尚未配置 DNS" description="添加 lego 支持的 DNS 提供商和最小权限 API 凭据。" action={<button className="inline-action" onClick={onAddDNS}><Icon name="plus" size={17} />添加 DNS 账户</button>} /> : <div className="account-list">{dnsAccounts.map((account) => <div className="account-row" key={account.id}><span className="account-icon"><Icon name="dns" size={20} /></span><span><strong>{account.name}</strong><small>{account.provider}</small></span><span className="credential-keys">{account.credential_keys.length} 项凭据</span><Icon name="chevron" size={17} /></div>)}</div>}
-        </Bezel>
-        <Bezel className="account-panel">
-          <SectionHeading title="ACME 账户" action={<IconButton name="plus" label="添加 ACME 账户" onClick={onAddACME} />} />
-          {acmeAccounts.length === 0 ? <EmptyState icon="key" title="尚未配置 ACME" description="保存邮箱、目录地址以及可选的 EAB 信息。" action={<button className="inline-action" onClick={onAddACME}><Icon name="plus" size={17} />添加 ACME 账户</button>} /> : <div className="account-list">{acmeAccounts.map((account) => <div className="account-row" key={account.id}><span className="account-icon"><Icon name="key" size={20} /></span><span><strong>{account.name}</strong><small>{account.email}</small></span><span className="credential-keys">{account.has_eab ? '已配置 EAB' : '标准账户'}</span><Icon name="chevron" size={17} /></div>)}</div>}
-        </Bezel>
-      </div>
-    </div>
-  )
+  const { t } = usePreferences()
+  return <div className="content-page page-enter"><PageHeader title={t('accounts.title')} description={t('accounts.description')} /><div className="account-split"><Bezel className="account-panel"><SectionHeading title={t('accounts.dnsTitle')} action={<IconButton name="plus" label={t('accounts.addDNS')} onClick={onAddDNS} />} />{dnsAccounts.length === 0 ? <EmptyState icon="dns" title={t('accounts.emptyDNS')} description={t('accounts.emptyDNSDescription')} action={<button className="inline-action" onClick={onAddDNS}><Icon name="plus" size={17} />{t('accounts.addDNS')}</button>} /> : <div className="account-list">{dnsAccounts.map((account) => <button className="account-row" key={account.id} onClick={() => onEditDNS(account)}><span className="account-icon"><Icon name="dns" size={20} /></span><span><strong>{account.name}</strong><small>{account.provider}</small></span><span className="credential-keys">{t('accounts.credentials', { count: account.credential_keys.length })}</span><Icon name="edit" size={17} /></button>)}</div>}</Bezel><Bezel className="account-panel"><SectionHeading title={t('accounts.acmeTitle')} action={<IconButton name="plus" label={t('accounts.addACME')} onClick={onAddACME} />} />{acmeAccounts.length === 0 ? <EmptyState icon="key" title={t('accounts.emptyACME')} description={t('accounts.emptyACMEDescription')} action={<button className="inline-action" onClick={onAddACME}><Icon name="plus" size={17} />{t('accounts.addACME')}</button>} /> : <div className="account-list">{acmeAccounts.map((account) => <button className="account-row" key={account.id} onClick={() => onEditACME(account)}><span className="account-icon"><Icon name="key" size={20} /></span><span><strong>{account.name}</strong><small>{account.email}</small></span><span className="credential-keys">{account.has_eab ? t('accounts.eab') : t('accounts.standard')}</span><Icon name="edit" size={17} /></button>)}</div>}</Bezel></div></div>
 }
 
 export function AuditPage({ events, domains, nodes }: { events: AuditEvent[]; domains: DomainRecord[]; nodes: NodeRecord[] }) {
+  const { t, locale, effectiveLanguage } = usePreferences()
   const domainNames = Object.fromEntries(domains.map((domain) => [domain.id, domain.name]))
   const nodeNames = Object.fromEntries(nodes.map((node) => [node.id, node.name]))
-  return (
-    <div className="content-page page-enter">
-      <PageHeader title="审计日志" description="部署、续期、同步、重试与节点变更均保留可追踪记录。" />
-      <Bezel className="operation-panel audit-panel">
-        <div className="audit-head"><span>事件</span><span>对象</span><span>时间</span><span>级别</span></div>
-        {events.length === 0 ? <EmptyState icon="log" title="暂无审计记录" description="完成一次配置操作后会出现在这里。" /> : events.map((event, index) => (
-          <div className="audit-row" key={event.id || `${event.action}-${index}`}><span><StatusIcon tone={event.level === 'error' ? 'error' : event.level} /><span><strong>{event.message}</strong><small>{event.action}</small></span></span><span>{domainNames[event.domain_id ?? ''] || nodeNames[event.node_id ?? ''] || '主控'}</span><time>{formatDateTime(event.created_at)}</time><span className={`audit-level audit-${event.level}`}>{event.level === 'success' ? '成功' : event.level === 'warning' ? '警告' : event.level === 'error' ? '错误' : '信息'}</span></div>
-        ))}
-      </Bezel>
-    </div>
-  )
+  return <div className="content-page page-enter"><PageHeader title={t('audit.title')} description={t('audit.description')} /><Bezel className="operation-panel audit-panel"><div className="audit-head"><span>{t('audit.event')}</span><span>{t('audit.target')}</span><span>{t('audit.time')}</span><span>{t('audit.level')}</span></div>{events.length === 0 ? <EmptyState icon="log" title={t('audit.empty')} description={t('audit.emptyDescription')} /> : events.map((event, index) => <div className="audit-row" key={event.id || `${event.action}-${index}`}><span><StatusIcon tone={event.level === 'error' ? 'error' : event.level} /><span><strong>{effectiveLanguage === 'zh' ? event.message : event.action.replaceAll('.', ' · ')}</strong><small>{event.action}</small></span></span><span>{domainNames[event.domain_id ?? ''] || nodeNames[event.node_id ?? ''] || t('audit.controller')}</span><time>{formatDateTime(event.created_at, locale)}</time><span className={`audit-level audit-${event.level}`}>{t(`audit.${event.level}`)}</span></div>)}</Bezel></div>
 }
 
-export function SettingsPage({ onLogout }: { onLogout: () => void }) {
-  return (
-    <div className="content-page page-enter">
-      <PageHeader title="设置" description="运行边界与安全策略由安装配置控制，敏感值不会返回到浏览器。" />
-      <div className="settings-list">
-        <Bezel className="settings-row"><span className="settings-icon"><Icon name="shield" size={22} /></span><span><strong>证书安全</strong><small>私钥与 DNS 凭据使用主密钥加密；代理写入私钥时权限为 0600。</small></span><span className="settings-value">AES-256-GCM</span></Bezel>
-        <Bezel className="settings-row"><span className="settings-icon"><Icon name="server" size={22} /></span><span><strong>节点通信</strong><small>一次性令牌注册，节点凭据哈希保存，仅允许出站 HTTPS 轮询。</small></span><span className="settings-value">10 秒</span></Bezel>
-        <Bezel className="settings-row"><span className="settings-icon"><Icon name="terminal" size={22} /></span><span><strong>Nginx 事务</strong><small>写入配置和证书后执行 nginx -t；验证或重载失败会恢复旧文件。</small></span><span className="settings-value">原子回滚</span></Bezel>
-      </div>
-      <button className="logout-row" onClick={onLogout}><Icon name="logout" size={19} />退出当前管理员会话</button>
-    </div>
-  )
+export function SettingsPage({ onPassword, onLogout }: { onPassword: () => void; onLogout: () => void }) {
+  const { t, theme, language, setTheme, setLanguage } = usePreferences()
+  return <div className="content-page page-enter"><PageHeader title={t('settings.title')} description={t('settings.description')} /><Bezel className="preferences-panel"><SectionHeading title={t('settings.appearance')} /><div className="preference-grid"><label><span>{t('settings.theme')}</span><SelectField ariaLabel={t('settings.theme')} value={theme} onChange={(value) => setTheme(value as ThemeMode)} icon={theme === 'light' ? 'sun' : theme === 'dark' ? 'moon' : 'system'} options={[{ value: 'system', label: t('common.system') }, { value: 'light', label: t('common.light') }, { value: 'dark', label: t('common.dark') }]} /></label><label><span>{t('settings.language')}</span><SelectField ariaLabel={t('settings.language')} value={language} onChange={(value) => setLanguage(value as LanguageMode)} icon="language" options={[{ value: 'system', label: t('common.system') }, { value: 'zh', label: t('common.chinese') }, { value: 'en', label: t('common.english') }]} /></label></div></Bezel><div className="settings-list"><SettingRow icon="shield" title={t('settings.security')} description={t('settings.securityDescription')} value={t('accounts.encrypted')} /><SettingRow icon="server" title={t('settings.transport')} description={t('settings.transportDescription')} value="HTTPS" /><SettingRow icon="terminal" title={t('settings.transaction')} description={t('settings.transactionDescription')} value={t('settings.atomic')} /><button className="settings-action-row" onClick={onPassword}><span className="settings-icon"><Icon name="lock" size={22} /></span><span><strong>{t('settings.password')}</strong><small>{t('settings.passwordDescription')}</small></span><span className="settings-value">{t('settings.changePassword')} <Icon name="arrow" size={16} /></span></button></div><button className="logout-row" onClick={onLogout}><Icon name="logout" size={19} />{t('settings.logout')}</button></div>
+}
+
+function SettingRow({ icon, title, description, value }: { icon: 'shield' | 'server' | 'terminal'; title: string; description: string; value: string }) {
+  return <Bezel className="settings-row"><span className="settings-icon"><Icon name={icon} size={22} /></span><span><strong>{title}</strong><small>{description}</small></span><span className="settings-value">{value}</span></Bezel>
 }
 
 function PageHeader({ title, description, action }: { title: string; description: string; action?: React.ReactNode }) {
-  return <header className="page-header"><div><h1>{title}</h1><p>{description}</p></div>{action}</header>
+  return <header className="page-header"><div><span className="page-kicker">ATLAS / CONTROL</span><h1>{title}</h1><p>{description}</p></div>{action}</header>
 }
 
-function formatDate(value: string): string {
-  return new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(value))
+function certificateSource(source: string, t: (key: string, variables?: Record<string, string | number>) => string): string {
+  return t(source === 'acme' ? 'certificate.sourceACME' : source === 'upload' ? 'certificate.sourceUpload' : 'certificate.sourceLocal')
 }
 
-function formatDateTime(value: string): string {
-  return new Intl.DateTimeFormat('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).format(new Date(value))
-}
+function formatDate(value: string, locale: string): string { return new Intl.DateTimeFormat(locale, { year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(value)) }
+function formatDateTime(value: string, locale: string): string { return new Intl.DateTimeFormat(locale, { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).format(new Date(value)) }

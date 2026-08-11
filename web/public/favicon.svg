@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Nginx Atlas">
+  <rect width="64" height="64" rx="16" fill="#0b0f0d"/>
+  <path d="M32 7 53.65 19.5v25L32 57 10.35 44.5v-25L32 7Z" fill="#15b879"/>
+  <path d="M21 43V21h6.1l9.8 13.22V21H43v22h-6.05L27.1 29.73V43H21Z" fill="#f5f8f6"/>
+</svg>

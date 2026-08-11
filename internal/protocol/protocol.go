@@ -8,11 +8,12 @@ import (
 )
 
 const (
-	JobApplyDomain      = "apply_domain"
-	JobDeleteDomain     = "delete_domain"
-	JobSyncCertificate  = "sync_certificate"
-	JobIssueCertificate = "issue_certificate"
-	JobReloadNginx      = "reload_nginx"
+	JobApplyDomain        = "apply_domain"
+	JobDeleteDomain       = "delete_domain"
+	JobSyncCertificate    = "sync_certificate"
+	JobIssueCertificate   = "issue_certificate"
+	JobCaptureCertificate = "capture_certificate"
+	JobReloadNginx        = "reload_nginx"
 )
 
 type EnrollRequest struct {
@@ -36,6 +37,7 @@ type NodeReport struct {
 	NginxHealthy bool                    `json:"nginx_healthy"`
 	AgentVersion string                  `json:"agent_version"`
 	Certificates []model.CertificateMeta `json:"certificates,omitempty"`
+	NginxSites   []model.NginxSiteMeta   `json:"nginx_sites,omitempty"`
 	LastError    string                  `json:"last_error,omitempty"`
 }
 
@@ -88,6 +90,12 @@ type IssueCertificatePayload struct {
 	Credentials  map[string]string `json:"credentials"`
 	EABKID       string            `json:"eab_kid,omitempty"`
 	EABHMAC      string            `json:"eab_hmac,omitempty"`
+	Install      bool              `json:"install"`
+	ReloadNginx  bool              `json:"reload_nginx"`
+}
+
+type CaptureCertificatePayload struct {
+	Domain string `json:"domain"`
 }
 
 type JobResultRequest struct {

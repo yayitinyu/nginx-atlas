@@ -13,6 +13,16 @@ export interface CertificateMeta {
   error?: string
 }
 
+export interface NginxSiteMeta {
+  domain: string
+  config_path?: string
+  upstream_host?: string
+  upstream_port?: number
+  tls: boolean
+  certificate_path?: string
+  managed_by_atlas: boolean
+}
+
 export interface NodeRecord {
   id: string
   name: string
@@ -27,6 +37,7 @@ export interface NodeRecord {
   last_seen_at?: string
   created_at: string
   certificates?: CertificateMeta[]
+  nginx_sites?: NginxSiteMeta[]
   last_error?: string
   running_job_id?: string
 }
@@ -50,6 +61,8 @@ export interface DomainRecord {
   renew_before_days: number
   sync_node_ids?: string[]
   enabled: boolean
+  observed_only?: boolean
+  config_path?: string
   last_job_id?: string
   last_error?: string
   job_status?: JobStatus
@@ -68,6 +81,7 @@ export interface CertificateRecord {
   not_after: string
   dns_names: string[]
   auto_renew: boolean
+  renew_before_days: number
   acme_account_id?: string
   dns_account_id?: string
   issuer_node_id?: string
@@ -142,6 +156,16 @@ export interface CreateDomainInput {
   dns_account_id?: string
   auto_renew: boolean
   renew_before_days: number
+  sync_node_ids: string[]
+}
+
+export interface CertificateAutomationInput {
+  domain: string
+  node_id: string
+  auto_renew: boolean
+  renew_before_days: number
+  acme_account_id?: string
+  dns_account_id?: string
   sync_node_ids: string[]
 }
 

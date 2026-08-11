@@ -1,5 +1,6 @@
 import type {
   ACMEAccount,
+  CertificateAutomationInput,
   CertificateRecord,
   CreateDomainInput,
   DashboardData,
@@ -59,6 +60,9 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 }
 
 export const api = {
+  login: (password: string) => request<{ authenticated: boolean; token: string; expires_at: string }>('/api/v1/session', {
+    method: 'POST', body: JSON.stringify({ password }),
+  }),
   verifySession: () => request<{ authenticated: boolean }>('/api/v1/session'),
   dashboard: () => request<DashboardData>('/api/v1/dashboard'),
   nodes: () => request<NodeRecord[]>('/api/v1/nodes'),
@@ -74,15 +78,31 @@ export const api = {
   revokeNode: (id: string) => request<void>(`/api/v1/nodes/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   createDomain: (input: CreateDomainInput) =>
     request<DomainRecord>('/api/v1/domains', { method: 'POST', body: JSON.stringify(input) }),
+  adoptDomain: (input: { node_id: string; domain: string; config_path?: string }) =>
+    request<DomainRecord>('/api/v1/domains/adopt', { method: 'POST', body: JSON.stringify(input) }),
   deleteDomain: (id: string) =>
     request<{ queued: boolean }>(`/api/v1/domains/${encodeURIComponent(id)}`, { method: 'DELETE' }),
-  uploadCertificate: async (domain: string, fullchain: File, privkey: File) => {
+  uploadCertificate: async (input: CertificateAutomationInput, fullchain: File, privkey: File) => {
     const body = new FormData()
-    body.set('domain', domain)
+    body.set('domain', input.domain)
+    body.set('node_id', input.node_id)
+    body.set('auto_renew', String(input.auto_renew))
+    body.set('renew_before_days', String(input.renew_before_days))
+    if (input.acme_account_id) body.set('acme_account_id', input.acme_account_id)
+    if (input.dns_account_id) body.set('dns_account_id', input.dns_account_id)
+    body.set('sync_node_ids', JSON.stringify(input.sync_node_ids))
     body.set('fullchain', fullchain)
     body.set('privkey', privkey)
     return request<CertificateRecord>('/api/v1/certificates/upload', { method: 'POST', body })
   },
+  issueCertificate: (input: CertificateAutomationInput) =>
+    request<unknown>('/api/v1/certificates/issue', { method: 'POST', body: JSON.stringify(input) }),
+  importCertificate: (input: CertificateAutomationInput) =>
+    request<unknown>('/api/v1/certificates/import', { method: 'POST', body: JSON.stringify(input) }),
+  setCertificateAutoRenew: (id: string, enabled: boolean) =>
+    request<CertificateRecord>(`/api/v1/certificates/${encodeURIComponent(id)}/auto-renew`, {
+      method: 'PUT', body: JSON.stringify({ enabled }),
+    }),
   renewCertificate: (id: string) =>
     request<unknown>(`/api/v1/certificates/${encodeURIComponent(id)}/renew`, { method: 'POST', body: '{}' }),
   syncCertificate: (id: string, nodeIds: string[]) =>
@@ -90,8 +110,16 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ node_ids: nodeIds }),
     }),
-  createDNSAccount: (input: { name: string; provider: string; credentials: Record<string, string> }) =>
+  createDNSAccount: (input: { name: string; provider: string; credentials: Record<string, string>; keep_credentials?: boolean }) =>
     request<DNSAccount>('/api/v1/dns-accounts', { method: 'POST', body: JSON.stringify(input) }),
-  createACMEAccount: (input: { name: string; email: string; directory_url: string; eab_kid: string; eab_hmac: string }) =>
+  updateDNSAccount: (id: string, input: { name: string; provider: string; credentials: Record<string, string>; keep_credentials: boolean }) =>
+    request<DNSAccount>(`/api/v1/dns-accounts/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(input) }),
+  createACMEAccount: (input: { name: string; email: string; directory_url: string; eab_kid: string; eab_hmac: string; keep_eab?: boolean }) =>
     request<ACMEAccount>('/api/v1/acme-accounts', { method: 'POST', body: JSON.stringify(input) }),
+  updateACMEAccount: (id: string, input: { name: string; email: string; directory_url: string; eab_kid: string; eab_hmac: string; keep_eab: boolean }) =>
+    request<ACMEAccount>(`/api/v1/acme-accounts/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(input) }),
+  changeAdminPassword: (currentPassword: string, newPassword: string) =>
+    request<{ changed: boolean; token: string; expires_at: string }>('/api/v1/settings/admin-password', {
+      method: 'PUT', body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
+    }),
 }

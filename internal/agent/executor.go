@@ -98,6 +98,12 @@ func (e *Executor) Execute(ctx context.Context, job protocol.WireJob) protocol.J
 		if err == nil {
 			result, err = e.issueCertificate(ctx, payload)
 		}
+	case protocol.JobCaptureCertificate:
+		var payload protocol.CaptureCertificatePayload
+		err = decodePayload(job.Payload, &payload)
+		if err == nil {
+			result, err = e.captureCertificate(payload)
+		}
 	case protocol.JobReloadNginx:
 		result, err = e.validateAndReload(ctx)
 	default:
@@ -281,11 +287,36 @@ func (e *Executor) issueCertificate(ctx context.Context, payload protocol.IssueC
 	if _, err := certutil.Validate(fullchain, privateKey, domain, e.now()); err != nil {
 		return protocol.JobResultRequest{}, fmt.Errorf("validate issued certificate: %w", err)
 	}
+	bundle := protocol.CertificateBundle{FullchainPEM: string(fullchain), PrivateKeyPEM: string(privateKey)}
+	if payload.Install {
+		installed, err := e.syncCertificate(ctx, protocol.SyncCertificatePayload{
+			Domain: domain, Certificate: bundle, ReloadNginx: payload.ReloadNginx,
+		})
+		installed.Certificate = &bundle
+		installed.NginxOutput = limitOutput(append(append(output, '\n'), []byte(installed.NginxOutput)...))
+		if err != nil {
+			return installed, fmt.Errorf("install issued certificate: %w", err)
+		}
+		installed.Message = "Let's Encrypt DNS-01 证书已签发并安全写入节点"
+		return installed, nil
+	}
 	return protocol.JobResultRequest{
 		Message:     "Let's Encrypt DNS-01 证书签发成功",
-		Certificate: &protocol.CertificateBundle{FullchainPEM: string(fullchain), PrivateKeyPEM: string(privateKey)},
+		Certificate: &bundle,
 		NginxOutput: limitOutput(output),
 	}, nil
+}
+
+func (e *Executor) captureCertificate(payload protocol.CaptureCertificatePayload) (protocol.JobResultRequest, error) {
+	domain := strings.ToLower(strings.TrimSpace(payload.Domain))
+	if _, err := nginxconfig.ConfigFileName(domain); err != nil {
+		return protocol.JobResultRequest{}, fmt.Errorf("invalid certificate domain: %w", err)
+	}
+	bundle, err := e.readAndValidateCertificate(domain)
+	if err != nil {
+		return protocol.JobResultRequest{}, fmt.Errorf("capture local certificate: %w", err)
+	}
+	return protocol.JobResultRequest{Message: "节点现有证书已接管", Certificate: &bundle}, nil
 }
 
 func (e *Executor) validateAndReload(ctx context.Context) (protocol.JobResultRequest, error) {

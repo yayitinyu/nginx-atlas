@@ -1,14 +1,12 @@
-import type { ButtonHTMLAttributes, HTMLAttributes, ReactNode } from 'react'
+import { useId, type ButtonHTMLAttributes, type HTMLAttributes, type ReactNode } from 'react'
 import { Icon, type IconName } from './Icon'
+import { usePreferences } from '../preferences'
 
 export function Logo({ compact = false }: { compact?: boolean }) {
   return (
     <div className="brand" aria-label="Nginx Atlas">
-      <svg className="brand-mark" viewBox="0 0 44 48" aria-hidden="true">
-        <path d="M22 2 41 13v22L22 46 3 35V13L22 2Z" />
-        <path d="M13 33V15l18 18V15" />
-      </svg>
-      {!compact && <span>Nginx Atlas</span>}
+      <span className="brand-mark" aria-hidden="true" />
+      {!compact && <span className="brand-word">ATLAS</span>}
     </div>
   )
 }
@@ -73,11 +71,12 @@ export function EmptyState({ icon, title, description, action }: { icon: IconNam
   )
 }
 
-export function LoadingState({ label = '正在读取基础设施状态' }: { label?: string }) {
+export function LoadingState({ label }: { label?: string }) {
+  const { t } = usePreferences()
   return (
     <div className="loading-state" role="status">
       <span className="loading-orbit" />
-      <span>{label}</span>
+      <span>{label ?? t('common.loading')}</span>
     </div>
   )
 }
@@ -89,20 +88,21 @@ export interface ToastMessage {
 }
 
 export function ToastRegion({ messages, dismiss }: { messages: ToastMessage[]; dismiss: (id: number) => void }) {
+  const { t } = usePreferences()
   return (
     <div className="toast-region" aria-live="polite" aria-atomic="false">
       {messages.map((message) => (
         <div className={`toast toast-${message.tone}`} key={message.id}>
           <StatusIcon tone={message.tone === 'error' ? 'error' : message.tone} />
           <span>{message.message}</span>
-          <IconButton name="close" label="关闭提示" onClick={() => dismiss(message.id)} />
+          <IconButton name="close" label={t('common.close')} onClick={() => dismiss(message.id)} />
         </div>
       ))}
     </div>
   )
 }
 
-export function ConfirmDialog({ title, description, confirmLabel, open, onCancel, onConfirm, busy = false }: {
+export function ConfirmDialog({ title, description, confirmLabel, open, onCancel, onConfirm, busy = false, tone = 'danger', icon = 'trash', busyLabel }: {
   title: string
   description: string
   confirmLabel: string
@@ -110,19 +110,33 @@ export function ConfirmDialog({ title, description, confirmLabel, open, onCancel
   onCancel: () => void
   onConfirm: () => void
   busy?: boolean
+  tone?: 'primary' | 'danger'
+  icon?: IconName
+  busyLabel?: string
 }) {
+  const { t } = usePreferences()
+  const titleID = useId()
   if (!open) return null
   return (
-    <div className="modal-layer" role="presentation" onMouseDown={(event) => event.currentTarget === event.target && onCancel()}>
-      <div className="confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title">
-        <span className="confirm-symbol"><Icon name="warning" size={24} /></span>
-        <h2 id="confirm-title">{title}</h2>
+    <div className="modal-layer" role="presentation" onMouseDown={(event) => event.currentTarget === event.target && !busy && onCancel()}>
+      <div className="confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby={titleID}>
+        <span className={`confirm-symbol confirm-symbol-${tone}`}><Icon name={tone === 'danger' ? 'warning' : icon} size={24} /></span>
+        <h2 id={titleID}>{title}</h2>
         <p>{description}</p>
         <div className="confirm-actions">
-          <button className="text-button" onClick={onCancel} disabled={busy}>取消</button>
-          <ActionButton tone="danger" icon="trash" onClick={onConfirm} disabled={busy}>{busy ? '处理中' : confirmLabel}</ActionButton>
+          <button className="text-button" onClick={onCancel} disabled={busy}>{t('common.cancel')}</button>
+          <ActionButton tone={tone} icon={icon} onClick={onConfirm} disabled={busy}>{busy ? busyLabel ?? t('common.saving') : confirmLabel}</ActionButton>
         </div>
       </div>
     </div>
+  )
+}
+
+export function AdminAvatar({ compact = false }: { compact?: boolean }) {
+  const { t } = usePreferences()
+  return (
+    <span className={compact ? 'admin-avatar admin-avatar-compact' : 'admin-avatar'} aria-label={t('app.admin')}>
+      <span>A</span>
+    </span>
   )
 }

@@ -178,8 +178,9 @@ func (c *Client) report(ctx context.Context) protocol.NodeReport {
 	if output, err := c.runner.Run(ctx, c.executor.config.NginxBinary, []string{"-v"}, nil); err == nil {
 		report.NginxVersion = strings.TrimSpace(string(output))
 	}
-	if output, err := c.runner.Run(ctx, c.executor.config.NginxBinary, []string{"-t"}, nil); err == nil {
+	if output, err := c.runner.Run(ctx, c.executor.config.NginxBinary, []string{"-T"}, nil); err == nil {
 		report.NginxHealthy = true
+		report.NginxSites = ParseNginxSites(output)
 	} else {
 		report.LastError = limitOutput(output)
 	}

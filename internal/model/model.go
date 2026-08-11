@@ -48,6 +48,7 @@ type Node struct {
 	RevokedAt    *time.Time        `json:"revoked_at,omitempty"`
 	Labels       map[string]string `json:"labels,omitempty"`
 	Certificates []CertificateMeta `json:"certificates,omitempty"`
+	NginxSites   []NginxSiteMeta   `json:"nginx_sites,omitempty"`
 	LastError    string            `json:"last_error,omitempty"`
 	RunningJobID string            `json:"running_job_id,omitempty"`
 }
@@ -75,6 +76,8 @@ type Domain struct {
 	RenewBeforeDays int               `json:"renew_before_days"`
 	SyncNodeIDs     []string          `json:"sync_node_ids,omitempty"`
 	Enabled         bool              `json:"enabled"`
+	ObservedOnly    bool              `json:"observed_only,omitempty"`
+	ConfigPath      string            `json:"config_path,omitempty"`
 	LastJobID       string            `json:"last_job_id,omitempty"`
 	LastError       string            `json:"last_error,omitempty"`
 	CreatedAt       time.Time         `json:"created_at"`
@@ -94,6 +97,7 @@ type Certificate struct {
 	NotAfter             time.Time         `json:"not_after"`
 	DNSNames             []string          `json:"dns_names,omitempty"`
 	AutoRenew            bool              `json:"auto_renew"`
+	RenewBeforeDays      int               `json:"renew_before_days"`
 	ACMEAccountID        string            `json:"acme_account_id,omitempty"`
 	DNSAccountID         string            `json:"dns_account_id,omitempty"`
 	IssuerNodeID         string            `json:"issuer_node_id,omitempty"`
@@ -111,6 +115,19 @@ type CertificateMeta struct {
 	DNSNames          []string  `json:"dns_names,omitempty"`
 	KeyMatches        bool      `json:"key_matches"`
 	Error             string    `json:"error,omitempty"`
+}
+
+// NginxSiteMeta is the safe, read-only subset of an active Nginx server block
+// that an agent reports to the controller. Raw configuration contents and
+// credentials never leave the node.
+type NginxSiteMeta struct {
+	Domain          string `json:"domain"`
+	ConfigPath      string `json:"config_path,omitempty"`
+	UpstreamHost    string `json:"upstream_host,omitempty"`
+	UpstreamPort    int    `json:"upstream_port,omitempty"`
+	TLS             bool   `json:"tls"`
+	CertificatePath string `json:"certificate_path,omitempty"`
+	ManagedByAtlas  bool   `json:"managed_by_atlas"`
 }
 
 type DNSAccount struct {
@@ -161,15 +178,16 @@ type AuditEvent struct {
 }
 
 type State struct {
-	Version      int                    `json:"version"`
-	Nodes        map[string]Node        `json:"nodes"`
-	Enrollments  map[string]Enrollment  `json:"enrollments"`
-	Domains      map[string]Domain      `json:"domains"`
-	Certificates map[string]Certificate `json:"certificates"`
-	DNSAccounts  map[string]DNSAccount  `json:"dns_accounts"`
-	ACMEAccounts map[string]ACMEAccount `json:"acme_accounts"`
-	Jobs         map[string]Job         `json:"jobs"`
-	Audit        []AuditEvent           `json:"audit"`
+	Version           int                    `json:"version"`
+	AdminPasswordHash string                 `json:"admin_password_hash,omitempty"`
+	Nodes             map[string]Node        `json:"nodes"`
+	Enrollments       map[string]Enrollment  `json:"enrollments"`
+	Domains           map[string]Domain      `json:"domains"`
+	Certificates      map[string]Certificate `json:"certificates"`
+	DNSAccounts       map[string]DNSAccount  `json:"dns_accounts"`
+	ACMEAccounts      map[string]ACMEAccount `json:"acme_accounts"`
+	Jobs              map[string]Job         `json:"jobs"`
+	Audit             []AuditEvent           `json:"audit"`
 }
 
 func NewState() State {

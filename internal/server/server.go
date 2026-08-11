@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"path"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/yayitinyu/nginx-atlas/deploy"
@@ -42,6 +43,8 @@ type Server struct {
 	box            *securebox.Box
 	logger         *slog.Logger
 	adminTokenHash [32]byte
+	sessionMu      sync.RWMutex
+	adminSessions  map[[32]byte]time.Time
 	handler        http.Handler
 }
 
@@ -67,7 +70,11 @@ func New(config Config, stateStore *store.Store, box *securebox.Box, logger *slo
 	if logger == nil {
 		logger = slog.Default()
 	}
-	s := &Server{config: config, store: stateStore, box: box, logger: logger, adminTokenHash: sha256.Sum256([]byte(config.AdminToken))}
+	s := &Server{
+		config: config, store: stateStore, box: box, logger: logger,
+		adminTokenHash: sha256.Sum256([]byte(config.AdminToken)),
+		adminSessions:  make(map[[32]byte]time.Time),
+	}
 	if config.Demo {
 		if err := s.seedDemo(); err != nil {
 			return nil, err
@@ -107,6 +114,7 @@ func (s *Server) routes() http.Handler {
 	mux.Handle("POST /api/v1/agent/poll", s.nodeAuth(http.HandlerFunc(s.handleAgentPoll)))
 	mux.Handle("POST /api/v1/agent/jobs/{id}/result", s.nodeAuth(http.HandlerFunc(s.handleAgentJobResult)))
 
+	mux.HandleFunc("POST /api/v1/session", s.handleLogin)
 	mux.Handle("GET /api/v1/session", s.adminAuth(http.HandlerFunc(s.handleSession)))
 	mux.Handle("GET /api/v1/dashboard", s.adminAuth(http.HandlerFunc(s.handleDashboard)))
 	mux.Handle("GET /api/v1/nodes", s.adminAuth(http.HandlerFunc(s.handleNodes)))
@@ -114,9 +122,13 @@ func (s *Server) routes() http.Handler {
 	mux.Handle("DELETE /api/v1/nodes/{id}", s.adminAuth(http.HandlerFunc(s.handleRevokeNode)))
 	mux.Handle("GET /api/v1/domains", s.adminAuth(http.HandlerFunc(s.handleDomains)))
 	mux.Handle("POST /api/v1/domains", s.adminAuth(http.HandlerFunc(s.handleCreateDomain)))
+	mux.Handle("POST /api/v1/domains/adopt", s.adminAuth(http.HandlerFunc(s.handleAdoptDomain)))
 	mux.Handle("DELETE /api/v1/domains/{id}", s.adminAuth(http.HandlerFunc(s.handleDeleteDomain)))
 	mux.Handle("GET /api/v1/certificates", s.adminAuth(http.HandlerFunc(s.handleCertificates)))
 	mux.Handle("POST /api/v1/certificates/upload", s.adminAuth(http.HandlerFunc(s.handleUploadCertificate)))
+	mux.Handle("POST /api/v1/certificates/issue", s.adminAuth(http.HandlerFunc(s.handleIssueCertificate)))
+	mux.Handle("POST /api/v1/certificates/import", s.adminAuth(http.HandlerFunc(s.handleImportCertificate)))
+	mux.Handle("PUT /api/v1/certificates/{id}/auto-renew", s.adminAuth(http.HandlerFunc(s.handleSetCertificateAutoRenew)))
 	mux.Handle("POST /api/v1/certificates/{id}/renew", s.adminAuth(http.HandlerFunc(s.handleRenewCertificate)))
 	mux.Handle("POST /api/v1/certificates/{id}/sync", s.adminAuth(http.HandlerFunc(s.handleSyncCertificate)))
 	mux.Handle("GET /api/v1/dns-accounts", s.adminAuth(http.HandlerFunc(s.handleDNSAccounts)))
@@ -124,6 +136,8 @@ func (s *Server) routes() http.Handler {
 	mux.Handle("PUT /api/v1/dns-accounts/{id}", s.adminAuth(http.HandlerFunc(s.handleUpdateDNSAccount)))
 	mux.Handle("GET /api/v1/acme-accounts", s.adminAuth(http.HandlerFunc(s.handleACMEAccounts)))
 	mux.Handle("POST /api/v1/acme-accounts", s.adminAuth(http.HandlerFunc(s.handleCreateACMEAccount)))
+	mux.Handle("PUT /api/v1/acme-accounts/{id}", s.adminAuth(http.HandlerFunc(s.handleUpdateACMEAccount)))
+	mux.Handle("PUT /api/v1/settings/admin-password", s.adminAuth(http.HandlerFunc(s.handleChangeAdminPassword)))
 	mux.Handle("GET /api/v1/audit", s.adminAuth(http.HandlerFunc(s.handleAudit)))
 	mux.Handle("/", s.frontendHandler())
 	return s.securityHeaders(s.requestLog(mux))
@@ -132,13 +146,38 @@ func (s *Server) routes() http.Handler {
 func (s *Server) adminAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		value := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer"))
-		hash := sha256.Sum256([]byte(value))
-		if value == "" || subtle.ConstantTimeCompare(hash[:], s.adminTokenHash[:]) != 1 {
+		if value == "" || !s.verifyAdminBearer(value) {
 			writeError(w, http.StatusUnauthorized, "管理员令牌无效", "unauthorized", nil)
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func (s *Server) verifyAdminBearer(value string) bool {
+	hash := sha256.Sum256([]byte(value))
+	s.sessionMu.RLock()
+	expiresAt, ok := s.adminSessions[hash]
+	s.sessionMu.RUnlock()
+	if ok && time.Now().Before(expiresAt) {
+		return true
+	}
+	if ok {
+		s.sessionMu.Lock()
+		delete(s.adminSessions, hash)
+		s.sessionMu.Unlock()
+	}
+	// Accepting the configured credential directly preserves CLI and upgrade
+	// compatibility. The browser exchanges it for a short-lived session token.
+	return s.verifyAdminCredential(value)
+}
+
+func (s *Server) verifyAdminCredential(value string) bool {
+	if encoded := s.store.Snapshot().AdminPasswordHash; encoded != "" {
+		return verifyAdminPassword(encoded, value)
+	}
+	hash := sha256.Sum256([]byte(value))
+	return subtle.ConstantTimeCompare(hash[:], s.adminTokenHash[:]) == 1
 }
 
 type nodeContextKey struct{}
@@ -239,6 +278,25 @@ func (s *Server) handleInstaller(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) handleSession(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"authenticated": true, "product": "Nginx Atlas"})
+}
+
+func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	var request struct {
+		Password string `json:"password"`
+	}
+	if !decodeJSON(w, r, &request) {
+		return
+	}
+	if len(request.Password) > 256 || !s.verifyAdminCredential(request.Password) {
+		writeError(w, http.StatusUnauthorized, "管理员密码无效", "unauthorized", nil)
+		return
+	}
+	token, expiresAt, err := s.createAdminSession()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "无法创建管理员会话", "session_error", nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"authenticated": true, "token": token, "expires_at": expiresAt})
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, target any) bool {
