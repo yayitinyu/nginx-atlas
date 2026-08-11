@@ -27,4 +27,9 @@ server { server_name $PANEL_DOMAIN; }
 EOF
 panel_is_agent_managed
 
+file_help="$(bash "$ROOT_DIR/deploy/install.sh" --help)"
+stdin_help="$(bash -s -- --help <"$ROOT_DIR/deploy/install.sh")"
+grep -Fq 'Usage:' <<<"$file_help"
+grep -Fq 'Usage:' <<<"$stdin_help"
+
 printf 'Installer regression checks are valid.\n'
