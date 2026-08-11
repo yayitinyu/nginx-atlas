@@ -151,10 +151,14 @@ func (s *Server) handleAgentJobResult(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "任务不存在、节点不匹配或已完成", "job_conflict", nil)
 		return
 	}
-	prepared, err := s.prepareCertificateResult(snapshot, job, request.Certificate)
-	if err != nil {
-		request.Success = false
-		request.Error = err.Error()
+	var prepared *model.Certificate
+	var err error
+	if request.Success {
+		prepared, err = s.prepareCertificateResult(snapshot, job, request.Certificate)
+		if err != nil {
+			request.Success = false
+			request.Error = err.Error()
+		}
 	}
 	now := time.Now().UTC()
 	err = s.store.Update(func(state *model.State) error {

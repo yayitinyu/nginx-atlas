@@ -70,6 +70,12 @@ type dnsAccountView struct {
 	UpdatedAt      time.Time `json:"updated_at"`
 }
 
+type dnsAccountRequest struct {
+	Name        string            `json:"name"`
+	Provider    string            `json:"provider"`
+	Credentials map[string]string `json:"credentials"`
+}
+
 type acmeAccountView struct {
 	ID           string    `json:"id"`
 	Name         string    `json:"name"`
@@ -573,29 +579,9 @@ func (s *Server) handleDNSAccounts(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) handleCreateDNSAccount(w http.ResponseWriter, r *http.Request) {
-	var request struct {
-		Name        string            `json:"name"`
-		Provider    string            `json:"provider"`
-		Credentials map[string]string `json:"credentials"`
-	}
-	if !decodeJSON(w, r, &request) {
+	request, ok := decodeDNSAccountRequest(w, r)
+	if !ok {
 		return
-	}
-	request.Name = strings.TrimSpace(request.Name)
-	request.Provider = strings.ToLower(strings.TrimSpace(request.Provider))
-	if len(request.Name) < 2 || len(request.Name) > 64 || !dnsProviderPattern.MatchString(request.Provider) || request.Provider == "manual" || request.Provider == "exec" {
-		writeError(w, http.StatusBadRequest, "DNS 账户名称或提供商无效", "invalid_dns_account", nil)
-		return
-	}
-	if len(request.Credentials) == 0 || len(request.Credentials) > 32 {
-		writeError(w, http.StatusBadRequest, "DNS 凭据不能为空且最多包含 32 项", "invalid_credentials", nil)
-		return
-	}
-	for key, value := range request.Credentials {
-		if !credentialNamePattern.MatchString(key) || strings.TrimSpace(value) == "" || len(value) > 4096 {
-			writeError(w, http.StatusBadRequest, "DNS 凭据变量无效", "invalid_credentials", map[string]string{"key": key})
-			return
-		}
 	}
 	accountID, err := id.New("dns")
 	if err != nil {
@@ -618,12 +604,82 @@ func (s *Server) handleCreateDNSAccount(w http.ResponseWriter, r *http.Request) 
 		wrapStoreError(w, err)
 		return
 	}
-	keys := make([]string, 0, len(request.Credentials))
-	for key := range request.Credentials {
+	keys := credentialKeys(request.Credentials)
+	writeJSON(w, http.StatusCreated, dnsAccountView{ID: account.ID, Name: account.Name, Provider: account.Provider, CredentialKeys: keys, CreatedAt: now, UpdatedAt: now})
+}
+
+func (s *Server) handleUpdateDNSAccount(w http.ResponseWriter, r *http.Request) {
+	accountID := r.PathValue("id")
+	request, ok := decodeDNSAccountRequest(w, r)
+	if !ok {
+		return
+	}
+	plaintext, _ := json.Marshal(request.Credentials)
+	ciphertext, err := s.mustSeal("dns-account:"+accountID, plaintext)
+	if err != nil {
+		wrapStoreError(w, err)
+		return
+	}
+	now := time.Now().UTC()
+	var account model.DNSAccount
+	err = s.store.Update(func(state *model.State) error {
+		existing, exists := state.DNSAccounts[accountID]
+		if !exists {
+			return errNotFound
+		}
+		existing.Name = request.Name
+		existing.Provider = request.Provider
+		existing.CredentialsCiphertext = ciphertext
+		existing.UpdatedAt = now
+		state.DNSAccounts[accountID] = existing
+		account = existing
+		s.addAudit(state, "info", "dns-account.updated", "DNS 账户凭据已重新加密保存")
+		return nil
+	})
+	if errors.Is(err, errNotFound) {
+		writeError(w, http.StatusNotFound, "DNS 账户不存在", "not_found", nil)
+		return
+	}
+	if err != nil {
+		wrapStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, dnsAccountView{ID: account.ID, Name: account.Name, Provider: account.Provider, CredentialKeys: credentialKeys(request.Credentials), CreatedAt: account.CreatedAt, UpdatedAt: account.UpdatedAt})
+}
+
+func decodeDNSAccountRequest(w http.ResponseWriter, r *http.Request) (dnsAccountRequest, bool) {
+	var request dnsAccountRequest
+	if !decodeJSON(w, r, &request) {
+		return request, false
+	}
+	request.Name = strings.TrimSpace(request.Name)
+	request.Provider = strings.ToLower(strings.TrimSpace(request.Provider))
+	if len(request.Name) < 2 || len(request.Name) > 64 || !dnsProviderPattern.MatchString(request.Provider) || request.Provider == "manual" || request.Provider == "exec" {
+		writeError(w, http.StatusBadRequest, "DNS 账户名称或提供商无效", "invalid_dns_account", nil)
+		return request, false
+	}
+	if len(request.Credentials) == 0 || len(request.Credentials) > 32 {
+		writeError(w, http.StatusBadRequest, "DNS 凭据不能为空且最多包含 32 项", "invalid_credentials", nil)
+		return request, false
+	}
+	for key, value := range request.Credentials {
+		value = strings.TrimSpace(value)
+		if !credentialNamePattern.MatchString(key) || value == "" || len(value) > 4096 {
+			writeError(w, http.StatusBadRequest, "DNS 凭据变量无效", "invalid_credentials", map[string]string{"key": key})
+			return request, false
+		}
+		request.Credentials[key] = value
+	}
+	return request, true
+}
+
+func credentialKeys(credentials map[string]string) []string {
+	keys := make([]string, 0, len(credentials))
+	for key := range credentials {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
-	writeJSON(w, http.StatusCreated, dnsAccountView{ID: account.ID, Name: account.Name, Provider: account.Provider, CredentialKeys: keys, CreatedAt: now, UpdatedAt: now})
+	return keys
 }
 
 func (s *Server) handleACMEAccounts(w http.ResponseWriter, _ *http.Request) {

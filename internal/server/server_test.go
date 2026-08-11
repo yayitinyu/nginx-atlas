@@ -81,6 +81,115 @@ func TestEnrollmentExchangesOneTimeTokenWithoutPersistingSecrets(t *testing.T) {
 	}
 }
 
+func TestDNSAccountCredentialUpdateTrimsTransportWhitespace(t *testing.T) {
+	temp := t.TempDir()
+	statePath := filepath.Join(temp, "state.json")
+	stateStore, err := store.Open(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	box, err := securebox.New(bytes.Repeat([]byte{0x37}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminToken := strings.Repeat("c", 32)
+	controller, err := New(Config{AdminToken: adminToken}, stateStore, box, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	created := performJSON(t, controller.Handler(), http.MethodPost, "/api/v1/dns-accounts", dnsAccountRequest{
+		Name: "Cloudflare", Provider: "cloudflare", Credentials: map[string]string{"CF_DNS_API_TOKEN": " first-token\r\n"},
+	}, "Bearer "+adminToken)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create DNS account returned %d: %s", created.Code, created.Body.String())
+	}
+	var view dnsAccountView
+	decodeRecorder(t, created, &view)
+
+	updated := performJSON(t, controller.Handler(), http.MethodPut, "/api/v1/dns-accounts/"+view.ID, dnsAccountRequest{
+		Name: "Cloudflare", Provider: "cloudflare", Credentials: map[string]string{"CF_DNS_API_TOKEN": " second-token\r\n"},
+	}, "Bearer "+adminToken)
+	if updated.Code != http.StatusOK {
+		t.Fatalf("update DNS account returned %d: %s", updated.Code, updated.Body.String())
+	}
+
+	account := stateStore.Snapshot().DNSAccounts[view.ID]
+	plaintext, err := box.Open("dns-account:"+view.ID, account.CredentialsCiphertext)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var credentials map[string]string
+	if err := json.Unmarshal(plaintext, &credentials); err != nil {
+		t.Fatal(err)
+	}
+	if got := credentials["CF_DNS_API_TOKEN"]; got != "second-token" {
+		t.Fatalf("credential whitespace was not trimmed: %q", got)
+	}
+	stateBytes, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(stateBytes, []byte("first-token")) || bytes.Contains(stateBytes, []byte("second-token")) {
+		t.Fatal("plaintext DNS credential was persisted")
+	}
+}
+
+func TestFailedIssuancePreservesAgentError(t *testing.T) {
+	stateStore, err := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	box, err := securebox.New(bytes.Repeat([]byte{0x38}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminToken := strings.Repeat("d", 32)
+	controller, err := New(Config{AdminToken: adminToken}, stateStore, box, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	enrollmentRecorder := performJSON(t, controller.Handler(), http.MethodPost, "/api/v1/enrollments", map[string]any{"name": "Primary", "ttl_minutes": 30}, "Bearer "+adminToken)
+	var enrollment struct {
+		Token string `json:"token"`
+	}
+	decodeRecorder(t, enrollmentRecorder, &enrollment)
+	enrollRecorder := performJSON(t, controller.Handler(), http.MethodPost, "/api/v1/agent/enroll", protocol.EnrollRequest{Token: enrollment.Token, Report: protocol.NodeReport{Hostname: "primary"}}, "")
+	var credentials protocol.EnrollResponse
+	decodeRecorder(t, enrollRecorder, &credentials)
+
+	now := time.Now().UTC()
+	if err := stateStore.Update(func(state *model.State) error {
+		state.Domains["dom_atlas"] = model.Domain{ID: "dom_atlas", Name: "atlas.example.com", NodeID: credentials.NodeID, CreatedAt: now, UpdatedAt: now}
+		state.Jobs["job_issue"] = model.Job{
+			ID: "job_issue", NodeID: credentials.NodeID, DomainID: "dom_atlas", Type: protocol.JobIssueCertificate,
+			Status: model.JobRunning, Attempts: 3, MaxAttempts: 3, CreatedAt: now, StartedAt: &now,
+		}
+		node := state.Nodes[credentials.NodeID]
+		node.RunningJobID = "job_issue"
+		state.Nodes[node.ID] = node
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	wantError := "ACME DNS-01 issuance failed: exit status 1"
+	resultRecorder := performJSON(t, controller.Handler(), http.MethodPost, "/api/v1/agent/jobs/job_issue/result", protocol.JobResultRequest{
+		Success: false, Error: wantError,
+	}, "AtlasNode "+credentials.NodeID+"."+credentials.NodeSecret)
+	if resultRecorder.Code != http.StatusOK {
+		t.Fatalf("submit failed result returned %d: %s", resultRecorder.Code, resultRecorder.Body.String())
+	}
+	snapshot := stateStore.Snapshot()
+	if got := snapshot.Jobs["job_issue"].Error; got != wantError {
+		t.Fatalf("job error was overwritten: got %q want %q", got, wantError)
+	}
+	if got := snapshot.Domains["dom_atlas"].LastError; got != wantError {
+		t.Fatalf("domain error was overwritten: got %q want %q", got, wantError)
+	}
+}
+
 func TestCreateDomainLinksUploadedCertificateToRenewalAccounts(t *testing.T) {
 	stateStore, err := store.Open(filepath.Join(t.TempDir(), "state.json"))
 	if err != nil {

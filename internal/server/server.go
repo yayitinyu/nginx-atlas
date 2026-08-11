@@ -121,6 +121,7 @@ func (s *Server) routes() http.Handler {
 	mux.Handle("POST /api/v1/certificates/{id}/sync", s.adminAuth(http.HandlerFunc(s.handleSyncCertificate)))
 	mux.Handle("GET /api/v1/dns-accounts", s.adminAuth(http.HandlerFunc(s.handleDNSAccounts)))
 	mux.Handle("POST /api/v1/dns-accounts", s.adminAuth(http.HandlerFunc(s.handleCreateDNSAccount)))
+	mux.Handle("PUT /api/v1/dns-accounts/{id}", s.adminAuth(http.HandlerFunc(s.handleUpdateDNSAccount)))
 	mux.Handle("GET /api/v1/acme-accounts", s.adminAuth(http.HandlerFunc(s.handleACMEAccounts)))
 	mux.Handle("POST /api/v1/acme-accounts", s.adminAuth(http.HandlerFunc(s.handleCreateACMEAccount)))
 	mux.Handle("GET /api/v1/audit", s.adminAuth(http.HandlerFunc(s.handleAudit)))
