@@ -84,7 +84,7 @@ export default function App() {
     document.querySelector<HTMLElement>('.workspace')?.scrollTo(0, 0)
   }, [page])
 
-  const overlayActive = domainDrawer || certificateDialog || nodeDialog || dnsDialog || acmeDialog || passwordDialog || Boolean(syncCertificate) || Boolean(automationCertificate) || Boolean(confirmCertificate) || Boolean(confirmDomain) || Boolean(confirmNode) || Boolean(managedNode) || Boolean(confirmTakeover) || mobileMenu
+  const overlayActive = domainDrawer || certificateDialog || nodeDialog || dnsDialog || acmeDialog || passwordDialog || Boolean(syncCertificate) || Boolean(automationCertificate) || Boolean(confirmCertificate) || Boolean(confirmDomain) || Boolean(confirmNode) || Boolean(managedNode) || mobileMenu
   useEffect(() => {
     if (!overlayActive) return
 
