@@ -33,6 +33,7 @@ jobs:
         run: |
           gh release create "${GITHUB_REF_NAME}" \
             dist-release/nginx-atlas_*.tar.gz \
+            dist-release/install.sh \
             dist-release/checksums.txt \
             --generate-notes \
             --title "Nginx Atlas ${GITHUB_REF_NAME}" \

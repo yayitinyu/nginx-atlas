@@ -12,6 +12,8 @@ esac
 
 rm -rf -- "$OUTPUT_DIR"
 mkdir -p "$OUTPUT_DIR"
+cp "$ROOT_DIR/deploy/install.sh" "$OUTPUT_DIR/install.sh"
+chmod 0755 "$OUTPUT_DIR/install.sh"
 
 cd "$ROOT_DIR/web"
 npm ci
@@ -49,9 +51,9 @@ for arch in amd64 arm64; do
 done
 
 cd "$OUTPUT_DIR"
-for archive in ./*.tar.gz; do
-  name="$(basename "$archive")"
-  digest="$(sha256sum "$archive" | awk '{print $1}')"
+for asset in ./*.tar.gz ./install.sh; do
+  name="$(basename "$asset")"
+  digest="$(sha256sum "$asset" | awk '{print $1}')"
   printf '%s  %s\n' "$digest" "$name"
 done > checksums.txt
 sha256sum --check checksums.txt

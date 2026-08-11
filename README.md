@@ -43,7 +43,7 @@ flowchart LR
 面板域名的证书已经位于 `/etc/ssl/<面板域名>/fullchain.pem` 与 `privkey.pem` 时，可直接执行：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/yayitinyu/nginx-atlas/main/deploy/install.sh \
+curl -fsSL https://github.com/yayitinyu/nginx-atlas/releases/latest/download/install.sh \
   | sudo bash -s -- server \
       --public-url https://atlas.example.com \
       --panel-domain atlas.example.com
