@@ -277,6 +277,12 @@ WantedBy=multi-user.target
 EOF
 }
 
+enable_and_restart_service() {
+  local unit="$1"
+  systemctl enable "$unit"
+  systemctl restart "$unit"
+}
+
 write_agent_env() {
   local agent_server="$1" token="$2"
   if [[ -s "$STATE_ROOT/agent/state.json" && -f "$CONFIG_DIR/agent.env" ]]; then
@@ -302,7 +308,7 @@ install_agent_mode() {
   write_agent_env "$SERVER_URL" "$ENROLLMENT_TOKEN"
   write_agent_service
   systemctl daemon-reload
-  systemctl enable --now nginx-atlas-agent.service
+  enable_and_restart_service nginx-atlas-agent.service
   report_certificate_inventory
   log "节点代理已启动；可用 journalctl -u nginx-atlas-agent -f 查看注册进度。"
 }
@@ -468,13 +474,13 @@ install_server_mode() {
   write_server_env
   write_server_service
   systemctl daemon-reload
-  systemctl enable --now nginx-atlas-server.service
+  enable_and_restart_service nginx-atlas-server.service
   wait_for_controller
   configure_panel_nginx
   create_local_enrollment
   write_agent_service
   systemctl daemon-reload
-  systemctl enable --now nginx-atlas-agent.service
+  enable_and_restart_service nginx-atlas-agent.service
   report_certificate_inventory
   printf '\n'
   log "主控安装完成：$PUBLIC_URL"

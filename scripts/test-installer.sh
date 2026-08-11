@@ -32,4 +32,11 @@ stdin_help="$(bash -s -- --help <"$ROOT_DIR/deploy/install.sh")"
 grep -Fq 'Usage:' <<<"$file_help"
 grep -Fq 'Usage:' <<<"$stdin_help"
 
+SYSTEMCTL_CALLS=()
+systemctl() { SYSTEMCTL_CALLS+=("$*"); }
+enable_and_restart_service nginx-atlas-test.service
+[[ "${SYSTEMCTL_CALLS[0]}" == "enable nginx-atlas-test.service" ]]
+[[ "${SYSTEMCTL_CALLS[1]}" == "restart nginx-atlas-test.service" ]]
+unset -f systemctl
+
 printf 'Installer regression checks are valid.\n'
