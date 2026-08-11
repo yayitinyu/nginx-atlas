@@ -7,7 +7,8 @@ INSTALL_DIR="/usr/local/bin"
 CONFIG_DIR="/etc/nginx-atlas"
 STATE_ROOT="/var/lib/nginx-atlas"
 SYSTEMD_DIR="/etc/systemd/system"
-NGINX_PANEL_CONFIG="/etc/nginx/conf.d/nginx-atlas-panel.conf"
+NGINX_CONFIG_DIR="/etc/nginx/conf.d"
+NGINX_PANEL_CONFIG="$NGINX_CONFIG_DIR/nginx-atlas-panel.conf"
 
 MODE=""
 SERVER_URL=""
@@ -378,6 +379,10 @@ EOF
 
 configure_panel_nginx() {
   local cert_dir="/etc/ssl/$PANEL_DOMAIN"
+  if panel_is_agent_managed; then
+    log "$PANEL_DOMAIN 已由本机节点代理管理，跳过重复的静态面板配置。"
+    return
+  fi
   if [[ ! -r "$cert_dir/fullchain.pem" || ! -r "$cert_dir/privkey.pem" ]]; then
     warn "未发现 $cert_dir/fullchain.pem 与 privkey.pem，未创建公网面板站点。"
     warn "请先由外部反向代理将 $PUBLIC_URL 转发到 127.0.0.1:9090，或放入证书后重新运行安装器。"
@@ -424,6 +429,13 @@ EOF
   fi
   systemctl reload nginx
   log "已为 $PANEL_DOMAIN 配置 HTTPS 反向代理"
+}
+
+panel_is_agent_managed() {
+  local managed_config="$NGINX_CONFIG_DIR/atlas-$PANEL_DOMAIN.conf"
+  [[ -f "$managed_config" ]] &&
+    grep -Fqx '# Managed by Nginx Atlas. Manual changes will be replaced.' "$managed_config" &&
+    grep -Fq "server_name $PANEL_DOMAIN;" "$managed_config"
 }
 
 wait_for_controller() {
