@@ -54,14 +54,9 @@ export function Overview({ data, onNavigate, onAddDomain }: Props) {
           <Bezel className="domain-panel">
             <div className="panel-toolbar">
               <h2>{t('overview.routes')}</h2>
-              <label className="search-field">
-                <Icon name="search" size={17} />
-                <span className="sr-only">{t('overview.searchDomain')}</span>
-                <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t('overview.searchDomain')} />
-              </label>
             </div>
             {domains.length > 0 ? (
-              <DomainTable domains={domains.slice(0, 4)} onOpen={() => onNavigate('domains')} />
+              <DomainTable domains={domains.slice(0, 4)} onOpen={() => onNavigate('domains')} padEmpty />
             ) : (
               <EmptyState
                 icon="globe"
@@ -88,7 +83,7 @@ export function Overview({ data, onNavigate, onAddDomain }: Props) {
   )
 }
 
-export function DomainTable({ domains, onOpen, showActions }: { domains: DomainRecord[]; onOpen?: (domain: DomainRecord) => void; showActions?: (domain: DomainRecord) => ReactNode }) {
+export function DomainTable({ domains, onOpen, showActions, padEmpty }: { domains: DomainRecord[]; onOpen?: (domain: DomainRecord) => void; showActions?: (domain: DomainRecord) => ReactNode; padEmpty?: boolean }) {
   const { t } = usePreferences()
   return (
     <div className="domain-table" role="table" aria-label={t('nav.domains')}>
@@ -125,12 +120,12 @@ export function DomainTable({ domains, onOpen, showActions }: { domains: DomainR
               {runtime}
             </span>
             <span className="row-action" role="cell">
-              {showActions?.(domain) ?? (onOpen ? <IconButton name="chevron" label={domain.name} onClick={() => onOpen(domain)} /> : null)}
+              {showActions?.(domain)}
             </span>
           </div>
         )
       })}
-      {Array.from({ length: Math.max(0, 4 - domains.length) }).map((_, index) => (
+      {padEmpty && Array.from({ length: Math.max(0, 4 - domains.length) }).map((_, index) => (
         <div className="domain-row placeholder-row" role="row" key={`empty-${index}`} />
       ))}
     </div>

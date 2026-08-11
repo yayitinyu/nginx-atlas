@@ -360,7 +360,7 @@ export function SettingsPage({
         <SettingRow icon="terminal" title={t('settings.transaction')} description={t('settings.transactionDescription')} value={t('settings.atomic')} />
         <button type="button" className="settings-action-row" onClick={onPassword}>
           <span className="settings-icon"><Icon name="lock" size={20} /></span>
-          <span><strong>{t('settings.password')}</strong><small>{t('settings.passwordDescription')}</small></span>
+          <span><strong>{t('settings.password')}</strong>{t('settings.passwordDescription') && <small>{t('settings.passwordDescription')}</small>}</span>
           <span className="settings-value">{t('settings.changePassword')} <Icon name="chevron" size={15} /></span>
         </button>
       </div>
@@ -373,7 +373,7 @@ function SettingRow({ icon, title, description, value }: { icon: 'shield' | 'ser
   return (
     <Bezel className="settings-row">
       <span className="settings-icon"><Icon name={icon} size={20} /></span>
-      <span><strong>{title}</strong><small>{description}</small></span>
+      <span><strong>{title}</strong>{description && <small>{description}</small>}</span>
       <span className="settings-value">{value}</span>
     </Bezel>
   )

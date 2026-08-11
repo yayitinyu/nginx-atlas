@@ -11,7 +11,6 @@ const items: Array<{ key: PageKey; labelKey: string; mobileLabelKey?: string; ic
   { key: 'domains', labelKey: 'nav.domains', icon: 'globe', mobileLabelKey: 'nav.domainsShort' },
   { key: 'certificates', labelKey: 'nav.certificates', icon: 'shield', mobileLabelKey: 'nav.certificates' },
   { key: 'nodes', labelKey: 'nav.nodes', icon: 'server', mobileLabelKey: 'nav.nodes' },
-  { key: 'accounts', labelKey: 'nav.accounts', icon: 'dns' },
   { key: 'audit', labelKey: 'nav.audit', icon: 'log' },
   { key: 'settings', labelKey: 'nav.settings', icon: 'settings', mobileLabelKey: 'nav.settings' },
 ]
