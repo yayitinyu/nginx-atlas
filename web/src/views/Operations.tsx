@@ -8,17 +8,15 @@ import { DomainTable, relativeTime } from './Overview'
 
 interface DiscoveredSite { node: NodeRecord; site: NginxSiteMeta }
 
-export function DomainsPage({ domains, nodes, onAdd, onEdit, onDelete, onAdopt }: {
+export function DomainsPage({ domains, nodes, onAdd, onEdit, onDelete }: {
   domains: DomainRecord[]
   nodes: NodeRecord[]
   onAdd: () => void
   onEdit: (domain: DomainRecord) => void
   onDelete: (domain: DomainRecord) => void
-  onAdopt: (node: NodeRecord, site: NginxSiteMeta, takeover: boolean) => void
 }) {
   const { t } = usePreferences()
   const [query, setQuery] = useState('')
-  const [tab, setTab] = useState<'managed' | 'discovered'>('managed')
   const normalized = query.trim().toLowerCase()
   const filtered = useMemo(() => domains.filter((domain) =>
     !normalized
@@ -26,15 +24,6 @@ export function DomainsPage({ domains, nodes, onAdd, onEdit, onDelete, onAdopt }
     || domain.node_name.toLowerCase().includes(normalized)
     || `${domain.upstream_host}:${domain.upstream_port}`.includes(normalized),
   ), [domains, normalized])
-  const discovered = useMemo<DiscoveredSite[]>(() => {
-    const managedNames = new Set(domains.map((domain) => domain.name))
-    return nodes
-      .flatMap((node) => (node.nginx_sites ?? []).map((site) => ({ node, site })))
-      .filter(({ node, site }) =>
-        !managedNames.has(site.domain)
-        && (!normalized || site.domain.includes(normalized) || node.name.toLowerCase().includes(normalized) || `${site.upstream_host}:${site.upstream_port}`.includes(normalized)),
-      )
-  }, [domains, nodes, normalized])
 
   return (
     <div className="content-page page-enter">
@@ -45,99 +34,36 @@ export function DomainsPage({ domains, nodes, onAdd, onEdit, onDelete, onAdopt }
       />
       <Bezel className="operation-panel">
         <div className="panel-toolbar">
-          <div className="toolbar-tabs">
-            <button type="button" className={tab === 'managed' ? 'active' : ''} onClick={() => setTab('managed')}>
-              {t('domain.managedTab')}<small>{domains.length}</small>
-            </button>
-            <button type="button" className={tab === 'discovered' ? 'active' : ''} onClick={() => setTab('discovered')}>
-              {t('domain.discoveredTab')}<small>{discovered.length}</small>
-            </button>
-          </div>
           <label className="search-field">
             <Icon name="search" size={17} />
             <span className="sr-only">{t('common.search')}</span>
             <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t('domain.searchPlaceholder')} />
           </label>
         </div>
-        {tab === 'managed' ? (
-          filtered.length ? (
-            <DomainTable
-              domains={filtered}
-              onOpen={onEdit}
-              showActions={(domain) => (
-                <div className="domain-row-actions">
-                  <IconButton name="edit" label={`${t('common.edit')} ${domain.name}`} onClick={() => onEdit(domain)} />
-                  <IconButton name="trash" label={`${t('common.delete')} ${domain.name}`} onClick={() => onDelete(domain)} />
-                </div>
-              )}
-            />
-          ) : (
-            <EmptyState
-              icon="globe"
-              title={t('domain.empty')}
-              description={t('domain.emptyDescription')}
-              action={<button type="button" className="inline-action" onClick={onAdd}><Icon name="plus" size={16} />{t('domain.add')}</button>}
-            />
-          )
+        {filtered.length ? (
+          <DomainTable
+            domains={filtered}
+            onOpen={onEdit}
+            showActions={(domain) => (
+              <div className="domain-row-actions">
+                <IconButton name="edit" label={`${t('common.edit')} ${domain.name}`} onClick={() => onEdit(domain)} />
+                <IconButton name="trash" label={`${t('common.delete')} ${domain.name}`} onClick={() => onDelete(domain)} />
+              </div>
+            )}
+          />
         ) : (
-          <DiscoveredSites sites={discovered} onAdopt={onAdopt} />
+          <EmptyState
+            icon="globe"
+            title={t('domain.empty')}
+            description={t('domain.emptyDescription')}
+            action={<button type="button" className="inline-action" onClick={onAdd}><Icon name="plus" size={16} />{t('domain.add')}</button>}
+          />
         )}
         <div className="panel-footer">
-          <span>{tab === 'managed' ? t('domain.showing', { shown: filtered.length, total: domains.length }) : t('overview.total', { count: discovered.length })}</span>
-          <span className="footer-note">{tab === 'managed' ? t('domain.transactionNote') : t('domain.discoveredFooter')}</span>
+          <span>{t('domain.showing', { shown: filtered.length, total: domains.length })}</span>
+          <span className="footer-note">{t('domain.transactionNote')}</span>
         </div>
       </Bezel>
-    </div>
-  )
-}
-
-function DiscoveredSites({ sites, onAdopt }: { sites: DiscoveredSite[]; onAdopt: (node: NodeRecord, site: NginxSiteMeta, takeover: boolean) => void }) {
-  const { t } = usePreferences()
-  if (!sites.length) {
-    return <EmptyState icon="cloud-download" title={t('domain.noDiscovered')} description={t('domain.noDiscoveredDescription')} />
-  }
-  return (
-    <div className="discovered-sites">
-      <div className="discovered-intro">
-        <Icon name="eye" size={20} />
-        <span>
-          <strong>{t('domain.discoveredTitle')}</strong>
-          <small>{t('domain.discoveredDescription')}</small>
-        </span>
-      </div>
-      {sites.map(({ node, site }) => {
-        const canTakeOver = Boolean(site.config_path && site.upstream_host && site.upstream_port && !site.managed_by_atlas)
-        const route = site.upstream_host && site.upstream_port ? `${site.upstream_host}:${site.upstream_port}` : '—'
-        return (
-          <article className="discovered-row" key={`${node.id}-${site.config_path}-${site.domain}`}>
-            <span className="discovered-state"><StatusDot tone={node.status === 'online' ? 'good' : 'warning'} /></span>
-            <div className="discovered-main">
-              <span className="discovered-domain">
-                <strong>{site.domain}</strong>
-                <small>{node.name} · {route}</small>
-              </span>
-              <span className="site-badges">
-                <i>{site.tls ? t('domain.tls') : t('domain.http')}</i>
-                {site.managed_by_atlas && <i>{t('domain.managedConfig')}</i>}
-              </span>
-            </div>
-            <span className="discovered-actions">
-              <button type="button" className="chip-action quiet-action" onClick={() => onAdopt(node, site, false)}>
-                <Icon name="eye" size={15} />{t('domain.observe')}
-              </button>
-              <button
-                type="button"
-                className="chip-action"
-                disabled={!canTakeOver}
-                title={!canTakeOver ? t('domain.takeoverUnavailable') : t('domain.takeover')}
-                onClick={() => onAdopt(node, site, true)}
-              >
-                <Icon name="takeover" size={15} />{t('domain.takeover')}
-              </button>
-            </span>
-          </article>
-        )
-      })}
     </div>
   )
 }
@@ -341,18 +267,57 @@ export function NodesPage({ nodes, onAdd, onRevoke, onManage }: { nodes: NodeRec
   )
 }
 
-export function AccountsPage({ dnsAccounts, acmeAccounts, onAddDNS, onAddACME, onEditDNS, onEditACME }: {
+export function AuditPage({ events, domains, nodes }: { events: AuditEvent[]; domains: DomainRecord[]; nodes: NodeRecord[] }) {
+  const { t, locale, effectiveLanguage } = usePreferences()
+  const domainNames = Object.fromEntries(domains.map((domain) => [domain.id, domain.name]))
+  const nodeNames = Object.fromEntries(nodes.map((node) => [node.id, node.name]))
+  return (
+    <div className="content-page page-enter">
+      <PageHeader title={t('audit.title')} description={t('audit.description')} />
+      <Bezel className="operation-panel audit-panel">
+        <div className="audit-head">
+          <span>{t('audit.event')}</span>
+          <span>{t('audit.target')}</span>
+          <span>{t('audit.time')}</span>
+          <span>{t('audit.level')}</span>
+        </div>
+        {events.length === 0 ? (
+          <EmptyState icon="log" title={t('audit.empty')} description={t('audit.emptyDescription')} />
+        ) : events.map((event, index) => (
+          <div className="audit-row" key={event.id || `${event.action}-${index}`}>
+            <span>
+              <StatusIcon tone={event.level === 'error' ? 'error' : event.level} />
+              <span>
+                <strong>{effectiveLanguage === 'zh' ? event.message : event.action.replaceAll('.', ' · ')}</strong>
+                <small>{event.action}</small>
+              </span>
+            </span>
+            <span>{domainNames[event.domain_id ?? ''] || nodeNames[event.node_id ?? ''] || t('audit.controller')}</span>
+            <time>{formatDateTime(event.created_at, locale)}</time>
+            <span className={`audit-level audit-${event.level}`}>{t(`audit.${event.level}`)}</span>
+          </div>
+        ))}
+      </Bezel>
+    </div>
+  )
+}
+
+export function SettingsPage({
+  dnsAccounts, acmeAccounts, onAddDNS, onAddACME, onEditDNS, onEditACME, onPassword, onLogout
+}: {
   dnsAccounts: DNSAccount[]
   acmeAccounts: ACMEAccount[]
   onAddDNS: () => void
   onAddACME: () => void
   onEditDNS: (account: DNSAccount) => void
   onEditACME: (account: ACMEAccount) => void
+  onPassword: () => void
+  onLogout: () => void
 }) {
   const { t } = usePreferences()
   return (
     <div className="content-page page-enter">
-      <PageHeader title={t('accounts.title')} description={t('accounts.description')} />
+      <PageHeader title={t('settings.title')} description={t('settings.description')} />
       <div className="account-split">
         <Bezel className="account-panel">
           <SectionHeading title={t('accounts.dnsTitle')} action={<IconButton name="plus" label={t('accounts.addDNS')} onClick={onAddDNS} />} />
@@ -389,50 +354,6 @@ export function AccountsPage({ dnsAccounts, acmeAccounts, onAddDNS, onAddACME, o
           )}
         </Bezel>
       </div>
-    </div>
-  )
-}
-
-export function AuditPage({ events, domains, nodes }: { events: AuditEvent[]; domains: DomainRecord[]; nodes: NodeRecord[] }) {
-  const { t, locale, effectiveLanguage } = usePreferences()
-  const domainNames = Object.fromEntries(domains.map((domain) => [domain.id, domain.name]))
-  const nodeNames = Object.fromEntries(nodes.map((node) => [node.id, node.name]))
-  return (
-    <div className="content-page page-enter">
-      <PageHeader title={t('audit.title')} description={t('audit.description')} />
-      <Bezel className="operation-panel audit-panel">
-        <div className="audit-head">
-          <span>{t('audit.event')}</span>
-          <span>{t('audit.target')}</span>
-          <span>{t('audit.time')}</span>
-          <span>{t('audit.level')}</span>
-        </div>
-        {events.length === 0 ? (
-          <EmptyState icon="log" title={t('audit.empty')} description={t('audit.emptyDescription')} />
-        ) : events.map((event, index) => (
-          <div className="audit-row" key={event.id || `${event.action}-${index}`}>
-            <span>
-              <StatusIcon tone={event.level === 'error' ? 'error' : event.level} />
-              <span>
-                <strong>{effectiveLanguage === 'zh' ? event.message : event.action.replaceAll('.', ' · ')}</strong>
-                <small>{event.action}</small>
-              </span>
-            </span>
-            <span>{domainNames[event.domain_id ?? ''] || nodeNames[event.node_id ?? ''] || t('audit.controller')}</span>
-            <time>{formatDateTime(event.created_at, locale)}</time>
-            <span className={`audit-level audit-${event.level}`}>{t(`audit.${event.level}`)}</span>
-          </div>
-        ))}
-      </Bezel>
-    </div>
-  )
-}
-
-export function SettingsPage({ onPassword, onLogout }: { onPassword: () => void; onLogout: () => void }) {
-  const { t } = usePreferences()
-  return (
-    <div className="content-page page-enter">
-      <PageHeader title={t('settings.title')} description={t('settings.description')} />
       <div className="settings-list">
         <SettingRow icon="shield" title={t('settings.security')} description={t('settings.securityDescription')} value={t('accounts.encrypted')} />
         <SettingRow icon="server" title={t('settings.transport')} description={t('settings.transportDescription')} value="HTTPS" />

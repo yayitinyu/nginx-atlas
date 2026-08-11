@@ -61,7 +61,7 @@ export function Overview({ data, onNavigate, onAddDomain }: Props) {
               </label>
             </div>
             {domains.length > 0 ? (
-              <DomainTable domains={domains.slice(0, 6)} onOpen={() => onNavigate('domains')} />
+              <DomainTable domains={domains.slice(0, 4)} onOpen={() => onNavigate('domains')} />
             ) : (
               <EmptyState
                 icon="globe"
@@ -130,13 +130,21 @@ export function DomainTable({ domains, onOpen, showActions }: { domains: DomainR
           </div>
         )
       })}
+      {Array.from({ length: Math.max(0, 4 - domains.length) }).map((_, index) => (
+        <div className="domain-row placeholder-row" role="row" key={`empty-${index}`} />
+      ))}
     </div>
   )
 }
 
 function CertificateTimeline({ data, onOpen }: { data: DashboardData; onOpen: () => void }) {
   const { t } = usePreferences()
-  const certificates = data.certificates.slice(0, 4)
+  const sortedCertificates = [...data.certificates].sort((a, b) => {
+    if (a.status !== 'valid' && b.status === 'valid') return -1
+    if (a.status === 'valid' && b.status !== 'valid') return 1
+    return a.days_remaining - b.days_remaining
+  })
+  const certificates = sortedCertificates.slice(0, 4)
   return (
     <Bezel className="timeline-panel">
       <SectionHeading title={t('overview.timeline')} action={<span className="section-context">{t('overview.next90')}</span>} />
@@ -164,6 +172,9 @@ function CertificateTimeline({ data, onOpen }: { data: DashboardData; onOpen: ()
               </div>
             )
           })}
+          {Array.from({ length: Math.max(0, 4 - certificates.length) }).map((_, index) => (
+            <div className="timeline-row placeholder-row" key={`empty-${index}`} />
+          ))}
         </div>
       )}
       <div className="panel-footer timeline-footer">
@@ -180,6 +191,13 @@ function CertificateTimeline({ data, onOpen }: { data: DashboardData; onOpen: ()
 
 function NodeHealth({ nodes, onOpen }: { nodes: NodeRecord[]; onOpen: () => void }) {
   const { t } = usePreferences()
+  const sortedNodes = [...nodes].sort((a, b) => {
+    const isBadA = a.status !== 'online' || !a.nginx_healthy
+    const isBadB = b.status !== 'online' || !b.nginx_healthy
+    if (isBadA && !isBadB) return -1
+    if (!isBadA && isBadB) return 1
+    return a.name.localeCompare(b.name)
+  })
   return (
     <Bezel className="node-health-panel">
       <SectionHeading title={t('overview.nodeHealth')} />
@@ -187,7 +205,7 @@ function NodeHealth({ nodes, onOpen }: { nodes: NodeRecord[]; onOpen: () => void
         <EmptyState icon="server" title={t('overview.noNodes')} description={t('overview.noNodesDescription')} />
       ) : (
         <div className="node-health-list">
-          {nodes.slice(0, 5).map((node) => (
+          {sortedNodes.slice(0, 4).map((node) => (
             <button type="button" className="node-health-row" key={node.id} onClick={onOpen}>
               <StatusDot tone={node.status === 'online' && node.nginx_healthy ? 'good' : node.status === 'offline' ? 'danger' : 'warning'} />
               <span>
@@ -200,6 +218,9 @@ function NodeHealth({ nodes, onOpen }: { nodes: NodeRecord[]; onOpen: () => void
                 <strong>{node.nginx_healthy ? t('overview.nginxOk') : t('overview.nginxBad')}</strong>
               </span>
             </button>
+          ))}
+          {Array.from({ length: Math.max(0, 4 - nodes.length) }).map((_, index) => (
+            <div className="node-health-row placeholder-row" key={`empty-${index}`} />
           ))}
         </div>
       )}
@@ -221,7 +242,7 @@ function ActivityFeed({ events, domains, nodes, onOpen }: { events: AuditEvent[]
         <EmptyState icon="log" title={t('overview.noActivity')} description={t('overview.noActivityDescription')} />
       ) : (
         <div className="activity-list">
-          {events.slice(0, 6).map((event, index) => (
+          {events.slice(0, 4).map((event, index) => (
             <button type="button" className="activity-row" key={event.id || `${event.action}-${index}`} onClick={onOpen}>
               <StatusIcon tone={event.level === 'error' ? 'error' : event.level} />
               <span>
@@ -230,6 +251,9 @@ function ActivityFeed({ events, domains, nodes, onOpen }: { events: AuditEvent[]
               </span>
               <time>{relativeTime(event.created_at, locale)}</time>
             </button>
+          ))}
+          {Array.from({ length: Math.max(0, 4 - events.length) }).map((_, index) => (
+            <div className="activity-row placeholder-row" key={`empty-${index}`} />
           ))}
         </div>
       )}

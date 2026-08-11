@@ -88,6 +88,9 @@ type Domain struct {
 	CloudflareProxied       bool              `json:"cloudflare_proxied,omitempty"`
 	CloudflareRecordType    string            `json:"cloudflare_record_type,omitempty"`
 	CloudflareRecordContent string            `json:"cloudflare_record_content,omitempty"`
+	NginxWebsocket          bool              `json:"nginx_websocket,omitempty"`
+	NginxHTTP2              bool              `json:"nginx_http2,omitempty"`
+	NginxGzip               bool              `json:"nginx_gzip,omitempty"`
 	LastJobID               string            `json:"last_job_id,omitempty"`
 	LastError               string            `json:"last_error,omitempty"`
 	CreatedAt               time.Time         `json:"created_at"`

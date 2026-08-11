@@ -28,8 +28,8 @@ export function LoginGate({ onLogin }: { onLogin: (password: string) => Promise<
   }
 
   return (
-    <main className="login-screen">
-      <div className="login-preferences">
+    <main className="login-screen-compact">
+      <div className="login-preferences-top">
         <SelectField ariaLabel={t('app.language')} value={language} onChange={(value) => setLanguage(value as LanguageMode)} icon="language" options={[
           { value: 'system', label: t('common.system') }, { value: 'zh', label: t('common.chinese') }, { value: 'en', label: t('common.english') },
         ]} />
@@ -37,35 +37,24 @@ export function LoginGate({ onLogin }: { onLogin: (password: string) => Promise<
           { value: 'system', label: t('common.system') }, { value: 'light', label: t('common.light') }, { value: 'dark', label: t('common.dark') },
         ]} />
       </div>
-      <section className="login-copy">
-        <Logo />
-        <span className="login-eyebrow">{t('login.eyebrow')}</span>
-        <h1>{t('login.title').split('\n').map((line) => <span key={line}>{line}</span>)}</h1>
-        <p>{t('login.description')}</p>
-      </section>
-      <div className="login-shell">
-        <form className="login-card" onSubmit={submit}>
-          <span className="login-key"><Icon name="lock" size={25} weight="light" /></span>
-          <h2>{t('login.cardTitle')}</h2>
-          <p>{t('login.cardDescription')}</p>
-          <label htmlFor="admin-password">{t('login.password')}</label>
-          <div className={`login-input ${error ? 'field-error' : ''}`}>
-            <Icon name="key" size={18} />
-            <input
-              id="admin-password"
-              type="password"
-              autoComplete="current-password"
-              value={password}
-              onChange={(event) => setPassword(event.target.value)}
-              placeholder={t('login.passwordPlaceholder')}
-              autoFocus
-            />
-          </div>
-          {error && <span className="form-error" role="alert">{error}</span>}
-          <ActionButton wide plain disabled={busy}>{busy ? t('login.submitting') : t('login.submit')}</ActionButton>
-          <small className="login-security"><Icon name="shield" size={15} />{t('login.secure')}</small>
-        </form>
-      </div>
+      <form className="login-card-centered" onSubmit={submit}>
+        <div className="login-logo-wrap"><Logo /></div>
+        <h2>{t('login.cardTitle')}</h2>
+        <div className={`login-input-large ${error ? 'field-error' : ''}`}>
+          <Icon name="key" size={20} />
+          <input
+            id="admin-password"
+            type="password"
+            autoComplete="current-password"
+            value={password}
+            onChange={(event) => setPassword(event.target.value)}
+            placeholder={t('login.passwordPlaceholder')}
+            autoFocus
+          />
+        </div>
+        {error && <span className="form-error" role="alert">{error}</span>}
+        <ActionButton wide plain disabled={busy}>{busy ? t('login.submitting') : t('login.submit')}</ActionButton>
+      </form>
     </main>
   )
 }

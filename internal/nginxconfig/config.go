@@ -22,6 +22,9 @@ type Site struct {
 	UpstreamPort   int
 	TLS            bool
 	CertificateDir string
+	NginxWebsocket bool
+	NginxHTTP2     bool
+	NginxGzip      bool
 }
 
 func ValidateSite(site Site) error {
@@ -81,8 +84,13 @@ server {
 }
 
 server {
+    {{- if .NginxHTTP2 }}
     listen 443 ssl http2;
     listen [::]:443 ssl http2;
+    {{- else }}
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    {{- end }}
     server_name {{ .Domain }};
 
     ssl_certificate {{ .CertificateDir }}/fullchain.pem;
@@ -93,27 +101,13 @@ server {
     ssl_session_tickets off;
     client_max_body_size 64m;
 
-    location / {
-        proxy_pass {{ upstream . }};
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header X-Forwarded-Host $host;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_connect_timeout 10s;
-        proxy_send_timeout 3600s;
-        proxy_read_timeout 3600s;
-    }
-}
-{{- else }}
-server {
-    listen 80;
-    listen [::]:80;
-    server_name {{ .Domain }};
-    client_max_body_size 64m;
+    {{- if .NginxGzip }}
+    gzip on;
+    gzip_vary on;
+    gzip_proxied any;
+    gzip_comp_level 6;
+    gzip_types text/plain text/css text/xml application/json application/javascript application/rss+xml application/atom+xml image/svg+xml;
+    {{- end }}
 
     location / {
         proxy_pass {{ upstream . }};
@@ -123,11 +117,45 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header X-Forwarded-Host $host;
+        {{- if .NginxWebsocket }}
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
         proxy_connect_timeout 10s;
         proxy_send_timeout 3600s;
         proxy_read_timeout 3600s;
+        {{- end }}
+    }
+}
+{{- else }}
+server {
+    listen 80;
+    listen [::]:80;
+    server_name {{ .Domain }};
+    client_max_body_size 64m;
+
+    {{- if .NginxGzip }}
+    gzip on;
+    gzip_vary on;
+    gzip_proxied any;
+    gzip_comp_level 6;
+    gzip_types text/plain text/css text/xml application/json application/javascript application/rss+xml application/atom+xml image/svg+xml;
+    {{- end }}
+
+    location / {
+        proxy_pass {{ upstream . }};
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host $host;
+        {{- if .NginxWebsocket }}
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_connect_timeout 10s;
+        proxy_send_timeout 3600s;
+        proxy_read_timeout 3600s;
+        {{- end }}
     }
 }
 {{- end }}

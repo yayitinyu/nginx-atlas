@@ -41,6 +41,9 @@ export function DomainDrawer({ open, nodes, certificates, dnsAccounts, acmeAccou
   const [cloudflareAccountID, setCloudflareAccountID] = useState('')
   const [cloudflareProxied, setCloudflareProxied] = useState(true)
   const [recordContent, setRecordContent] = useState('')
+  const [nginxWebsocket, setNginxWebsocket] = useState(false)
+  const [nginxHttp2, setNginxHttp2] = useState(true)
+  const [nginxGzip, setNginxGzip] = useState(true)
   const [error, setError] = useState('')
 
   useEffect(() => {
@@ -59,6 +62,9 @@ export function DomainDrawer({ open, nodes, certificates, dnsAccounts, acmeAccou
       setCloudflareAccountID(editingDomain.cloudflare_dns_account_id ?? (cloudflareAccounts[0]?.id ?? ''))
       setCloudflareProxied(editingDomain.cloudflare_proxied ?? true)
       setRecordContent(editingDomain.cloudflare_record_content ?? '')
+      setNginxWebsocket(editingDomain.nginx_websocket ?? false)
+      setNginxHttp2(editingDomain.nginx_http2 ?? true)
+      setNginxGzip(editingDomain.nginx_gzip ?? true)
     } else {
       const firstNode = availableNodes[0]
       setDomain('')
@@ -74,6 +80,9 @@ export function DomainDrawer({ open, nodes, certificates, dnsAccounts, acmeAccou
       setCloudflareAccountID(cloudflareAccounts[0]?.id ?? '')
       setCloudflareProxied(true)
       setRecordContent(preferredAddress(firstNode))
+      setNginxWebsocket(false)
+      setNginxHttp2(true)
+      setNginxGzip(true)
     }
     setError('')
   }, [open, editingDomain])
@@ -101,8 +110,6 @@ export function DomainDrawer({ open, nodes, certificates, dnsAccounts, acmeAccou
     normalizedDomain && (certificate.domain === normalizedDomain || certificate.dns_names.some((name) => coversDomain(name, normalizedDomain))),
   ), [certificates, normalizedDomain])
   const selectedNode = availableNodes.find((node) => node.id === nodeID)
-  const previewDomain = normalizedDomain || 'api.example.com'
-  const previewPort = Number(port) || 8080
 
   useEffect(() => {
     if (choice !== 'existing') return
@@ -155,6 +162,9 @@ export function DomainDrawer({ open, nodes, certificates, dnsAccounts, acmeAccou
       cloudflare_dns_account_id: cloudflareEnabled ? cloudflareAccountID : undefined,
       cloudflare_proxied: cloudflareEnabled && cloudflareProxied,
       cloudflare_record_content: cloudflareEnabled ? recordContent.trim() : undefined,
+      nginx_websocket: nginxWebsocket,
+      nginx_http2: nginxHttp2,
+      nginx_gzip: nginxGzip,
     }
     if (editingDomain && onUpdate) {
       await onUpdate(editingDomain.id, { input: submissionInput })
@@ -195,7 +205,15 @@ export function DomainDrawer({ open, nodes, certificates, dnsAccounts, acmeAccou
             {cloudflareEnabled && <div className="cloudflare-options"><label><span>{t('domain.cloudflareAccount')}</span><SelectField ariaLabel={t('domain.cloudflareAccount')} value={cloudflareAccountID} onChange={setCloudflareAccountID} placeholder={t('common.select')} icon="dns" options={cloudflareAccounts.map((account) => ({ value: account.id, label: account.name, description: account.provider }))} /></label><label><span>{t('domain.recordContent')}</span><div className="field-control"><Icon name="link" size={17} /><input value={recordContent} onChange={(event) => setRecordContent(event.target.value)} placeholder={preferredAddress(selectedNode) || t('domain.recordAuto')} /></div></label><div className="proxy-mode"><span>{t('domain.proxyMode')}</span><div className="segmented-control"><button type="button" className={cloudflareProxied ? 'selected proxy-orange' : ''} onClick={() => setCloudflareProxied(true)}><Icon name="cloud" size={17} />{t('domain.orangeCloud')}</button><button type="button" className={!cloudflareProxied ? 'selected' : ''} onClick={() => setCloudflareProxied(false)}><Icon name="cloud-off" size={17} />{t('domain.grayCloud')}</button></div></div></div>}
           </section>
 
-          <div className="form-row preview-row"><label>{t('domain.preview')}</label><pre><span>server {'{'}</span><br />{'  '}listen <em>443 ssl</em>;<br />{'  '}server_name <em>{previewDomain}</em>;<br />{'  '}ssl_certificate <em>/etc/ssl/{previewDomain}/fullchain.pem</em>;<br />{'  '}location / {'{'}<br />{'    '}proxy_pass <em>http://{upstreamHost || '127.0.0.1'}:{previewPort}</em>;<br />{'  }'}<br />{'}'}</pre></div>
+          <section className="form-section nginx-section">
+            <div className="form-section-heading"><span>03</span><div><strong>{t('domain.nginxSettings')}</strong><small>{t('domain.nginxSettingsHint')}</small></div></div>
+            <div className="nginx-options">
+              <label className="switch-row"><button type="button" role="switch" aria-checked={nginxWebsocket} className={nginxWebsocket ? 'switch-on' : ''} onClick={() => setNginxWebsocket((value) => !value)}><i /></button><span><strong>{t('domain.nginxWebsocket')}</strong><small>{t('domain.nginxWebsocketHint')}</small></span></label>
+              <label className="switch-row"><button type="button" role="switch" aria-checked={nginxHttp2} className={nginxHttp2 ? 'switch-on' : ''} onClick={() => setNginxHttp2((value) => !value)}><i /></button><span><strong>{t('domain.nginxHttp2')}</strong><small>{t('domain.nginxHttp2Hint')}</small></span></label>
+              <label className="switch-row"><button type="button" role="switch" aria-checked={nginxGzip} className={nginxGzip ? 'switch-on' : ''} onClick={() => setNginxGzip((value) => !value)}><i /></button><span><strong>{t('domain.nginxGzip')}</strong><small>{t('domain.nginxGzipHint')}</small></span></label>
+            </div>
+          </section>
+
           <div className="deploy-note"><Icon name="terminal" size={18} /><span>{t('domain.deployProof')}</span></div>
           {selectedNode?.status !== 'online' && nodeID && <div className="form-warning"><Icon name="warning" size={18} />{t('domain.offlineWarning')}</div>}
           {error && <div className="form-error drawer-error" role="alert"><Icon name="warning" size={17} />{error}</div>}

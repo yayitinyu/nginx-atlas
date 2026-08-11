@@ -31,7 +31,10 @@ export function NavigationRail({ page, onChange, onLogout }: { page: PageKey; on
       </nav>
       <div className="rail-profile">
         <span className="rail-health" title={t('app.allHealthy')}><span className="pulse-dot" /></span>
-        <button className="profile-action" onClick={onLogout} aria-label={t('app.logout')} title={t('app.logout')}><Icon name="logout" size={19} /></button>
+        <button className="profile-action profile-logout" onClick={onLogout} aria-label={t('app.logout')} title={t('app.logout')}>
+          <Icon name="logout" size={19} />
+          <span>{t('app.logout')}</span>
+        </button>
       </div>
     </aside>
   )
@@ -72,23 +75,21 @@ export function MobileMenu({ open, page, onChange, onClose, onLogout }: {
   if (!open) return null
   return (
     <div className="mobile-menu-layer mobile-menu-open" onMouseDown={(event) => event.currentTarget === event.target && onClose()}>
-      <aside className="mobile-menu-drawer">
-        <div className="mobile-menu-top"><Logo /><button onClick={onClose} aria-label={t('nav.close')}><Icon name="close" size={25} /></button></div>
-        <div className="mobile-preferences"><span>{t('settings.quickPreferences')}</span><div><SelectField ariaLabel={t('app.language')} value={language} onChange={(value) => setLanguage(value as LanguageMode)} icon="language" options={[{ value: 'system', label: t('common.system') }, { value: 'zh', label: t('common.chinese') }, { value: 'en', label: t('common.english') }]} /><SelectField ariaLabel={t('app.theme')} value={theme} onChange={(value) => setTheme(value as ThemeMode)} icon={theme === 'light' ? 'sun' : theme === 'dark' ? 'moon' : 'system'} options={[{ value: 'system', label: t('common.system') }, { value: 'light', label: t('common.light') }, { value: 'dark', label: t('common.dark') }]} /></div></div>
-        <nav>
-          {items.map((item, index) => (
-            <button
-              key={item.key}
-              className={page === item.key ? 'active' : ''}
-              style={{ '--menu-index': index } as CSSProperties}
-              onClick={() => { onChange(item.key); onClose() }}
-            >
-              <Icon name={item.icon} size={23} /><span>{t(item.labelKey)}</span><Icon name="arrow" size={21} />
-            </button>
-          ))}
-        </nav>
-        <div className="mobile-account"><span className="mobile-account-mark">A</span><span><strong>admin</strong><small>{t('app.admin')}</small></span></div>
-        <button className="mobile-logout" onClick={onLogout}><Icon name="logout" size={20} />{t('app.logout')}</button>
+      <aside className="mobile-menu-compact">
+        <div className="mobile-menu-top">
+          <strong>{t('settings.quickPreferences')}</strong>
+          <button onClick={onClose} aria-label={t('nav.close')}><Icon name="close" size={20} /></button>
+        </div>
+        <div className="mobile-menu-body">
+          <SelectField ariaLabel={t('app.language')} value={language} onChange={(value) => setLanguage(value as LanguageMode)} icon="language" options={[{ value: 'system', label: t('common.system') }, { value: 'zh', label: t('common.chinese') }, { value: 'en', label: t('common.english') }]} />
+          <SelectField ariaLabel={t('app.theme')} value={theme} onChange={(value) => setTheme(value as ThemeMode)} icon={theme === 'light' ? 'sun' : theme === 'dark' ? 'moon' : 'system'} options={[{ value: 'system', label: t('common.system') }, { value: 'light', label: t('common.light') }, { value: 'dark', label: t('common.dark') }]} />
+          <button className="compact-menu-item" onClick={() => { onChange('audit'); onClose() }}>
+            <Icon name="log" size={18} /><span>{t('nav.audit')}</span>
+          </button>
+          <button className="compact-menu-item logout-item" onClick={onLogout}>
+            <Icon name="logout" size={18} /><span>{t('app.logout')}</span>
+          </button>
+        </div>
       </aside>
     </div>
   )

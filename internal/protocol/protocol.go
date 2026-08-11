@@ -81,6 +81,9 @@ type ApplyDomainPayload struct {
 	Certificate         *CertificateBundle `json:"certificate,omitempty"`
 	CaptureCertificate  bool               `json:"capture_certificate"`
 	ReplaceConfigPath   string             `json:"replace_config_path,omitempty"`
+	NginxWebsocket      bool               `json:"nginx_websocket"`
+	NginxHTTP2          bool               `json:"nginx_http2"`
+	NginxGzip           bool               `json:"nginx_gzip"`
 }
 
 type DeleteDomainPayload struct {

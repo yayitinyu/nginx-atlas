@@ -236,6 +236,9 @@ type createDomainRequest struct {
 	CloudflareProxied       bool     `json:"cloudflare_proxied"`
 	CloudflareRecordType    string   `json:"cloudflare_record_type"`
 	CloudflareRecordContent string   `json:"cloudflare_record_content"`
+	NginxWebsocket          bool     `json:"nginx_websocket"`
+	NginxHTTP2              bool     `json:"nginx_http2"`
+	NginxGzip               bool     `json:"nginx_gzip"`
 }
 
 type applyDomainSpec struct {
@@ -408,6 +411,7 @@ func (s *Server) handleCreateDomain(w http.ResponseWriter, r *http.Request) {
 			CloudflareEnabled: request.CloudflareEnabled, CloudflareDNSAccountID: request.CloudflareDNSAccountID,
 			CloudflareProxied: request.CloudflareProxied, CloudflareRecordType: request.CloudflareRecordType,
 			CloudflareRecordContent: request.CloudflareRecordContent,
+			NginxWebsocket: request.NginxWebsocket, NginxHTTP2: request.NginxHTTP2, NginxGzip: request.NginxGzip,
 		}
 		state.Domains[domainID] = created
 		var job model.Job
@@ -689,6 +693,9 @@ func (s *Server) handleUpdateDomain(w http.ResponseWriter, r *http.Request) {
 		CloudflareProxied       bool   `json:"cloudflare_proxied"`
 		CloudflareRecordType    string `json:"cloudflare_record_type"`
 		CloudflareRecordContent string `json:"cloudflare_record_content"`
+		NginxWebsocket          *bool  `json:"nginx_websocket"`
+		NginxHTTP2              *bool  `json:"nginx_http2"`
+		NginxGzip               *bool  `json:"nginx_gzip"`
 	}
 	if !decodeJSON(w, r, &request) {
 		return
@@ -726,6 +733,15 @@ func (s *Server) handleUpdateDomain(w http.ResponseWriter, r *http.Request) {
 		}
 		if request.CertificateMode != "" {
 			domain.CertificateMode = model.CertificateSource(request.CertificateMode)
+		}
+		if request.NginxWebsocket != nil {
+			domain.NginxWebsocket = *request.NginxWebsocket
+		}
+		if request.NginxHTTP2 != nil {
+			domain.NginxHTTP2 = *request.NginxHTTP2
+		}
+		if request.NginxGzip != nil {
+			domain.NginxGzip = *request.NginxGzip
 		}
 		if request.ACMEAccountID != "" {
 			domain.ACMEAccountID = request.ACMEAccountID

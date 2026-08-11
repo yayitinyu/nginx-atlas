@@ -146,6 +146,7 @@ func (e *Executor) applyDomain(ctx context.Context, payload protocol.ApplyDomain
 	config, err := nginxconfig.Render(nginxconfig.Site{
 		Domain: domain, UpstreamHost: payload.UpstreamHost, UpstreamPort: payload.UpstreamPort,
 		TLS: payload.TLS, CertificateDir: certDir,
+		NginxWebsocket: payload.NginxWebsocket, NginxHTTP2: payload.NginxHTTP2, NginxGzip: payload.NginxGzip,
 	})
 	if err != nil {
 		return protocol.JobResultRequest{}, err

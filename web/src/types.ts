@@ -73,6 +73,9 @@ export interface DomainRecord {
   cloudflare_proxied?: boolean
   cloudflare_record_type?: string
   cloudflare_record_content?: string
+  nginx_websocket?: boolean
+  nginx_http2?: boolean
+  nginx_gzip?: boolean
   last_job_id?: string
   last_error?: string
   job_status?: JobStatus
@@ -173,6 +176,9 @@ export interface CreateDomainInput {
   cloudflare_proxied?: boolean
   cloudflare_record_type?: 'A' | 'AAAA' | 'CNAME'
   cloudflare_record_content?: string
+  nginx_websocket?: boolean
+  nginx_http2?: boolean
+  nginx_gzip?: boolean
 }
 
 export interface CertificateAutomationInput {
