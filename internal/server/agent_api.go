@@ -61,6 +61,13 @@ func (s *Server) handleAgentEnroll(w http.ResponseWriter, r *http.Request) {
 			CreatedAt: now, LastSeenAt: &now,
 		}
 		applyNodeReport(&node, request.Report)
+		if strings.TrimSpace(node.Name) == "" {
+			node.Name = strings.TrimSpace(node.Hostname)
+			if node.Name == "" {
+				node.Name = node.ID
+			}
+		}
+		appendNodeStatusSample(&node, model.NodeOnline, now)
 		state.Nodes[node.ID] = node
 		s.addAudit(state, "success", "node.enrolled", "节点已安全加入主控", node.ID)
 		return nil
@@ -74,7 +81,7 @@ func (s *Server) handleAgentEnroll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, protocol.EnrollResponse{
-		NodeID: node.ID, NodeSecret: secret, PollAfter: int(s.config.PollAfter.Seconds()),
+		NodeID: node.ID, NodeSecret: secret, PollAfter: int(s.nodePollAfter(s.store.Snapshot()).Seconds()),
 	})
 }
 
@@ -94,6 +101,7 @@ func (s *Server) handleAgentPoll(w http.ResponseWriter, r *http.Request) {
 		node.Status = model.NodeOnline
 		node.LastSeenAt = &now
 		applyNodeReport(&node, request.Report)
+		appendNodeStatusSample(&node, model.NodeOnline, now)
 
 		if node.RunningJobID != "" {
 			if job, ok := state.Jobs[node.RunningJobID]; ok && job.Status == model.JobRunning {
@@ -125,7 +133,7 @@ func (s *Server) handleAgentPoll(w http.ResponseWriter, r *http.Request) {
 		wrapStoreError(w, err)
 		return
 	}
-	response := protocol.PollResponse{PollAfter: int(s.config.PollAfter.Seconds()), ServerNow: now}
+	response := protocol.PollResponse{PollAfter: int(s.nodePollAfter(s.store.Snapshot()).Seconds()), ServerNow: now}
 	if selected != nil {
 		wireJob, err := s.buildWireJob(*selected, s.store.Snapshot())
 		if err != nil {
@@ -186,6 +194,7 @@ func (s *Server) handleAgentJobResult(w http.ResponseWriter, r *http.Request) {
 			} else {
 				current.Status = model.JobFailed
 				current.FinishedAt = &now
+				restoreFailedDomainDeletion(state, current, current.Error, now)
 				s.addAudit(state, "error", "job.failed", "任务重试后仍然失败", nodeID, current.DomainID, current.ID)
 			}
 			if domain, ok := state.Domains[current.DomainID]; ok {
@@ -228,7 +237,7 @@ func (s *Server) buildWireJob(job model.Job, state model.State) (protocol.WireJo
 			TLS: domain.CertificateMode != "", UseLocalCertificate: spec.UseLocalCertificate,
 			LocalCertificateDir: spec.LocalCertificateDir, CaptureCertificate: spec.CaptureCertificate,
 			ReplaceConfigPath: spec.ReplaceConfigPath,
-			NginxWebsocket: domain.NginxWebsocket, NginxHTTP2: domain.NginxHTTP2, NginxGzip: domain.NginxGzip,
+			NginxWebsocket:    domain.NginxWebsocket, NginxHTTP2: domain.NginxHTTP2, NginxGzip: domain.NginxGzip,
 		}
 		if spec.CertificateID != "" {
 			bundle, err := s.decryptCertificate(state, spec.CertificateID)
@@ -611,6 +620,7 @@ func (s *Server) completeSuccessfulJob(state *model.State, job model.Job, reques
 			domain.CertificateID = prepared.ID
 		}
 		domain.Enabled = true
+		domain.Deleting = false
 		domain.LastError = ""
 		domain.UpdatedAt = now
 		state.Domains[domain.ID] = domain
@@ -644,6 +654,21 @@ func (s *Server) completeSuccessfulJob(state *model.State, job model.Job, reques
 		delete(state.Domains, job.DomainID)
 	}
 	return nil
+}
+
+func restoreFailedDomainDeletion(state *model.State, job model.Job, message string, now time.Time) {
+	if job.Type != protocol.JobDeleteDomain || job.DomainID == "" {
+		return
+	}
+	domain, ok := state.Domains[job.DomainID]
+	if !ok {
+		return
+	}
+	domain.Deleting = false
+	domain.Enabled = true
+	domain.LastError = truncate(message, 2048)
+	domain.UpdatedAt = now
+	state.Domains[domain.ID] = domain
 }
 
 func enqueueCertificateSyncJobs(state *model.State, certificateID, domain string, nodeIDs []string) error {

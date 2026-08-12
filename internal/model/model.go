@@ -32,29 +32,35 @@ const (
 )
 
 type Node struct {
-	ID                  string            `json:"id"`
-	Name                string            `json:"name"`
-	SecretHash          string            `json:"secret_hash,omitempty"`
-	Status              NodeStatus        `json:"status"`
-	Hostname            string            `json:"hostname,omitempty"`
-	IPAddresses         []string          `json:"ip_addresses,omitempty"`
-	OS                  string            `json:"os,omitempty"`
-	OSName              string            `json:"os_name,omitempty"`
-	OSVersion           string            `json:"os_version,omitempty"`
-	Arch                string            `json:"arch,omitempty"`
-	PackageManager      string            `json:"package_manager,omitempty"`
-	ControllerInstalled bool              `json:"controller_installed,omitempty"`
-	NginxVersion        string            `json:"nginx_version,omitempty"`
-	NginxHealthy        bool              `json:"nginx_healthy"`
-	AgentVersion        string            `json:"agent_version,omitempty"`
-	LastSeenAt          *time.Time        `json:"last_seen_at,omitempty"`
-	CreatedAt           time.Time         `json:"created_at"`
-	RevokedAt           *time.Time        `json:"revoked_at,omitempty"`
-	Labels              map[string]string `json:"labels,omitempty"`
-	Certificates        []CertificateMeta `json:"certificates,omitempty"`
-	NginxSites          []NginxSiteMeta   `json:"nginx_sites,omitempty"`
-	LastError           string            `json:"last_error,omitempty"`
-	RunningJobID        string            `json:"running_job_id,omitempty"`
+	ID                  string             `json:"id"`
+	Name                string             `json:"name"`
+	SecretHash          string             `json:"secret_hash,omitempty"`
+	Status              NodeStatus         `json:"status"`
+	Hostname            string             `json:"hostname,omitempty"`
+	IPAddresses         []string           `json:"ip_addresses,omitempty"`
+	OS                  string             `json:"os,omitempty"`
+	OSName              string             `json:"os_name,omitempty"`
+	OSVersion           string             `json:"os_version,omitempty"`
+	Arch                string             `json:"arch,omitempty"`
+	PackageManager      string             `json:"package_manager,omitempty"`
+	ControllerInstalled bool               `json:"controller_installed,omitempty"`
+	NginxVersion        string             `json:"nginx_version,omitempty"`
+	NginxHealthy        bool               `json:"nginx_healthy"`
+	AgentVersion        string             `json:"agent_version,omitempty"`
+	LastSeenAt          *time.Time         `json:"last_seen_at,omitempty"`
+	CreatedAt           time.Time          `json:"created_at"`
+	RevokedAt           *time.Time         `json:"revoked_at,omitempty"`
+	Labels              map[string]string  `json:"labels,omitempty"`
+	Certificates        []CertificateMeta  `json:"certificates,omitempty"`
+	NginxSites          []NginxSiteMeta    `json:"nginx_sites,omitempty"`
+	LastError           string             `json:"last_error,omitempty"`
+	RunningJobID        string             `json:"running_job_id,omitempty"`
+	StatusHistory       []NodeStatusSample `json:"status_history,omitempty"`
+}
+
+type NodeStatusSample struct {
+	Status     NodeStatus `json:"status"`
+	ObservedAt time.Time  `json:"observed_at"`
 }
 
 type Enrollment struct {
@@ -80,6 +86,7 @@ type Domain struct {
 	RenewBeforeDays         int               `json:"renew_before_days"`
 	SyncNodeIDs             []string          `json:"sync_node_ids,omitempty"`
 	Enabled                 bool              `json:"enabled"`
+	Deleting                bool              `json:"deleting,omitempty"`
 	ObservedOnly            bool              `json:"observed_only,omitempty"`
 	TakenOver               bool              `json:"taken_over,omitempty"`
 	ConfigPath              string            `json:"config_path,omitempty"`
@@ -95,6 +102,10 @@ type Domain struct {
 	LastError               string            `json:"last_error,omitempty"`
 	CreatedAt               time.Time         `json:"created_at"`
 	UpdatedAt               time.Time         `json:"updated_at"`
+}
+
+type ControllerSettings struct {
+	NodePollSeconds int `json:"node_poll_seconds,omitempty"`
 }
 
 type Certificate struct {
@@ -202,6 +213,7 @@ type State struct {
 	ACMEAccounts      map[string]ACMEAccount `json:"acme_accounts"`
 	Jobs              map[string]Job         `json:"jobs"`
 	Audit             []AuditEvent           `json:"audit"`
+	Settings          ControllerSettings     `json:"settings"`
 }
 
 func NewState() State {

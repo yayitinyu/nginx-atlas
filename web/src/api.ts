@@ -7,7 +7,10 @@ import type {
   DNSAccount,
   DomainRecord,
   EnrollmentResponse,
+  JobRecord,
+  ManagementCommands,
   NodeRecord,
+  ControllerSettings,
   ReleaseInfo,
   UninstallCommand,
 } from './types'
@@ -72,17 +75,17 @@ export const api = {
   certificates: () => request<CertificateRecord[]>('/api/v1/certificates'),
   dnsAccounts: () => request<DNSAccount[]>('/api/v1/dns-accounts'),
   acmeAccounts: () => request<ACMEAccount[]>('/api/v1/acme-accounts'),
-  createEnrollment: (name: string, ttlMinutes = 30) =>
+  createEnrollment: (ttlMinutes = 30) =>
     request<EnrollmentResponse>('/api/v1/enrollments', {
       method: 'POST',
-      body: JSON.stringify({ name, ttl_minutes: ttlMinutes }),
+      body: JSON.stringify({ ttl_minutes: ttlMinutes }),
     }),
   revokeNode: (id: string) => request<void>(`/api/v1/nodes/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   renameNode: (id: string, name: string) => request<NodeRecord>(`/api/v1/nodes/${encodeURIComponent(id)}`, {
     method: 'PUT', body: JSON.stringify({ name }),
   }),
   releaseInfo: () => request<ReleaseInfo>('/api/v1/release'),
-  updateNodeAtlas: (id: string) => request<unknown>(`/api/v1/nodes/${encodeURIComponent(id)}/update-atlas`, { method: 'POST', body: '{}' }),
+  updateNodeAtlas: (id: string) => request<JobRecord>(`/api/v1/nodes/${encodeURIComponent(id)}/update-atlas`, { method: 'POST', body: '{}' }),
   updateNodeSystem: (id: string) => request<unknown>(`/api/v1/nodes/${encodeURIComponent(id)}/update-system`, { method: 'POST', body: '{}' }),
   nodeUninstallCommand: (id: string) => request<UninstallCommand>(`/api/v1/nodes/${encodeURIComponent(id)}/uninstall-command`),
   createDomain: (input: CreateDomainInput) =>
@@ -93,17 +96,16 @@ export const api = {
     request<DomainRecord>('/api/v1/domains/adopt', { method: 'POST', body: JSON.stringify(input) }),
   deleteDomain: (id: string) =>
     request<{ queued: boolean }>(`/api/v1/domains/${encodeURIComponent(id)}`, { method: 'DELETE' }),
-  uploadCertificate: async (input: CertificateAutomationInput, fullchain: File, privkey: File) => {
+  uploadCertificate: async (input: CertificateAutomationInput, certificate: File, privateKey: File) => {
     const body = new FormData()
-    body.set('domain', input.domain)
     body.set('node_id', input.node_id)
     body.set('auto_renew', String(input.auto_renew))
     body.set('renew_before_days', String(input.renew_before_days))
     if (input.acme_account_id) body.set('acme_account_id', input.acme_account_id)
     if (input.dns_account_id) body.set('dns_account_id', input.dns_account_id)
     body.set('sync_node_ids', JSON.stringify(input.sync_node_ids))
-    body.set('fullchain', fullchain)
-    body.set('privkey', privkey)
+    body.set('certificate', certificate)
+    body.set('private_key', privateKey)
     return request<CertificateRecord>('/api/v1/certificates/upload', { method: 'POST', body })
   },
   issueCertificate: (input: CertificateAutomationInput) =>
@@ -143,4 +145,9 @@ export const api = {
     request<{ changed: boolean; token: string; expires_at: string }>('/api/v1/settings/admin-password', {
       method: 'PUT', body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
     }),
+  settings: () => request<ControllerSettings>('/api/v1/settings'),
+  updateSettings: (settings: ControllerSettings) => request<ControllerSettings>('/api/v1/settings', {
+    method: 'PUT', body: JSON.stringify(settings),
+  }),
+  managementCommands: () => request<ManagementCommands>('/api/v1/management-commands'),
 }

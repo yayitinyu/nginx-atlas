@@ -23,7 +23,7 @@ export function SelectField({ value, options, onChange, placeholder, ariaLabel, 
   const utility = className.split(/\s+/).includes('utility-select')
   const selected = options.find((option) => option.value === value)
   return (
-    <Select.Root value={value || undefined} onValueChange={onChange} disabled={disabled}>
+    <Select.Root value={value} onValueChange={onChange} disabled={disabled}>
       <Select.Trigger className={`custom-select-trigger ${className}`} aria-label={ariaLabel}>
         {icon && <Icon name={icon} size={17} />}
         <Select.Value placeholder={placeholder}>{selected?.label}</Select.Value>

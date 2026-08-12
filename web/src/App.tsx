@@ -1,22 +1,22 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { APIError, api, clearToken, getToken, setToken } from './api'
-import type { ACMEAccount, CertificateRecord, DashboardData, DNSAccount, DomainRecord, EnrollmentResponse, NginxSiteMeta, NodeRecord, ReleaseInfo, UninstallCommand } from './types'
+import type { ACMEAccount, CertificateRecord, DashboardData, DNSAccount, DomainRecord, JobRecord, NginxSiteMeta, NodeRecord, ReleaseInfo } from './types'
 import { usePreferences, type LanguageMode, type ThemeMode } from './preferences'
 import { Icon } from './components/Icon'
 import { LoginGate } from './components/LoginGate'
 import { MobileHeader, MobileMenu, MobileNavigation, NavigationRail, type PageKey } from './components/Navigation'
 import { ConfirmDialog, LoadingState, ToastRegion, type ToastMessage } from './components/Primitives'
 import { DomainDrawer, type DomainSubmission } from './components/DomainDrawer'
-import { ACMEAccountDialog, CertificateAutomationDialog, CertificateDialog, DNSAccountDialog, NodeDialog, NodeManageDialog, PasswordDialog, SyncDialog, type ACMEAccountInput, type CertificateAutomationSettingsInput, type CertificateSubmission, type DNSAccountInput } from './components/Dialogs'
+import { ACMEAccountDialog, CertificateAutomationDialog, CertificateDialog, DNSAccountDialog, NodeManageDialog, PasswordDialog, SyncDialog, type ACMEAccountInput, type CertificateAutomationSettingsInput, type CertificateSubmission, type DNSAccountInput } from './components/Dialogs'
 import { SelectField } from './components/SelectField'
 import { Overview } from './views/Overview'
-import { AuditPage, CertificatesPage, DomainsPage, NodesPage, SettingsPage } from './views/Operations'
+import { AuditPage, CertificatesPage, ControllerUpdatePage, DomainsPage, NodesPage, SettingsPage } from './views/Operations'
 
 type AuthState = 'checking' | 'anonymous' | 'authenticated'
-const emptyDashboard: DashboardData = { nodes: [], domains: [], certificates: [], audit: [], jobs: [], server_time: new Date().toISOString() }
+const emptyDashboard: DashboardData = { nodes: [], domains: [], certificates: [], audit: [], jobs: [], settings: { node_poll_seconds: 30 }, server_time: new Date().toISOString() }
 
 export default function App() {
-  const { t, theme, language, effectiveLanguage, setTheme, setLanguage } = usePreferences()
+  const { t, effectiveTheme, effectiveLanguage, setTheme, setLanguage } = usePreferences()
   const [auth, setAuth] = useState<AuthState>(getToken() ? 'checking' : 'anonymous')
   const [page, setPage] = useState<PageKey>('overview')
   const [data, setData] = useState<DashboardData>(emptyDashboard)
@@ -26,8 +26,6 @@ export default function App() {
   const [mobileMenu, setMobileMenu] = useState(false)
   const [domainDrawer, setDomainDrawer] = useState(false)
   const [certificateDialog, setCertificateDialog] = useState(false)
-  const [nodeDialog, setNodeDialog] = useState(false)
-  const [nodeResult, setNodeResult] = useState<EnrollmentResponse>()
   const [dnsDialog, setDNSDialog] = useState(false)
   const [editingDNS, setEditingDNS] = useState<DNSAccount>()
   const [acmeDialog, setACMEDialog] = useState(false)
@@ -37,10 +35,10 @@ export default function App() {
   const [automationCertificate, setAutomationCertificate] = useState<CertificateRecord>()
   const [confirmCertificate, setConfirmCertificate] = useState<CertificateRecord>()
   const [confirmDomain, setConfirmDomain] = useState<DomainRecord>()
-  const [confirmNode, setConfirmNode] = useState<NodeRecord>()
   const [managedNode, setManagedNode] = useState<NodeRecord>()
   const [releaseInfo, setReleaseInfo] = useState<ReleaseInfo>()
-  const [uninstallCommand, setUninstallCommand] = useState<UninstallCommand>()
+  const [updateJob, setUpdateJob] = useState<JobRecord>()
+  const [updatingNode, setUpdatingNode] = useState<NodeRecord>()
   const [busy, setBusy] = useState('')
   const [toasts, setToasts] = useState<ToastMessage[]>([])
 
@@ -64,7 +62,7 @@ export default function App() {
     if (!silent) setLoading(true)
     try {
       const [dashboard, dns, acme] = await Promise.all([api.dashboard(), api.dnsAccounts(), api.acmeAccounts()])
-      setData(dashboard); setDNSAccounts(dns); setACMEAccounts(acme)
+      setData({ ...dashboard, settings: dashboard.settings ?? { node_poll_seconds: 30 } }); setDNSAccounts(dns); setACMEAccounts(acme)
     } catch (error) { handleError(error, t('error.dashboard')) } finally { if (!silent) setLoading(false) }
   }, [handleError, t])
 
@@ -75,16 +73,23 @@ export default function App() {
   useEffect(() => {
     if (auth !== 'authenticated') return
     void refresh()
-    const interval = window.setInterval(() => { if (document.visibilityState === 'visible') void refresh(true) }, 10_000)
+    const pollSeconds = data.settings?.node_poll_seconds ?? 30
+    const interval = window.setInterval(() => { if (document.visibilityState === 'visible') void refresh(true) }, Math.max(10, pollSeconds) * 1000)
     return () => window.clearInterval(interval)
-  }, [auth, refresh])
+  }, [auth, refresh, data.settings?.node_poll_seconds])
+
+  useEffect(() => {
+    if (auth !== 'authenticated' || page !== 'update') return
+    const interval = window.setInterval(() => void refresh(true), 2_000)
+    return () => window.clearInterval(interval)
+  }, [auth, page, refresh])
 
   useEffect(() => {
     window.scrollTo(0, 0)
     document.querySelector<HTMLElement>('.workspace')?.scrollTo(0, 0)
   }, [page])
 
-  const overlayActive = domainDrawer || certificateDialog || nodeDialog || dnsDialog || acmeDialog || passwordDialog || Boolean(syncCertificate) || Boolean(automationCertificate) || Boolean(confirmCertificate) || Boolean(confirmDomain) || Boolean(confirmNode) || Boolean(managedNode) || mobileMenu
+  const overlayActive = domainDrawer || certificateDialog || dnsDialog || acmeDialog || passwordDialog || Boolean(syncCertificate) || Boolean(automationCertificate) || Boolean(confirmCertificate) || Boolean(confirmDomain) || Boolean(managedNode) || mobileMenu
   useEffect(() => {
     if (!overlayActive) return
 
@@ -145,7 +150,7 @@ export default function App() {
   async function submitCertificate(submission: CertificateSubmission) {
     setBusy('certificate')
     try {
-      if (submission.mode === 'upload') { await api.uploadCertificate(submission.input, submission.fullchain, submission.privkey); toast('success', t('toast.certUploaded')) }
+      if (submission.mode === 'upload') { await api.uploadCertificate(submission.input, submission.certificate, submission.privateKey); toast('success', t('toast.certUploaded')) }
       else if (submission.mode === 'issue') { await api.issueCertificate(submission.input); toast('success', t('toast.certQueued')) }
       else { await api.importCertificate(submission.input); toast('success', t('toast.certQueued')) }
       setCertificateDialog(false); setPage('certificates'); await refresh(true)
@@ -157,11 +162,6 @@ export default function App() {
     setBusy('certificate-automation')
     try { const updated = await api.updateCertificateAutomation(automationCertificate.id, input); setData((current) => ({ ...current, certificates: current.certificates.map((item) => item.id === updated.id ? updated : item) })); setAutomationCertificate(undefined); toast('success', t('toast.certificateAutomationSaved')); await refresh(true) }
     catch (error) { handleError(error, t('error.certificateAutomation')) } finally { setBusy('') }
-  }
-
-  async function createNode(name: string) {
-    setBusy('node')
-    try { setNodeResult(await api.createEnrollment(name.trim())) } catch (error) { handleError(error, t('error.node')) } finally { setBusy('') }
   }
 
   async function saveDNS(input: DNSAccountInput, accountID?: string) {
@@ -189,21 +189,10 @@ export default function App() {
     catch (error) { handleError(error, t('error.removeDomain')) } finally { setBusy('') }
   }
 
-  async function revokeNode() {
-    if (!confirmNode) return
-    setBusy('confirm')
-    try { await api.revokeNode(confirmNode.id); toast('success', t('toast.nodeRevoked')); setConfirmNode(undefined); await refresh(true) }
-    catch (error) { handleError(error, t('error.revokeNode')) } finally { setBusy('') }
-  }
-
   async function openNodeManager(node: NodeRecord) {
-    setManagedNode(node); setReleaseInfo(undefined); setUninstallCommand(undefined)
+    setManagedNode(node); setReleaseInfo(undefined)
     setBusy('node-details')
-    const [release, uninstall] = await Promise.allSettled([api.releaseInfo(), api.nodeUninstallCommand(node.id)])
-    if (release.status === 'fulfilled') setReleaseInfo(release.value)
-    else handleError(release.reason, t('error.release'))
-    if (uninstall.status === 'fulfilled') setUninstallCommand(uninstall.value)
-    else handleError(uninstall.reason, t('error.uninstallCommand'))
+    try { setReleaseInfo(await api.releaseInfo()) } catch (error) { handleError(error, t('error.release')) }
     setBusy('')
   }
 
@@ -222,9 +211,25 @@ export default function App() {
 
   async function updateManagedNodeAtlas() {
     if (!managedNode) return
+    const target = managedNode
     setBusy('atlas')
-    try { await api.updateNodeAtlas(managedNode.id); toast('success', t('toast.atlasUpdateQueued')); setManagedNode(undefined); await refresh(true) }
+    try {
+      const job = await api.updateNodeAtlas(target.id)
+      setManagedNode(undefined)
+      if (target.controller_installed) { setUpdateJob(job); setUpdatingNode(target); setPage('update') }
+      else toast('success', t('toast.atlasUpdateQueued'))
+      await refresh(true)
+    }
     catch (error) { handleError(error, t('error.atlasUpdate')) } finally { setBusy('') }
+  }
+
+  async function updatePollSeconds(seconds: number) {
+    setBusy('settings-poll')
+    try {
+      const settings = await api.updateSettings({ node_poll_seconds: seconds })
+      setData((current) => ({ ...current, settings }))
+      toast('success', t('toast.pollFrequencySaved'))
+    } catch (error) { handleError(error, t('error.settings')) } finally { setBusy('') }
   }
 
   async function updateManagedNodeSystem() {
@@ -270,17 +275,18 @@ export default function App() {
         <header className="command-bar">
           <span className="system-state"><span className={`pulse-dot ${allHealthy ? '' : 'pulse-warning'}`} />{allHealthy ? t('app.allHealthy') : data.nodes.length === 0 ? t('app.waitingNode') : t('app.needsAttention')}</span>
           <div className="command-tools">
-            <SelectField ariaLabel={t('app.language')} value={language} onChange={(value) => setLanguage(value as LanguageMode)} icon="language" className="utility-select" options={[{ value: 'system', label: t('common.system') }, { value: 'zh', label: t('common.chinese') }, { value: 'en', label: t('common.english') }]} />
-            <SelectField ariaLabel={t('app.theme')} value={theme} onChange={(value) => setTheme(value as ThemeMode)} icon={theme === 'light' ? 'sun' : theme === 'dark' ? 'moon' : 'system'} className="utility-select" options={[{ value: 'system', label: t('common.system') }, { value: 'light', label: t('common.light') }, { value: 'dark', label: t('common.dark') }]} />
+            <SelectField ariaLabel={t('app.language')} value={effectiveLanguage} onChange={(value) => setLanguage(value as LanguageMode)} icon="language" className="utility-select" options={[{ value: 'zh', label: t('common.chinese') }, { value: 'en', label: t('common.english') }]} />
+            <SelectField ariaLabel={t('app.theme')} value={effectiveTheme} onChange={(value) => setTheme(value as ThemeMode)} icon={effectiveTheme === 'light' ? 'sun' : 'moon'} className="utility-select" options={[{ value: 'light', label: t('common.light') }, { value: 'dark', label: t('common.dark') }]} />
           </div>
         </header>
         <main className="workspace-content">{loading ? <LoadingState /> : renderPage(page, {
           data, dnsAccounts, acmeAccounts, onAddDomain: () => { setEditingDomain(undefined); setDomainDrawer(true) }, onEditDomain: (domain) => { setEditingDomain(domain); setDomainDrawer(true) }, onAddCertificate: () => setCertificateDialog(true), onPage: setPage,
-          onDeleteDomain: setConfirmDomain, onAddNode: () => { setNodeResult(undefined); setNodeDialog(true) }, onRevokeNode: setConfirmNode, onManageNode: (node) => void openNodeManager(node),
+          onDeleteDomain: setConfirmDomain, onManageNode: (node) => void openNodeManager(node),
           onRenew: setConfirmCertificate, onToggleAutoRenew: (certificate, enabled) => void setCertificateAutoRenew(certificate, enabled), onSync: setSyncCertificate, onEditCertificate: setAutomationCertificate, busy,
           onAddDNS: () => { setEditingDNS(undefined); setDNSDialog(true) }, onEditDNS: (account) => { setEditingDNS(account); setDNSDialog(true) },
           onAddACME: () => { setEditingACME(undefined); setACMEDialog(true) }, onEditACME: (account) => { setEditingACME(account); setACMEDialog(true) },
-          onPassword: () => setPasswordDialog(true), onLogout: logout,
+          onPollSeconds: (seconds) => void updatePollSeconds(seconds), onPassword: () => setPasswordDialog(true), onLogout: logout,
+          updateJob: updateJob ? data.jobs.find((job) => job.id === updateJob.id) ?? updateJob : undefined, updatingNode,
         })}</main>
       </div>
       <MobileNavigation page={page} onChange={setPage} />
@@ -288,15 +294,13 @@ export default function App() {
       <DomainDrawer open={domainDrawer} nodes={data.nodes} certificates={data.certificates} dnsAccounts={dnsAccounts} acmeAccounts={acmeAccounts} busy={busy === 'domain'} editingDomain={editingDomain} onClose={() => { if (!busy) { setDomainDrawer(false); setEditingDomain(undefined) } }} onSubmit={createDomain} onUpdate={updateDomain} />
       <CertificateDialog open={certificateDialog} nodes={data.nodes} dnsAccounts={dnsAccounts} acmeAccounts={acmeAccounts} busy={busy === 'certificate'} onClose={() => !busy && setCertificateDialog(false)} onSubmit={submitCertificate} />
       <CertificateAutomationDialog open={Boolean(automationCertificate)} certificate={automationCertificate} nodes={data.nodes} dnsAccounts={dnsAccounts} acmeAccounts={acmeAccounts} busy={busy === 'certificate-automation'} onClose={() => !busy && setAutomationCertificate(undefined)} onSave={saveCertificateAutomation} />
-      <NodeDialog open={nodeDialog} busy={busy === 'node'} result={nodeResult} onClose={() => { setNodeDialog(false); setNodeResult(undefined) }} onCreate={createNode} />
-      <NodeManageDialog open={Boolean(managedNode)} node={managedNode} release={releaseInfo} uninstall={uninstallCommand} busy={busy} onClose={() => !busy && setManagedNode(undefined)} onRename={renameManagedNode} onCheckRelease={checkRelease} onUpdateAtlas={updateManagedNodeAtlas} onUpdateSystem={updateManagedNodeSystem} />
+      <NodeManageDialog open={Boolean(managedNode)} node={managedNode} release={releaseInfo} busy={busy} onClose={() => !busy && setManagedNode(undefined)} onRename={renameManagedNode} onCheckRelease={checkRelease} onUpdateAtlas={updateManagedNodeAtlas} onUpdateSystem={updateManagedNodeSystem} />
       <DNSAccountDialog open={dnsDialog} account={editingDNS} busy={busy === 'dns'} onClose={() => { setDNSDialog(false); setEditingDNS(undefined) }} onSave={saveDNS} />
       <ACMEAccountDialog open={acmeDialog} account={editingACME} busy={busy === 'acme'} onClose={() => { setACMEDialog(false); setEditingACME(undefined) }} onSave={saveACME} />
       <PasswordDialog open={passwordDialog} busy={busy === 'password'} onClose={() => setPasswordDialog(false)} onSave={changePassword} />
       <SyncDialog open={Boolean(syncCertificate)} certificate={syncCertificate} nodes={data.nodes} busy={busy === 'sync'} onClose={() => setSyncCertificate(undefined)} onSync={syncSelectedNodes} />
       <ConfirmDialog open={Boolean(confirmCertificate)} title={t('certificate.renewConfirmTitle')} description={t('certificate.renewConfirmDescription', { domain: confirmCertificate?.domain ?? '' })} confirmLabel={t('certificate.renewConfirmAction')} onCancel={() => setConfirmCertificate(undefined)} onConfirm={() => void renewCertificate()} busy={busy === `renew-${confirmCertificate?.id}`} busyLabel={t('common.queueing')} tone="primary" icon="refresh" />
       <ConfirmDialog open={Boolean(confirmDomain)} title={t(confirmDomain?.observed_only ? 'domain.removeObservedTitle' : confirmDomain?.taken_over ? 'domain.removeTakenOverTitle' : 'domain.removeTitle')} description={t(confirmDomain?.observed_only ? 'domain.removeObservedDescription' : confirmDomain?.taken_over ? 'domain.removeTakenOverDescription' : 'domain.removeDescription', { domain: confirmDomain?.name ?? '' })} confirmLabel={t(confirmDomain?.observed_only ? 'domain.stopManaging' : confirmDomain?.taken_over ? 'domain.restoreOriginal' : 'domain.removeAction')} onCancel={() => setConfirmDomain(undefined)} onConfirm={() => void deleteDomain()} busy={busy === 'confirm'} />
-      <ConfirmDialog open={Boolean(confirmNode)} title={t('nodes.revokeTitle')} description={t('nodes.revokeDescription', { node: confirmNode?.name ?? '' })} confirmLabel={t('nodes.revoke')} onCancel={() => setConfirmNode(undefined)} onConfirm={() => void revokeNode()} busy={busy === 'confirm'} />
       <ToastRegion messages={toasts} dismiss={(id) => setToasts((items) => items.filter((item) => item.id !== id))} />
     </div>
   )
@@ -311,8 +315,6 @@ interface PageProps {
   onAddCertificate: () => void
   onPage: (page: PageKey) => void
   onDeleteDomain: (domain: DomainRecord) => void
-  onAddNode: () => void
-  onRevokeNode: (node: NodeRecord) => void
   onManageNode: (node: NodeRecord) => void
   onRenew: (certificate: CertificateRecord) => void
   onToggleAutoRenew: (certificate: CertificateRecord, enabled: boolean) => void
@@ -323,17 +325,21 @@ interface PageProps {
   onEditDNS: (account: DNSAccount) => void
   onAddACME: () => void
   onEditACME: (account: ACMEAccount) => void
+  onPollSeconds: (seconds: number) => void
   onPassword: () => void
   onLogout: () => void
+  updateJob?: JobRecord
+  updatingNode?: NodeRecord
 }
 
 function renderPage(page: PageKey, props: PageProps) {
   switch (page) {
-    case 'overview': return <Overview data={props.data} onNavigate={props.onPage} onAddDomain={props.onAddDomain} />
+    case 'overview': return <Overview data={props.data} onNavigate={props.onPage} />
     case 'domains': return <DomainsPage domains={props.data.domains} nodes={props.data.nodes} onAdd={props.onAddDomain} onEdit={props.onEditDomain} onDelete={props.onDeleteDomain} />
     case 'certificates': return <CertificatesPage certificates={props.data.certificates} nodes={props.data.nodes} onAdd={props.onAddCertificate} onRenew={props.onRenew} onToggleAutoRenew={props.onToggleAutoRenew} onSync={props.onSync} onEdit={props.onEditCertificate} busy={props.busy} />
-    case 'nodes': return <NodesPage nodes={props.data.nodes} onAdd={props.onAddNode} onRevoke={props.onRevokeNode} onManage={props.onManageNode} />
+    case 'nodes': return <NodesPage nodes={props.data.nodes} onManage={props.onManageNode} />
     case 'audit': return <AuditPage events={props.data.audit} domains={props.data.domains} nodes={props.data.nodes} />
-    case 'settings': return <SettingsPage dnsAccounts={props.dnsAccounts} acmeAccounts={props.acmeAccounts} onAddDNS={props.onAddDNS} onAddACME={props.onAddACME} onEditDNS={props.onEditDNS} onEditACME={props.onEditACME} onPassword={props.onPassword} onLogout={props.onLogout} />
+    case 'settings': return <SettingsPage dnsAccounts={props.dnsAccounts} acmeAccounts={props.acmeAccounts} settings={props.data.settings} busy={props.busy === 'settings-poll'} onAddDNS={props.onAddDNS} onAddACME={props.onAddACME} onEditDNS={props.onEditDNS} onEditACME={props.onEditACME} onPollSeconds={props.onPollSeconds} onPassword={props.onPassword} onLogout={props.onLogout} />
+    case 'update': return <ControllerUpdatePage job={props.updateJob} node={props.updatingNode} />
   }
 }

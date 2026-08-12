@@ -44,6 +44,7 @@ export interface NodeRecord {
   nginx_sites?: NginxSiteMeta[]
   last_error?: string
   running_job_id?: string
+  status_history?: Array<{ status: NodeStatus; observed_at: string }>
 }
 
 export interface DomainRecord {
@@ -137,7 +138,17 @@ export interface DashboardData {
   certificates: CertificateRecord[]
   audit: AuditEvent[]
   jobs: JobRecord[]
+  settings: ControllerSettings
   server_time: string
+}
+
+export interface ControllerSettings {
+  node_poll_seconds: number
+}
+
+export interface ManagementCommands {
+  uninstall_node: string
+  uninstall_controller: string
 }
 
 export interface DNSAccount {

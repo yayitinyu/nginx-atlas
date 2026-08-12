@@ -1,12 +1,10 @@
-import { useMemo, useState } from 'react'
-import type { ACMEAccount, AuditEvent, CertificateRecord, DNSAccount, DomainRecord, NginxSiteMeta, NodeRecord } from '../types'
+import { useEffect, useMemo, useState } from 'react'
+import type { ACMEAccount, AuditEvent, CertificateRecord, ControllerSettings, DNSAccount, DomainRecord, JobRecord, NodeRecord } from '../types'
 import { usePreferences } from '../preferences'
 import { Icon } from '../components/Icon'
 import { ActionButton, Bezel, EmptyState, IconButton, SectionHeading, StatusDot, StatusIcon } from '../components/Primitives'
 import { SelectField } from '../components/SelectField'
 import { DomainTable, relativeTime } from './Overview'
-
-interface DiscoveredSite { node: NodeRecord; site: NginxSiteMeta }
 
 export function DomainsPage({ domains, nodes, onAdd, onEdit, onDelete }: {
   domains: DomainRecord[]
@@ -83,12 +81,12 @@ export function CertificatesPage({ certificates, nodes, onAdd, onRenew, onToggle
   const [status, setStatus] = useState<'all' | 'valid' | 'risk'>('all')
   const normalized = query.trim().toLowerCase()
   const filtered = certificates.filter((certificate) =>
-    (!normalized || certificate.domain.includes(normalized) || certificate.issuer.toLowerCase().includes(normalized) || certificate.fingerprint_sha256.toLowerCase().includes(normalized))
+    (!normalized || certificate.domain.includes(normalized))
     && (status === 'all' || (status === 'valid' && certificate.status === 'valid') || (status === 'risk' && certificate.status !== 'valid')),
   )
   const expiring = certificates.filter((certificate) => certificate.status !== 'valid').length
   const autoRenew = certificates.filter((certificate) => certificate.auto_renew).length
-  const copies = certificates.reduce((total, certificate) => total + certificate.deployed_node_ids.length, 0)
+  const syncedNodes = new Set(certificates.flatMap((certificate) => certificate.deployed_node_ids)).size
 
   return (
     <div className="content-page page-enter">
@@ -101,7 +99,7 @@ export function CertificatesPage({ certificates, nodes, onAdd, onRenew, onToggle
         <SummaryMetric icon="shield" label={t('certificate.total')} value={certificates.length} />
         <SummaryMetric icon="warning" label={t('certificate.expiringCount')} value={expiring} warning={expiring > 0} />
         <SummaryMetric icon="refresh" label={t('certificate.autoRenewCount')} value={autoRenew} />
-        <SummaryMetric icon="server" label={t('certificate.nodeCopies')} value={copies} />
+        <SummaryMetric icon="server" label={t('certificate.syncedNodes')} value={syncedNodes} />
       </div>
       <Bezel className="operation-panel certificate-list-panel">
         <div className="panel-toolbar certificate-toolbar">
@@ -140,8 +138,6 @@ export function CertificatesPage({ certificates, nodes, onAdd, onRenew, onToggle
         ) : filtered.map((certificate) => {
           const automationReady = Boolean(
             certificate.issuer_node_id
-            && certificate.acme_account_id
-            && certificate.dns_account_id
             && nodes.some((node) => node.id === certificate.issuer_node_id && node.status !== 'revoked'),
           )
           const toggling = busy === `auto-renew-${certificate.id}`
@@ -206,24 +202,15 @@ function SummaryMetric({ icon, label, value, warning = false }: { icon: 'shield'
   )
 }
 
-export function NodesPage({ nodes, onAdd, onRevoke, onManage }: { nodes: NodeRecord[]; onAdd: () => void; onRevoke: (node: NodeRecord) => void; onManage: (node: NodeRecord) => void }) {
+export function NodesPage({ nodes, onManage }: { nodes: NodeRecord[]; onManage: (node: NodeRecord) => void }) {
   const { t, locale } = usePreferences()
   return (
     <div className="content-page page-enter">
-      <PageHeader
-        title={t('nodes.title')}
-        description={t('nodes.description')}
-        action={<ActionButton leadingIcon="plus" plain onClick={onAdd}>{t('nodes.add')}</ActionButton>}
-      />
+      <PageHeader title={t('nodes.title')} description={t('nodes.description')} />
       <div className="nodes-canvas">
         {nodes.length === 0 ? (
           <Bezel>
-            <EmptyState
-              icon="server"
-              title={t('nodes.empty')}
-              description={t('nodes.emptyDescription')}
-              action={<button type="button" className="inline-action" onClick={onAdd}><Icon name="plus" size={16} />{t('nodes.add')}</button>}
-            />
+            <EmptyState icon="server" title={t('nodes.empty')} description={t('nodes.emptyDescription')} />
           </Bezel>
         ) : nodes.map((node) => (
           <Bezel className="node-detail" key={node.id}>
@@ -247,17 +234,13 @@ export function NodesPage({ nodes, onAdd, onRevoke, onManage }: { nodes: NodeRec
               <span><small>{t('nodes.platform')}</small><strong>{node.os_name || [node.os, node.arch].filter(Boolean).join(' / ') || '—'}</strong></span>
               <span><small>{t('nodes.certDirectory')}</small><strong>{t('nodes.certFound', { count: node.certificates?.length ?? 0 })} · {t('nodes.siteFound', { count: node.nginx_sites?.length ?? 0 })}</strong></span>
             </div>
+            <NodeStatusProbe node={node} />
             <div className="node-detail-footer">
               <span><Icon name="clock" size={15} />{t('nodes.lastSeen', { time: node.last_seen_at ? relativeTime(node.last_seen_at, locale) : t('nodes.never') })}</span>
               <span className="node-card-actions">
                 <button type="button" className="chip-action" onClick={() => onManage(node)}>
                   <Icon name="settings" size={15} />{t('nodes.manage')}
                 </button>
-                {node.status !== 'revoked' && (
-                  <button type="button" className="chip-action danger-chip" onClick={() => onRevoke(node)}>
-                    <Icon name="trash" size={15} />{t('nodes.revoke')}
-                  </button>
-                )}
               </span>
             </div>
           </Bezel>
@@ -302,15 +285,42 @@ export function AuditPage({ events, domains, nodes }: { events: AuditEvent[]; do
   )
 }
 
+export function ControllerUpdatePage({ job, node }: { job?: JobRecord; node?: NodeRecord }) {
+  const { t } = usePreferences()
+  useEffect(() => {
+    if (job?.status !== 'succeeded') return
+    const timeout = window.setTimeout(() => window.location.reload(), 2600)
+    return () => window.clearTimeout(timeout)
+  }, [job?.status])
+  const status = job?.status ?? 'queued'
+  const runningStep = status === 'queued' ? 0 : status === 'running' ? 1 : status === 'succeeded' ? 2 : -1
+  return (
+    <div className="update-page page-enter">
+      <div className={`update-orbit update-${status}`}><span><Icon name={status === 'failed' ? 'warning' : status === 'succeeded' ? 'check' : 'refresh'} size={30} /></span></div>
+      <span className="page-kicker">{t('update.kicker')}</span>
+      <h1>{status === 'failed' ? t('update.failed') : status === 'succeeded' ? t('update.complete') : t('update.title')}</h1>
+      <p>{node?.name ?? t('nodes.controller')}</p>
+      <div className="update-progress" aria-label={t('update.title')}>
+        {[t('update.prepare'), t('update.install'), t('update.restart')].map((label, index) => <span className={index < runningStep || status === 'succeeded' ? 'complete' : index === runningStep ? 'active' : ''} key={label}><i>{index < runningStep || status === 'succeeded' ? <Icon name="check" size={15} /> : index + 1}</i><strong>{label}</strong></span>)}
+      </div>
+      {status === 'failed' && job?.error && <div className="update-error"><Icon name="warning" size={18} />{job.error}</div>}
+      {status === 'succeeded' && <span className="update-refreshing"><i className="loading-orbit" />{t('update.refreshing')}</span>}
+    </div>
+  )
+}
+
 export function SettingsPage({
-  dnsAccounts, acmeAccounts, onAddDNS, onAddACME, onEditDNS, onEditACME, onPassword, onLogout
+  dnsAccounts, acmeAccounts, settings, busy, onAddDNS, onAddACME, onEditDNS, onEditACME, onPollSeconds, onPassword, onLogout
 }: {
   dnsAccounts: DNSAccount[]
   acmeAccounts: ACMEAccount[]
+  settings: ControllerSettings
+  busy: boolean
   onAddDNS: () => void
   onAddACME: () => void
   onEditDNS: (account: DNSAccount) => void
   onEditACME: (account: ACMEAccount) => void
+  onPollSeconds: (seconds: number) => void
   onPassword: () => void
   onLogout: () => void
 }) {
@@ -318,79 +328,51 @@ export function SettingsPage({
   return (
     <div className="content-page page-enter">
       <PageHeader title={t('settings.title')} description={t('settings.description')} />
-      <div className="account-split">
-        <Bezel className="account-panel">
-          <SectionHeading title={t('accounts.dnsTitle')} action={<IconButton name="plus" label={t('accounts.addDNS')} onClick={onAddDNS} />} />
-          {dnsAccounts.length === 0 ? (
-            <EmptyState icon="dns" title={t('accounts.emptyDNS')} description={t('accounts.emptyDNSDescription')} action={<button type="button" className="inline-action" onClick={onAddDNS}><Icon name="plus" size={16} />{t('accounts.addDNS')}</button>} />
-          ) : (
-            <div className="account-list">
-              {dnsAccounts.map((account) => (
-                <button type="button" className="account-row" key={account.id} onClick={() => onEditDNS(account)}>
-                  <span className="account-icon"><Icon name="dns" size={20} /></span>
-                  <span><strong>{account.name}</strong><small>{account.provider}</small></span>
-                  <span className="credential-keys">{t('accounts.credentials', { count: account.credential_keys.length })}</span>
-                  <Icon name="chevron" size={16} />
-                </button>
-              ))}
-            </div>
-          )}
+      <div className="settings-grid-refined">
+        <Bezel className="settings-card settings-credentials-card">
+          <SectionHeading title={t('settings.certificateAccounts')} />
+          <div className="settings-compact-list">
+            <button type="button" onClick={() => dnsAccounts[0] ? onEditDNS(dnsAccounts[0]) : onAddDNS()}><span className="settings-icon"><Icon name="dns" size={20} /></span><span><strong>{t('settings.cloudflareToken')}</strong><small>{dnsAccounts[0] ? t('settings.configured') : t('settings.notConfigured')}</small></span><Icon name="chevron" size={16} /></button>
+            <button type="button" onClick={() => acmeAccounts[0] ? onEditACME(acmeAccounts[0]) : onAddACME()}><span className="settings-icon"><Icon name="key" size={20} /></span><span><strong>{t('settings.acmeEmail')}</strong><small>{acmeAccounts[0]?.email || t('settings.notConfigured')}</small></span><Icon name="chevron" size={16} /></button>
+          </div>
         </Bezel>
-        <Bezel className="account-panel">
-          <SectionHeading title={t('accounts.acmeTitle')} action={<IconButton name="plus" label={t('accounts.addACME')} onClick={onAddACME} />} />
-          {acmeAccounts.length === 0 ? (
-            <EmptyState icon="key" title={t('accounts.emptyACME')} description={t('accounts.emptyACMEDescription')} action={<button type="button" className="inline-action" onClick={onAddACME}><Icon name="plus" size={16} />{t('accounts.addACME')}</button>} />
-          ) : (
-            <div className="account-list">
-              {acmeAccounts.map((account) => (
-                <button type="button" className="account-row" key={account.id} onClick={() => onEditACME(account)}>
-                  <span className="account-icon"><Icon name="key" size={20} /></span>
-                  <span><strong>{account.name}</strong><small>{account.email}</small></span>
-                  <span className="credential-keys">{account.has_eab ? t('accounts.eab') : t('accounts.standard')}</span>
-                  <Icon name="chevron" size={16} />
-                </button>
-              ))}
-            </div>
-          )}
+        <Bezel className="settings-card settings-runtime-card">
+          <SectionHeading title={t('settings.nodeStatus')} />
+          <label className="poll-frequency-row"><span><Icon name="clock" size={20} /><strong>{t('settings.nodePollFrequency')}</strong></span><SelectField ariaLabel={t('settings.nodePollFrequency')} value={String(settings.node_poll_seconds)} disabled={busy} onChange={(value) => onPollSeconds(Number(value))} options={[10, 30, 60, 120, 300].map((seconds) => ({ value: String(seconds), label: t('settings.seconds', { count: seconds }) }))} /></label>
         </Bezel>
       </div>
       <div className="settings-list">
-        <SettingRow icon="shield" title={t('settings.security')} description={t('settings.securityDescription')} value={t('accounts.encrypted')} />
-        <SettingRow icon="server" title={t('settings.transport')} description={t('settings.transportDescription')} value="HTTPS" />
-        <SettingRow icon="terminal" title={t('settings.transaction')} description={t('settings.transactionDescription')} value={t('settings.atomic')} />
         <button type="button" className="settings-action-row" onClick={onPassword}>
           <span className="settings-icon"><Icon name="lock" size={20} /></span>
           <span><strong>{t('settings.password')}</strong>{t('settings.passwordDescription') && <small>{t('settings.passwordDescription')}</small>}</span>
           <span className="settings-value">{t('settings.changePassword')} <Icon name="chevron" size={15} /></span>
         </button>
       </div>
-      <button type="button" className="logout-row" onClick={onLogout}><Icon name="logout" size={18} />{t('settings.logout')}</button>
+      <button type="button" className="logout-row compact-logout-row" onClick={onLogout}><Icon name="logout" size={18} />{t('app.logout')}</button>
     </div>
   )
 }
 
-function SettingRow({ icon, title, description, value }: { icon: 'shield' | 'server' | 'terminal'; title: string; description: string; value: string }) {
-  return (
-    <Bezel className="settings-row">
-      <span className="settings-icon"><Icon name={icon} size={20} /></span>
-      <span><strong>{title}</strong>{description && <small>{description}</small>}</span>
-      <span className="settings-value">{value}</span>
-    </Bezel>
-  )
-}
-
-function PageHeader({ title, description, action }: { title: string; description: string; action?: React.ReactNode }) {
+function PageHeader({ title, description, action }: { title: string; description?: string; action?: React.ReactNode }) {
   const { t } = usePreferences()
   return (
     <header className="page-header">
       <div>
         <span className="page-kicker">{t('page.kickerControl')}</span>
         <h1>{title}</h1>
-        <p>{description}</p>
+        {description && <p>{description}</p>}
       </div>
       {action && <div className="page-header-action">{action}</div>}
     </header>
   )
+}
+
+function NodeStatusProbe({ node }: { node: NodeRecord }) {
+  const { t } = usePreferences()
+  const recorded = node.status_history?.slice(-12) ?? []
+  const samples = recorded.length > 0 ? recorded : [{ status: node.status, observed_at: node.last_seen_at ?? node.created_at }]
+  const fillers = Array.from({ length: Math.max(0, 12 - samples.length) })
+  return <div className="node-status-probe" aria-label={t(`common.${node.status}`)}><span className="probe-label"><StatusDot tone={node.status === 'online' ? 'good' : node.status === 'offline' ? 'danger' : 'warning'} />{t(`common.${node.status}`)}</span><span className="probe-bars">{fillers.map((_, index) => <i className="probe-empty" key={`empty-${index}`} />)}{samples.map((sample, index) => <i className={`probe-${sample.status}`} key={`${sample.observed_at}-${index}`} title={sample.observed_at} />)}</span></div>
 }
 
 function certificateSource(source: string, t: (key: string, variables?: Record<string, string | number>) => string): string {
