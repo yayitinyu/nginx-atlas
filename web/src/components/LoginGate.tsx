@@ -1,19 +1,39 @@
-import { useEffect, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useState, type FormEvent } from 'react'
 import { usePreferences, type LanguageMode, type ThemeMode } from '../preferences'
 import { Icon } from './Icon'
 import { ActionButton, Logo } from './Primitives'
 import { SelectField } from './SelectField'
+import { api } from '../api'
+import type { LoginConfig } from '../types'
+import { TurnstileWidget } from './TurnstileWidget'
 
-export function LoginGate({ onLogin }: { onLogin: (password: string) => Promise<void> }) {
+const defaultLoginConfig: LoginConfig = { turnstile_enabled: false, turnstile_site_key: '' }
+
+export function LoginGate({ onLogin }: { onLogin: (password: string, turnstileToken: string) => Promise<void> }) {
   const { t, effectiveTheme, effectiveLanguage, setTheme, setLanguage } = usePreferences()
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+  const [config, setConfig] = useState<LoginConfig>(defaultLoginConfig)
+  const [configLoading, setConfigLoading] = useState(true)
+  const [configFailed, setConfigFailed] = useState(false)
+  const [turnstileToken, setTurnstileToken] = useState('')
+  const [challengeAttempt, setChallengeAttempt] = useState(0)
+  const handleChallengeError = useCallback(() => setError(t('login.challengeUnavailable')), [t])
 
   useEffect(() => {
     document.body.classList.add('login-active')
     return () => document.body.classList.remove('login-active')
   }, [])
+
+  useEffect(() => {
+    let active = true
+    void api.loginConfig()
+      .then((value) => { if (active) { setConfig(value); setConfigFailed(false) } })
+      .catch(() => { if (active) { setConfig(defaultLoginConfig); setConfigFailed(true); setError(t('login.configUnavailable')) } })
+      .finally(() => { if (active) setConfigLoading(false) })
+    return () => { active = false }
+  }, [t])
 
   async function submit(event: FormEvent) {
     event.preventDefault()
@@ -24,9 +44,11 @@ export function LoginGate({ onLogin }: { onLogin: (password: string) => Promise<
     setBusy(true)
     setError('')
     try {
-      await onLogin(password)
+      await onLogin(password, turnstileToken)
     } catch {
       setError(t('login.invalid'))
+      setTurnstileToken('')
+      setChallengeAttempt((value) => value + 1)
     } finally {
       setBusy(false)
     }
@@ -57,8 +79,9 @@ export function LoginGate({ onLogin }: { onLogin: (password: string) => Promise<
             autoFocus
           />
         </div>
+        {config.turnstile_enabled && config.turnstile_site_key && <TurnstileWidget key={challengeAttempt} siteKey={config.turnstile_site_key} theme={effectiveTheme} onToken={setTurnstileToken} onError={handleChallengeError} />}
         {error && <span className="form-error" role="alert">{error}</span>}
-        <ActionButton wide plain disabled={busy}>{busy ? t('login.submitting') : t('login.submit')}</ActionButton>
+        <ActionButton wide plain disabled={busy || configLoading || configFailed || (config.turnstile_enabled && !turnstileToken)}>{busy ? t('login.submitting') : t('login.submit')}</ActionButton>
       </form>
     </main>
   )

@@ -4,13 +4,14 @@ import { Icon, type IconName } from './Icon'
 import { Logo } from './Primitives'
 import { SelectField } from './SelectField'
 
-export type PageKey = 'overview' | 'domains' | 'certificates' | 'nodes' | 'accounts' | 'audit' | 'settings' | 'update'
+export type PageKey = 'overview' | 'domains' | 'certificates' | 'nodes' | 'accounts' | 'pending' | 'audit' | 'settings' | 'update'
 
 const items: Array<{ key: PageKey; labelKey: string; mobileLabelKey?: string; icon: IconName }> = [
   { key: 'overview', labelKey: 'nav.overview', icon: 'overview', mobileLabelKey: 'nav.overview' },
   { key: 'domains', labelKey: 'nav.domains', icon: 'globe', mobileLabelKey: 'nav.domainsShort' },
   { key: 'certificates', labelKey: 'nav.certificates', icon: 'shield', mobileLabelKey: 'nav.certificates' },
   { key: 'nodes', labelKey: 'nav.nodes', icon: 'server', mobileLabelKey: 'nav.nodes' },
+  { key: 'pending', labelKey: 'nav.pending', icon: 'warning' },
   { key: 'audit', labelKey: 'nav.audit', icon: 'log' },
   { key: 'settings', labelKey: 'nav.settings', icon: 'settings', mobileLabelKey: 'nav.settings' },
 ]
@@ -81,6 +82,9 @@ export function MobileMenu({ open, page, onChange, onClose, onLogout }: {
         <div className="mobile-menu-body">
           <SelectField ariaLabel={t('app.language')} value={effectiveLanguage} onChange={(value) => setLanguage(value as LanguageMode)} icon="language" className="mobile-preference-select" options={[{ value: 'zh', label: t('common.chinese') }, { value: 'en', label: t('common.english') }]} />
           <SelectField ariaLabel={t('app.theme')} value={effectiveTheme} onChange={(value) => setTheme(value as ThemeMode)} icon={effectiveTheme === 'light' ? 'sun' : 'moon'} className="mobile-preference-select" options={[{ value: 'light', label: t('common.light') }, { value: 'dark', label: t('common.dark') }]} />
+          <button className={page === 'pending' ? 'compact-menu-item compact-menu-active' : 'compact-menu-item'} onClick={() => { onChange('pending'); onClose() }}>
+            <Icon name="warning" size={17} /><span>{t('nav.pending')}</span>
+          </button>
           <button className="compact-menu-item" onClick={() => { onChange('audit'); onClose() }}>
             <Icon name="log" size={18} /><span>{t('nav.audit')}</span>
           </button>

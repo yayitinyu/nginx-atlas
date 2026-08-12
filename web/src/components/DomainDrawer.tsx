@@ -23,6 +23,7 @@ interface Props {
 }
 
 type CertificateChoice = 'existing' | 'acme'
+const currentNodeCertificate = '__current_node_certificate__'
 
 export function DomainDrawer({ open, nodes, certificates, dnsAccounts, acmeAccounts, busy, editingDomain, onClose, onSubmit, onUpdate }: Props) {
   const { t } = usePreferences()
@@ -53,8 +54,8 @@ export function DomainDrawer({ open, nodes, certificates, dnsAccounts, acmeAccou
       setNodeID(editingDomain.node_id)
       setUpstreamHost(editingDomain.upstream_host || '127.0.0.1')
       setPort(editingDomain.upstream_port ? String(editingDomain.upstream_port) : '')
-      setChoice(editingDomain.acme_account_id ? 'acme' : 'existing')
-      setCertificateID(editingDomain.certificate_id ?? '')
+      setChoice(editingDomain.certificate_mode === 'acme' ? 'acme' : 'existing')
+      setCertificateID(editingDomain.certificate_mode === 'local' ? currentNodeCertificate : (editingDomain.certificate_id ?? ''))
       setDNSAccountID(editingDomain.dns_account_id ?? (dnsAccounts[0]?.id ?? ''))
       setACMEAccountID(editingDomain.acme_account_id ?? (acmeAccounts[0]?.id ?? ''))
       setAutoRenew(editingDomain.auto_renew ?? true)
@@ -110,15 +111,33 @@ export function DomainDrawer({ open, nodes, certificates, dnsAccounts, acmeAccou
     normalizedDomain && (certificate.domain === normalizedDomain || certificate.dns_names.some((name) => coversDomain(name, normalizedDomain))),
   ), [certificates, normalizedDomain])
   const selectedNode = availableNodes.find((node) => node.id === nodeID)
+  const keepsCurrentNodeCertificate = Boolean(
+    editingDomain?.certificate_mode === 'local'
+    && editingDomain.node_id === nodeID
+    && certificateID === currentNodeCertificate,
+  )
+  const certificateOptions = [
+    ...(editingDomain?.certificate_mode === 'local' && editingDomain.node_id === nodeID ? [{
+      value: currentNodeCertificate,
+      label: t('domain.currentNodeCertificate'),
+      description: editingDomain.name,
+    }] : []),
+    ...eligibleCertificates.map((certificate) => ({
+      value: certificate.id,
+      label: certificate.domain,
+      description: t('domain.controllerCertificate', { domain: certificate.domain, days: certificate.days_remaining }),
+    })),
+  ]
 
   useEffect(() => {
     if (choice !== 'existing') return
-    if (certificateID && !eligibleCertificates.some((certificate) => certificate.id === certificateID)) {
-      // keep current if editing or default to first
+    const currentLocal = certificateID === currentNodeCertificate && editingDomain?.certificate_mode === 'local' && editingDomain.node_id === nodeID
+    if (certificateID && !currentLocal && !eligibleCertificates.some((certificate) => certificate.id === certificateID)) {
+      setCertificateID(eligibleCertificates[0]?.id ?? '')
     } else if (!certificateID && eligibleCertificates.length > 0) {
       setCertificateID(eligibleCertificates[0]?.id ?? '')
     }
-  }, [choice, certificateID, eligibleCertificates])
+  }, [choice, certificateID, eligibleCertificates, editingDomain, nodeID])
 
   function selectNode(value: string) {
     setNodeID(value)
@@ -151,8 +170,8 @@ export function DomainDrawer({ open, nodes, certificates, dnsAccounts, acmeAccou
       node_id: nodeID,
       upstream_host: upstreamHost.trim().toLowerCase(),
       upstream_port: parsedPort,
-      certificate_mode: choice === 'acme' ? 'acme' : 'upload',
-      certificate_id: choice === 'existing' ? certificateID : undefined,
+      certificate_mode: choice === 'acme' ? 'acme' : keepsCurrentNodeCertificate ? 'local' : 'upload',
+      certificate_id: choice === 'existing' && !keepsCurrentNodeCertificate ? certificateID : undefined,
       acme_account_id: choice === 'acme' ? acmeAccountID : undefined,
       dns_account_id: choice === 'acme' ? dnsAccountID : undefined,
       auto_renew: choice === 'acme' && autoRenew,
@@ -197,7 +216,7 @@ export function DomainDrawer({ open, nodes, certificates, dnsAccounts, acmeAccou
                 <Icon name="certificate" size={17} /><span>{t('domain.letsencryptShort')}</span>
               </button>
             </div>
-            {choice === 'existing' ? <label className="source-select"><span>{t('domain.certificateLocation')}</span><SelectField ariaLabel={t('domain.certificateLocation')} value={certificateID} onChange={setCertificateID} placeholder={eligibleCertificates.length ? t('common.select') : t('domain.noMatchingCertificate')} icon="shield" options={eligibleCertificates.map((certificate) => ({ value: certificate.id, label: certificate.domain, description: t('domain.controllerCertificate', { domain: certificate.domain, days: certificate.days_remaining }) }))} /></label> : <div className="acme-compact-panel"><label className="switch-row"><button type="button" role="switch" aria-checked={autoRenew} className={autoRenew ? 'switch-on' : ''} onClick={() => setAutoRenew((value) => !value)}><i /></button><span><strong>{t('certificate.renewToggle')}</strong><small>{t('certificate.renewHint', { days: 30 })}</small></span></label></div>}
+            {choice === 'existing' ? <label className="source-select"><span>{t('domain.certificateLocation')}</span>{certificateOptions.length ? <SelectField ariaLabel={t('domain.certificateLocation')} value={certificateID} onChange={setCertificateID} placeholder={t('common.select')} icon="shield" options={certificateOptions} /> : <span className="certificate-empty-choice" role="status"><Icon name="shield" size={18} />{t('domain.noMatchingCertificate')}</span>}</label> : <div className="acme-compact-panel"><label className="switch-row"><button type="button" role="switch" aria-checked={autoRenew} className={autoRenew ? 'switch-on' : ''} onClick={() => setAutoRenew((value) => !value)}><i /></button><span><strong>{t('certificate.renewToggle')}</strong><small>{t('certificate.renewHint', { days: 30 })}</small></span></label></div>}
           </section>
 
           <section className="form-section cloudflare-section">

@@ -7,7 +7,7 @@ import { Bezel, EmptyState, SectionHeading, StatusDot, StatusIcon } from '../com
 
 interface Props {
   data: DashboardData
-  onNavigate: (page: 'domains' | 'certificates' | 'nodes' | 'audit') => void
+  onNavigate: (page: 'domains' | 'certificates' | 'nodes' | 'pending' | 'audit') => void
 }
 
 export function Overview({ data, onNavigate }: Props) {
@@ -47,7 +47,7 @@ export function Overview({ data, onNavigate }: Props) {
         <StatCard icon="server" label={t('overview.nodesOnline')} value={`${onlineNodes}/${data.nodes.length}`} tone={onlineNodes === data.nodes.length && data.nodes.length > 0 ? 'good' : 'warning'} onClick={() => onNavigate('nodes')} />
         <StatCard icon="globe" label={t('overview.activeRoutes')} value={activeDomains} tone="info" onClick={() => onNavigate('domains')} />
         <StatCard icon="shield" label={t('common.valid')} value={`${healthyCertificates}/${data.certificates.length}`} tone={healthyCertificates === data.certificates.length ? 'good' : 'warning'} onClick={() => onNavigate('certificates')} />
-        <StatCard icon="log" label={t('overview.activity')} value={data.audit.length} tone="muted" onClick={() => onNavigate('audit')} />
+        <StatCard icon="warning" label={t('overview.pending')} value={data.pending_job_count} tone={data.pending_job_count > 0 ? 'warning' : 'muted'} onClick={() => onNavigate('pending')} />
       </section>
 
       <div className="overview-focus-grid">
@@ -82,7 +82,7 @@ export function Overview({ data, onNavigate }: Props) {
   )
 }
 
-function StatCard({ icon, label, value, tone, onClick }: { icon: 'server' | 'globe' | 'shield' | 'log'; label: string; value: string | number; tone: 'good' | 'warning' | 'info' | 'muted'; onClick: () => void }) {
+function StatCard({ icon, label, value, tone, onClick }: { icon: 'server' | 'globe' | 'shield' | 'warning'; label: string; value: string | number; tone: 'good' | 'warning' | 'info' | 'muted'; onClick: () => void }) {
   return <button type="button" className={`overview-stat stat-${tone}`} onClick={onClick}><span><Icon name={icon} size={20} /></span><strong>{value}</strong><small>{label}</small></button>
 }
 

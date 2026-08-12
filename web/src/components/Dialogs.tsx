@@ -1,5 +1,5 @@
 import { useEffect, useId, useMemo, useState, type FormEvent, type ReactNode } from 'react'
-import type { ACMEAccount, CertificateAutomationInput, CertificateRecord, DNSAccount, NodeRecord, ReleaseInfo } from '../types'
+import type { ACMEAccount, CertificateAutomationInput, CertificateRecord, ControllerSettings, ControllerSettingsInput, DNSAccount, NodeRecord, ReleaseInfo } from '../types'
 import { usePreferences } from '../preferences'
 import { Icon } from './Icon'
 import { ActionButton, IconButton, StatusDot } from './Primitives'
@@ -119,6 +119,68 @@ export function ACMEAccountDialog({ open, account, busy, onClose, onSave }: {
       <form className="dialog-form" onSubmit={(event) => { event.preventDefault(); void onSave({ name: account?.name ?? "Let's Encrypt", email: email.trim(), directory_url: account?.directory_url ?? 'https://acme-v02.api.letsencrypt.org/directory', eab_kid: '', eab_hmac: '', keep_eab: Boolean(account?.has_eab) }, account?.id) }}>
         <label><span>{t('dialog.email')}</span><div className="field-control"><input type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="admin@example.com" /></div></label>
         <ActionButton wide plain disabled={busy || !email.includes('@')}>{busy ? t('common.saving') : t('common.save')}</ActionButton>
+      </form>
+    </DialogShell>
+  )
+}
+
+export function AccessSettingsDialog({ open, settings, busy, onClose, onSave }: {
+  open: boolean
+  settings: ControllerSettings
+  busy: boolean
+  onClose: () => void
+  onSave: (input: ControllerSettingsInput) => Promise<void>
+}) {
+  const { t } = usePreferences()
+  const [turnstileEnabled, setTurnstileEnabled] = useState(false)
+  const [siteKey, setSiteKey] = useState('')
+  const [secret, setSecret] = useState('')
+  const [allowlist, setAllowlist] = useState('')
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    if (!open) return
+    setTurnstileEnabled(settings.turnstile_enabled)
+    setSiteKey(settings.turnstile_site_key)
+    setSecret('')
+    setAllowlist(settings.panel_allowed_cidrs.join('\n'))
+    setError('')
+  // Background polling must not replace credentials or rules while this form is open.
+  }, [open])
+
+  function submit(event: FormEvent) {
+    event.preventDefault()
+    if (turnstileEnabled && (!siteKey.trim() || (!settings.turnstile_secret_configured && !secret.trim()))) {
+      setError(t('settings.turnstileCredentialsRequired'))
+      return
+    }
+    const panelAllowedCIDRs = allowlist.split(/[\n,]+/).map((value) => value.trim()).filter(Boolean)
+    void onSave({
+      turnstile_enabled: turnstileEnabled,
+      turnstile_site_key: siteKey.trim(),
+      turnstile_secret: secret.trim(),
+      panel_allowed_cidrs: panelAllowedCIDRs,
+    })
+  }
+
+  return (
+    <DialogShell open={open} title={t('settings.accessProtection')} description="" onClose={onClose} wide>
+      <form className="dialog-form access-settings-form" onSubmit={submit}>
+        <label className="switch-row access-turnstile-row">
+          <button type="button" role="switch" aria-checked={turnstileEnabled} className={turnstileEnabled ? 'switch-on' : ''} onClick={() => setTurnstileEnabled((value) => !value)}><i /></button>
+          <span><strong>Cloudflare Turnstile</strong></span>
+        </label>
+        {turnstileEnabled && <div className="access-key-grid">
+          <label><span>Site Key</span><div className="field-control"><Icon name="key" size={17} /><input value={siteKey} onChange={(event) => setSiteKey(event.target.value)} autoComplete="off" /></div></label>
+          <label><span>Secret Key</span><div className="field-control"><Icon name="lock" size={17} /><input type="password" value={secret} onChange={(event) => setSecret(event.target.value)} placeholder={settings.turnstile_secret_configured ? t('settings.keepSecret') : ''} autoComplete="new-password" /></div></label>
+        </div>}
+        <label className="allowlist-field">
+          <span>{t('settings.ipAllowlist')}</span>
+          <textarea value={allowlist} onChange={(event) => setAllowlist(event.target.value)} placeholder="203.0.113.8&#10;2001:db8::/48" />
+          {settings.request_ip && <small>{t('settings.currentIP', { ip: settings.request_ip })}</small>}
+        </label>
+        {error && <div className="form-error" role="alert"><Icon name="warning" size={16} />{error}</div>}
+        <ActionButton wide plain disabled={busy}>{busy ? t('common.saving') : t('common.save')}</ActionButton>
       </form>
     </DialogShell>
   )

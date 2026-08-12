@@ -11,6 +11,8 @@ import type {
   ManagementCommands,
   NodeRecord,
   ControllerSettings,
+  ControllerSettingsInput,
+  LoginConfig,
   ReleaseInfo,
   UninstallCommand,
 } from './types'
@@ -65,8 +67,9 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 }
 
 export const api = {
-  login: (password: string) => request<{ authenticated: boolean; token: string; expires_at: string }>('/api/v1/session', {
-    method: 'POST', body: JSON.stringify({ password }),
+  loginConfig: () => request<LoginConfig>('/api/v1/login-config'),
+  login: (password: string, turnstileToken = '') => request<{ authenticated: boolean; token: string; expires_at: string }>('/api/v1/session', {
+    method: 'POST', body: JSON.stringify({ password, turnstile_token: turnstileToken }),
   }),
   verifySession: () => request<{ authenticated: boolean }>('/api/v1/session'),
   dashboard: () => request<DashboardData>('/api/v1/dashboard'),
@@ -133,6 +136,9 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ node_ids: nodeIds }),
     }),
+  retryJob: (id: string) => request<JobRecord>(`/api/v1/jobs/${encodeURIComponent(id)}/retry`, {
+    method: 'POST', body: '{}',
+  }),
   createDNSAccount: (input: { name: string; provider: string; credentials: Record<string, string>; keep_credentials?: boolean }) =>
     request<DNSAccount>('/api/v1/dns-accounts', { method: 'POST', body: JSON.stringify(input) }),
   updateDNSAccount: (id: string, input: { name: string; provider: string; credentials: Record<string, string>; keep_credentials: boolean }) =>
@@ -146,7 +152,7 @@ export const api = {
       method: 'PUT', body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
     }),
   settings: () => request<ControllerSettings>('/api/v1/settings'),
-  updateSettings: (settings: ControllerSettings) => request<ControllerSettings>('/api/v1/settings', {
+  updateSettings: (settings: ControllerSettingsInput) => request<ControllerSettings>('/api/v1/settings', {
     method: 'PUT', body: JSON.stringify(settings),
   }),
   managementCommands: () => request<ManagementCommands>('/api/v1/management-commands'),

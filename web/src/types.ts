@@ -130,6 +130,8 @@ export interface JobRecord {
   created_at: string
   started_at?: string
   finished_at?: string
+  retry_of_id?: string
+  retry_job_id?: string
 }
 
 export interface DashboardData {
@@ -138,12 +140,31 @@ export interface DashboardData {
   certificates: CertificateRecord[]
   audit: AuditEvent[]
   jobs: JobRecord[]
+  pending_job_count: number
   settings: ControllerSettings
   server_time: string
 }
 
 export interface ControllerSettings {
   node_poll_seconds: number
+  turnstile_enabled: boolean
+  turnstile_site_key: string
+  turnstile_secret_configured: boolean
+  panel_allowed_cidrs: string[]
+  request_ip?: string
+}
+
+export interface ControllerSettingsInput {
+  node_poll_seconds?: number
+  turnstile_enabled?: boolean
+  turnstile_site_key?: string
+  turnstile_secret?: string
+  panel_allowed_cidrs?: string[]
+}
+
+export interface LoginConfig {
+  turnstile_enabled: boolean
+  turnstile_site_key: string
 }
 
 export interface ManagementCommands {

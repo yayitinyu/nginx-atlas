@@ -20,7 +20,9 @@ interface Props {
 }
 
 export function SelectField({ value, options, onChange, placeholder, ariaLabel, icon, disabled, className = '' }: Props) {
-  const utility = className.split(/\s+/).includes('utility-select')
+  const classes = className.split(/\s+/)
+  const utility = classes.includes('utility-select')
+  const preference = classes.includes('login-preference-select') || classes.includes('mobile-preference-select')
   const selected = options.find((option) => option.value === value)
   return (
     <Select.Root value={value} onValueChange={onChange} disabled={disabled}>
@@ -30,7 +32,7 @@ export function SelectField({ value, options, onChange, placeholder, ariaLabel, 
         <Select.Icon className="custom-select-caret"><Icon name="chevron" size={15} /></Select.Icon>
       </Select.Trigger>
       <Select.Portal>
-        <Select.Content className={`custom-select-content ${utility ? 'utility-select-content' : ''}`} position="popper" align={utility ? 'end' : 'start'} sideOffset={8} collisionPadding={14} sticky="always">
+        <Select.Content className={`custom-select-content ${utility ? 'utility-select-content' : preference ? 'preference-select-content' : ''}`} position="popper" align={utility || preference ? 'end' : 'start'} sideOffset={8} collisionPadding={14} sticky="always">
           <Select.ScrollUpButton className="custom-select-scroll-button"><Icon name="chevron" size={14} /></Select.ScrollUpButton>
           <Select.Viewport className="custom-select-viewport">
             {options.map((option) => (

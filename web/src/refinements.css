@@ -1,0 +1,105 @@
+/* Deliberately loaded after the legacy stylesheet so compact controls stay compact. */
+.utility-select {
+  width: 34px !important;
+  min-height: 34px !important;
+}
+
+.utility-select svg,
+.login-preference-select svg,
+.mobile-preference-select svg {
+  width: 15px;
+  height: 15px;
+}
+
+.utility-select-content {
+  width: 128px;
+  min-width: 128px;
+}
+
+.preference-select-content {
+  width: 112px;
+  min-width: 112px;
+}
+
+.utility-select-content .custom-select-item,
+.preference-select-content .custom-select-item {
+  min-height: 36px;
+  grid-template-columns: minmax(0, 1fr) 16px;
+  gap: 6px;
+  padding: 7px 8px 7px 10px;
+}
+
+.utility-select-content .custom-select-copy strong,
+.preference-select-content .custom-select-copy strong {
+  font-size: 12px;
+}
+
+.login-preference-select {
+  width: 90px;
+  min-width: 90px;
+  min-height: 32px;
+  padding-inline: 9px;
+  border-radius: 9px;
+  font-size: 10.5px;
+}
+
+@media (max-width: 900px) {
+  .mobile-menu-compact {
+    width: 188px;
+    padding: 8px;
+    border-radius: 13px;
+  }
+
+  .mobile-menu-body {
+    gap: 5px;
+  }
+
+  .mobile-preference-select {
+    min-height: 34px;
+    padding-inline: 7px;
+    border-radius: 8px;
+    font-size: 10.5px;
+  }
+
+  .compact-menu-item {
+    min-height: 36px;
+    gap: 8px;
+    padding-inline: 9px;
+    border-radius: 8px;
+    font-size: 12px;
+  }
+
+  .compact-menu-active {
+    color: var(--accent-text);
+    background: var(--accent-soft);
+  }
+
+  .login-preferences-top {
+    gap: 5px;
+  }
+
+  .login-preference-select {
+    width: 82px;
+    min-width: 82px;
+    min-height: 31px;
+    padding-inline: 8px;
+    font-size: 10px;
+  }
+
+  .certificate-actions button {
+    min-height: 40px;
+    font-size: 12px;
+  }
+}
+
+@media (max-width: 360px) {
+  .login-preference-select {
+    width: 76px;
+    min-width: 76px;
+  }
+
+  .preference-select-content {
+    width: 104px;
+    min-width: 104px;
+  }
+}

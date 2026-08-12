@@ -90,7 +90,7 @@ type acmeAccountView struct {
 	UpdatedAt    time.Time `json:"updated_at"`
 }
 
-func (s *Server) handleDashboard(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	state := s.store.Snapshot()
 	nodes := safeNodes(state)
 	domains := domainViews(state)
@@ -100,17 +100,23 @@ func (s *Server) handleDashboard(w http.ResponseWriter, _ *http.Request) {
 		audit = audit[:12]
 	}
 	jobs := make([]model.Job, 0, len(state.Jobs))
+	pendingJobCount := 0
 	for _, job := range state.Jobs {
+		if jobNeedsAttention(state, job) {
+			pendingJobCount++
+		}
 		job.Payload = nil
 		jobs = append(jobs, job)
 	}
 	sort.Slice(jobs, func(i, j int) bool { return jobs[i].CreatedAt.After(jobs[j].CreatedAt) })
-	if len(jobs) > 12 {
-		jobs = jobs[:12]
+	if len(jobs) > 100 {
+		jobs = jobs[:100]
 	}
+	settings := s.effectiveSettings(state)
+	settings.RequestIP = s.clientIP(r)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"nodes": nodes, "domains": domains, "certificates": certificates, "audit": audit, "jobs": jobs,
-		"settings": s.effectiveSettings(state), "server_time": time.Now().UTC(),
+		"settings": settings, "pending_job_count": pendingJobCount, "server_time": time.Now().UTC(),
 	})
 }
 
@@ -138,6 +144,89 @@ func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
 		audit = audit[:limit]
 	}
 	writeJSON(w, http.StatusOK, audit)
+}
+
+func (s *Server) handleRetryJob(w http.ResponseWriter, r *http.Request) {
+	jobID := r.PathValue("id")
+	retryID, err := id.New("job")
+	if err != nil {
+		wrapStoreError(w, err)
+		return
+	}
+	now := time.Now().UTC()
+	var retried model.Job
+	err = s.store.Update(func(state *model.State) error {
+		failed, ok := state.Jobs[jobID]
+		if !ok {
+			return errNotFound
+		}
+		if failed.Status != model.JobFailed || failed.RetryJobID != "" {
+			return errConflict
+		}
+		if node, ok := state.Nodes[failed.NodeID]; !ok || node.Status == model.NodeRevoked {
+			return fmt.Errorf("%w: node", errNotFound)
+		}
+		retried = failed
+		retried.ID = retryID
+		retried.Status = model.JobQueued
+		retried.Payload = append(json.RawMessage(nil), failed.Payload...)
+		retried.Attempts = 0
+		if retried.MaxAttempts < 1 {
+			retried.MaxAttempts = 3
+		}
+		retried.Error = ""
+		retried.CreatedAt = now
+		retried.StartedAt = nil
+		retried.FinishedAt = nil
+		retried.RetryOfID = failed.ID
+		retried.RetryJobID = ""
+		if _, err := s.buildWireJob(retried, *state); err != nil {
+			return err
+		}
+		failed.RetryJobID = retried.ID
+		state.Jobs[failed.ID] = failed
+		state.Jobs[retried.ID] = retried
+		if domain, ok := state.Domains[retried.DomainID]; ok {
+			domain.LastJobID = retried.ID
+			domain.LastError = ""
+			domain.UpdatedAt = now
+			if retried.Type == protocol.JobDeleteDomain {
+				domain.Deleting = true
+				domain.Enabled = false
+			}
+			state.Domains[domain.ID] = domain
+		}
+		s.addAudit(state, "warning", "job.manual-retry", "失败任务已手动重试", retried.NodeID, retried.DomainID, retried.ID)
+		return nil
+	})
+	if errors.Is(err, errNotFound) {
+		writeError(w, http.StatusNotFound, "任务或节点不存在", "not_found", nil)
+		return
+	}
+	if errors.Is(err, errConflict) {
+		writeError(w, http.StatusConflict, "任务无法重复重试", "job_retry_conflict", nil)
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "任务依赖已失效，无法重试", "job_retry_unavailable", map[string]string{"reason": err.Error()})
+		return
+	}
+	retried.Payload = nil
+	writeJSON(w, http.StatusAccepted, retried)
+}
+
+func jobNeedsAttention(state model.State, job model.Job) bool {
+	if job.Status == model.JobQueued || job.Status == model.JobRunning {
+		return true
+	}
+	if job.Status != model.JobFailed {
+		return false
+	}
+	if job.RetryJobID == "" {
+		return true
+	}
+	_, retryExists := state.Jobs[job.RetryJobID]
+	return !retryExists
 }
 
 func (s *Server) handleCreateEnrollment(w http.ResponseWriter, r *http.Request) {
@@ -239,6 +328,28 @@ type createDomainRequest struct {
 	NginxWebsocket          bool     `json:"nginx_websocket"`
 	NginxHTTP2              bool     `json:"nginx_http2"`
 	NginxGzip               bool     `json:"nginx_gzip"`
+}
+
+type updateDomainRequest struct {
+	Domain                  string    `json:"domain"`
+	NodeID                  string    `json:"node_id"`
+	UpstreamHost            string    `json:"upstream_host"`
+	UpstreamPort            int       `json:"upstream_port"`
+	CertificateMode         string    `json:"certificate_mode"`
+	CertificateID           *string   `json:"certificate_id"`
+	ACMEAccountID           *string   `json:"acme_account_id"`
+	DNSAccountID            *string   `json:"dns_account_id"`
+	AutoRenew               *bool     `json:"auto_renew"`
+	RenewBeforeDays         int       `json:"renew_before_days"`
+	SyncNodeIDs             *[]string `json:"sync_node_ids"`
+	CloudflareEnabled       *bool     `json:"cloudflare_enabled"`
+	CloudflareDNSAccountID  *string   `json:"cloudflare_dns_account_id"`
+	CloudflareProxied       *bool     `json:"cloudflare_proxied"`
+	CloudflareRecordType    *string   `json:"cloudflare_record_type"`
+	CloudflareRecordContent *string   `json:"cloudflare_record_content"`
+	NginxWebsocket          *bool     `json:"nginx_websocket"`
+	NginxHTTP2              *bool     `json:"nginx_http2"`
+	NginxGzip               *bool     `json:"nginx_gzip"`
 }
 
 type applyDomainSpec struct {
@@ -686,29 +797,168 @@ func (s *Server) handleDeleteDomain(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleUpdateDomain(w http.ResponseWriter, r *http.Request) {
 	domainID := r.PathValue("id")
-	var request struct {
-		NodeID                  string `json:"node_id"`
-		UpstreamHost            string `json:"upstream_host"`
-		UpstreamPort            int    `json:"upstream_port"`
-		CertificateID           string `json:"certificate_id"`
-		CertificateMode         string `json:"certificate_mode"`
-		ACMEAccountID           string `json:"acme_account_id"`
-		DNSAccountID            string `json:"dns_account_id"`
-		AutoRenew               bool   `json:"auto_renew"`
-		RenewBeforeDays         int    `json:"renew_before_days"`
-		CloudflareEnabled       bool   `json:"cloudflare_enabled"`
-		CloudflareDNSAccountID  string `json:"cloudflare_dns_account_id"`
-		CloudflareProxied       bool   `json:"cloudflare_proxied"`
-		CloudflareRecordType    string `json:"cloudflare_record_type"`
-		CloudflareRecordContent string `json:"cloudflare_record_content"`
-		NginxWebsocket          *bool  `json:"nginx_websocket"`
-		NginxHTTP2              *bool  `json:"nginx_http2"`
-		NginxGzip               *bool  `json:"nginx_gzip"`
-	}
-	if !decodeJSON(w, r, &request) {
+	var update updateDomainRequest
+	if !decodeJSON(w, r, &update) {
 		return
 	}
-	request.UpstreamHost = strings.TrimSpace(request.UpstreamHost)
+	snapshot := s.store.Snapshot()
+	existing, ok := snapshot.Domains[domainID]
+	if !ok {
+		writeError(w, http.StatusNotFound, "域名不存在", "not_found", nil)
+		return
+	}
+	request := createDomainRequest{
+		Domain:                  update.Domain,
+		NodeID:                  update.NodeID,
+		UpstreamHost:            update.UpstreamHost,
+		UpstreamPort:            update.UpstreamPort,
+		CertificateMode:         update.CertificateMode,
+		RenewBeforeDays:         update.RenewBeforeDays,
+		SyncNodeIDs:             append([]string{}, existing.SyncNodeIDs...),
+		CloudflareEnabled:       existing.CloudflareEnabled,
+		CloudflareDNSAccountID:  existing.CloudflareDNSAccountID,
+		CloudflareProxied:       existing.CloudflareProxied,
+		CloudflareRecordType:    existing.CloudflareRecordType,
+		CloudflareRecordContent: existing.CloudflareRecordContent,
+		NginxWebsocket:          existing.NginxWebsocket,
+		NginxHTTP2:              existing.NginxHTTP2,
+		NginxGzip:               existing.NginxGzip,
+	}
+	if update.CertificateID != nil {
+		request.CertificateID = strings.TrimSpace(*update.CertificateID)
+	} else if update.CertificateMode == "" || update.CertificateMode == string(existing.CertificateMode) {
+		request.CertificateID = existing.CertificateID
+	}
+	if update.ACMEAccountID != nil {
+		request.ACMEAccountID = strings.TrimSpace(*update.ACMEAccountID)
+	} else {
+		request.ACMEAccountID = existing.ACMEAccountID
+	}
+	if update.DNSAccountID != nil {
+		request.DNSAccountID = strings.TrimSpace(*update.DNSAccountID)
+	} else {
+		request.DNSAccountID = existing.DNSAccountID
+	}
+	request.AutoRenew = existing.AutoRenew
+	if update.AutoRenew != nil {
+		request.AutoRenew = *update.AutoRenew
+	}
+	if update.SyncNodeIDs != nil {
+		request.SyncNodeIDs = append([]string{}, (*update.SyncNodeIDs)...)
+	}
+	if update.CloudflareEnabled != nil {
+		request.CloudflareEnabled = *update.CloudflareEnabled
+	}
+	if update.CloudflareDNSAccountID != nil {
+		request.CloudflareDNSAccountID = strings.TrimSpace(*update.CloudflareDNSAccountID)
+	}
+	if update.CloudflareProxied != nil {
+		request.CloudflareProxied = *update.CloudflareProxied
+	}
+	if update.CloudflareRecordType != nil {
+		request.CloudflareRecordType = strings.TrimSpace(*update.CloudflareRecordType)
+	}
+	if update.CloudflareRecordContent != nil {
+		request.CloudflareRecordContent = strings.TrimSpace(*update.CloudflareRecordContent)
+	}
+	if update.NginxWebsocket != nil {
+		request.NginxWebsocket = *update.NginxWebsocket
+	}
+	if update.NginxHTTP2 != nil {
+		request.NginxHTTP2 = *update.NginxHTTP2
+	}
+	if update.NginxGzip != nil {
+		request.NginxGzip = *update.NginxGzip
+	}
+
+	request.Domain = strings.ToLower(strings.TrimSpace(request.Domain))
+	if request.Domain == "" {
+		request.Domain = existing.Name
+	}
+	if request.Domain != existing.Name {
+		writeError(w, http.StatusBadRequest, "域名不可在编辑时更改", "domain_immutable", nil)
+		return
+	}
+	if request.NodeID == "" {
+		request.NodeID = existing.NodeID
+	}
+	request.UpstreamHost = strings.ToLower(strings.TrimSpace(request.UpstreamHost))
+	if request.UpstreamHost == "" {
+		request.UpstreamHost = existing.UpstreamHost
+	}
+	if request.UpstreamPort == 0 {
+		request.UpstreamPort = existing.UpstreamPort
+	}
+	if request.CertificateMode == "" {
+		request.CertificateMode = string(existing.CertificateMode)
+		if request.CertificateMode == "" {
+			request.CertificateMode = "none"
+		}
+	}
+	if request.RenewBeforeDays == 0 {
+		request.RenewBeforeDays = normalizeRenewBeforeDays(existing.RenewBeforeDays)
+	}
+	if request.RenewBeforeDays < 7 || request.RenewBeforeDays > 60 {
+		writeError(w, http.StatusBadRequest, "自动续期阈值需为 7–60 天", "invalid_renewal_window", nil)
+		return
+	}
+
+	var source model.CertificateSource
+	switch request.CertificateMode {
+	case "local":
+		source = model.CertificateLocal
+	case "upload":
+		source = model.CertificateUpload
+		if request.CertificateID == "" && existing.CertificateMode == model.CertificateUpload {
+			request.CertificateID = existing.CertificateID
+		}
+		if request.CertificateID == "" {
+			writeError(w, http.StatusBadRequest, "请选择已上传的证书", "certificate_required", nil)
+			return
+		}
+	case "acme":
+		source = model.CertificateACME
+	case "none":
+		request.AutoRenew = false
+		request.ACMEAccountID = ""
+		request.DNSAccountID = ""
+	default:
+		writeError(w, http.StatusBadRequest, "证书来源无效", "invalid_certificate_mode", nil)
+		return
+	}
+	if source == model.CertificateACME || request.AutoRenew {
+		if request.ACMEAccountID == "" {
+			request.ACMEAccountID = firstACMEAccountID(snapshot)
+		}
+		if request.DNSAccountID == "" {
+			request.DNSAccountID = firstDNSAccountID(snapshot)
+		}
+		if request.ACMEAccountID == "" || request.DNSAccountID == "" {
+			writeError(w, http.StatusBadRequest, "自动签发需要 DNS 与 ACME 账户", "acme_accounts_required", nil)
+			return
+		}
+	} else {
+		request.ACMEAccountID = ""
+		request.DNSAccountID = ""
+	}
+	if err := nginxconfig.ValidateSite(nginxconfig.Site{
+		Domain: request.Domain, UpstreamHost: request.UpstreamHost, UpstreamPort: request.UpstreamPort,
+		TLS: source != "", CertificateDir: "/etc/ssl/" + request.Domain,
+	}); err != nil {
+		writeError(w, http.StatusBadRequest, "域名或上游配置无效", "invalid_domain", map[string]string{"reason": err.Error()})
+		return
+	}
+	if request.CloudflareEnabled {
+		cloudflare, err := s.upsertCloudflareRecord(r.Context(), snapshot, request)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "无法创建或更新 Cloudflare DNS 记录", "cloudflare_record_unavailable", map[string]string{"reason": err.Error()})
+			return
+		}
+		request.CloudflareDNSAccountID = cloudflare.DNSAccountID
+		request.CloudflareRecordType = cloudflare.RecordType
+		request.CloudflareRecordContent = cloudflare.Content
+		request.CloudflareProxied = cloudflare.Proxied
+	}
 
 	var updated model.Domain
 	err := s.store.Update(func(state *model.State) error {
@@ -716,63 +966,94 @@ func (s *Server) handleUpdateDomain(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			return errNotFound
 		}
-		if request.NodeID != "" {
-			if node, ok := state.Nodes[request.NodeID]; !ok || node.Status == model.NodeRevoked {
-				return fmt.Errorf("%w: node", errNotFound)
+		if node, ok := state.Nodes[request.NodeID]; !ok || node.Status == model.NodeRevoked {
+			return fmt.Errorf("%w: node", errNotFound)
+		}
+		certificateID := ""
+		if source == model.CertificateUpload {
+			certificateID = request.CertificateID
+		} else if source == model.CertificateACME && domain.CertificateMode == model.CertificateACME {
+			if cert, ok := state.Certificates[domain.CertificateID]; ok && (cert.Domain == domain.Name || certutil.CoversHostname(cert.DNSNames, domain.Name)) {
+				certificateID = cert.ID
 			}
-			domain.NodeID = request.NodeID
+		} else if source == model.CertificateLocal {
+			if _, ok := state.Certificates[domain.CertificateID]; ok {
+				certificateID = domain.CertificateID
+			}
 		}
-		if request.UpstreamHost != "" {
-			domain.UpstreamHost = request.UpstreamHost
-		}
-		if request.UpstreamPort > 0 && request.UpstreamPort <= 65535 {
-			domain.UpstreamPort = request.UpstreamPort
-		}
-		if request.CertificateID != "" {
-			cert, ok := state.Certificates[request.CertificateID]
+		if certificateID != "" {
+			cert, ok := state.Certificates[certificateID]
 			if !ok {
 				return fmt.Errorf("%w: certificate", errNotFound)
 			}
 			if cert.Domain != domain.Name && !certutil.CoversHostname(cert.DNSNames, domain.Name) {
 				return errors.New("selected certificate does not cover the domain")
 			}
-			domain.CertificateID = request.CertificateID
-			domain.CertificateMode = model.CertificateUpload
 		}
-		if request.CertificateMode != "" {
-			domain.CertificateMode = model.CertificateSource(request.CertificateMode)
+		if source == model.CertificateACME || request.AutoRenew {
+			if _, ok := state.ACMEAccounts[request.ACMEAccountID]; !ok {
+				return fmt.Errorf("%w: acme", errNotFound)
+			}
+			if _, ok := state.DNSAccounts[request.DNSAccountID]; !ok {
+				return fmt.Errorf("%w: dns", errNotFound)
+			}
 		}
-		if request.NginxWebsocket != nil {
-			domain.NginxWebsocket = *request.NginxWebsocket
+		syncNodeIDs, err := validateNodeIDs(state, request.SyncNodeIDs, request.NodeID)
+		if err != nil {
+			return err
 		}
-		if request.NginxHTTP2 != nil {
-			domain.NginxHTTP2 = *request.NginxHTTP2
-		}
-		if request.NginxGzip != nil {
-			domain.NginxGzip = *request.NginxGzip
-		}
-		if request.ACMEAccountID != "" {
-			domain.ACMEAccountID = request.ACMEAccountID
-		}
-		if request.DNSAccountID != "" {
-			domain.DNSAccountID = request.DNSAccountID
-		}
+		domain.NodeID = request.NodeID
+		domain.UpstreamHost = request.UpstreamHost
+		domain.UpstreamPort = request.UpstreamPort
+		domain.CertificateID = certificateID
+		domain.CertificateMode = source
+		domain.ACMEAccountID = request.ACMEAccountID
+		domain.DNSAccountID = request.DNSAccountID
 		domain.AutoRenew = request.AutoRenew
-		if request.RenewBeforeDays > 0 {
-			domain.RenewBeforeDays = request.RenewBeforeDays
-		}
+		domain.RenewBeforeDays = request.RenewBeforeDays
+		domain.SyncNodeIDs = syncNodeIDs
 		domain.CloudflareEnabled = request.CloudflareEnabled
-		if request.CloudflareDNSAccountID != "" {
+		if request.CloudflareEnabled {
 			domain.CloudflareDNSAccountID = request.CloudflareDNSAccountID
+			domain.CloudflareProxied = request.CloudflareProxied
+			domain.CloudflareRecordType = request.CloudflareRecordType
+			domain.CloudflareRecordContent = request.CloudflareRecordContent
+		} else {
+			domain.CloudflareDNSAccountID = ""
+			domain.CloudflareProxied = false
+			domain.CloudflareRecordType = ""
+			domain.CloudflareRecordContent = ""
 		}
-		domain.CloudflareProxied = request.CloudflareProxied
+		domain.NginxWebsocket = request.NginxWebsocket
+		domain.NginxHTTP2 = request.NginxHTTP2
+		domain.NginxGzip = request.NginxGzip
+		domain.Enabled = true
+		domain.Deleting = false
 		domain.UpdatedAt = time.Now().UTC()
+		if certificateID != "" && request.AutoRenew {
+			certificate := state.Certificates[certificateID]
+			certificate.AutoRenew = true
+			certificate.RenewBeforeDays = request.RenewBeforeDays
+			certificate.ACMEAccountID = request.ACMEAccountID
+			certificate.DNSAccountID = request.DNSAccountID
+			certificate.UpdatedAt = domain.UpdatedAt
+			state.Certificates[certificate.ID] = certificate
+		}
 
 		if !domain.ObservedOnly {
-			job, err := enqueueJob(state, domain.NodeID, domain.ID, protocol.JobApplyDomain, applyDomainSpec{
-				DomainID: domain.ID, CertificateID: domain.CertificateID,
-				UseLocalCertificate: domain.CertificateMode == model.CertificateLocal,
-			})
+			var job model.Job
+			if source == model.CertificateACME && certificateID == "" {
+				job, err = enqueueJob(state, domain.NodeID, domain.ID, protocol.JobIssueCertificate, issueCertificateSpec{DomainID: domain.ID, DNSNames: []string{domain.Name}})
+			} else {
+				jobCertificateID := ""
+				if source == model.CertificateUpload || source == model.CertificateACME {
+					jobCertificateID = certificateID
+				}
+				job, err = enqueueJob(state, domain.NodeID, domain.ID, protocol.JobApplyDomain, applyDomainSpec{
+					DomainID: domain.ID, CertificateID: jobCertificateID,
+					UseLocalCertificate: source == model.CertificateLocal, CaptureCertificate: source == model.CertificateLocal,
+				})
+			}
 			if err != nil {
 				return err
 			}

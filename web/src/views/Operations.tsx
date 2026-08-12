@@ -122,7 +122,6 @@ export function CertificatesPage({ certificates, nodes, onAdd, onRenew, onToggle
         </div>
         <div className="certificate-list-head">
           <span>{t('domain.columnDomain')}</span>
-          <span>{t('certificate.source')}</span>
           <span>{t('certificate.expiry')}</span>
           <span>{t('certificate.autoRenew')}</span>
           <span>{t('certificate.distribution')}</span>
@@ -147,12 +146,8 @@ export function CertificatesPage({ certificates, nodes, onAdd, onRenew, onToggle
             <div className="certificate-list-row" key={certificate.id}>
               <span className="cert-identity">
                 <StatusIcon tone={certificate.status === 'valid' ? 'success' : certificate.status === 'expiring' ? 'warning' : 'error'} />
-                <span>
-                  <strong>{certificate.domain}</strong>
-                  <small title={certificate.fingerprint_sha256}>{certificateSource(certificate.source, t)} · {t('certificate.namesCount', { count: certificate.dns_names.length })}</small>
-                </span>
+                <strong>{certificate.domain}</strong>
               </span>
-              <span className="source-label">{certificateSource(certificate.source, t)}</span>
               <span className={`expiry-label expiry-${certificate.status}`}>
                 <strong>{certificate.days_remaining > 0 ? t('certificate.remaining', { count: certificate.days_remaining }) : t('common.expired')}</strong>
                 <small>{formatDate(certificate.not_after, locale)}</small>
@@ -174,13 +169,13 @@ export function CertificatesPage({ certificates, nodes, onAdd, onRenew, onToggle
               </span>
               <span className="deployed-count"><strong>{certificate.deployed_node_ids.length}</strong>/{nodes.length}</span>
               <span className="certificate-actions">
-                <button type="button" onClick={() => onEdit(certificate)} title={t('common.edit')}>
+                <button type="button" className="certificate-action-edit" onClick={() => onEdit(certificate)} title={t('common.edit')}>
                   <Icon name="edit" size={15} /><span>{t('common.edit')}</span>
                 </button>
-                <button type="button" disabled={renewing || !automationReady} onClick={() => onRenew(certificate)} title={t('certificate.renew')}>
+                <button type="button" className="certificate-action-apply" disabled={renewing || !automationReady} onClick={() => onRenew(certificate)} title={t('certificate.renew')}>
                   <Icon name="refresh" size={15} /><span>{t('certificate.renew')}</span>
                 </button>
-                <button type="button" disabled={Boolean(busy)} onClick={() => onSync(certificate)} title={t('certificate.sync')}>
+                <button type="button" className="certificate-action-sync" disabled={Boolean(busy)} onClick={() => onSync(certificate)} title={t('certificate.sync')}>
                   <Icon name="upload" size={15} /><span>{t('certificate.sync')}</span>
                 </button>
               </span>
@@ -285,6 +280,49 @@ export function AuditPage({ events, domains, nodes }: { events: AuditEvent[]; do
   )
 }
 
+export function PendingPage({ jobs, nodes, domains, busy, onRetry }: {
+  jobs: JobRecord[]
+  nodes: NodeRecord[]
+  domains: DomainRecord[]
+  busy: string
+  onRetry: (job: JobRecord) => void
+}) {
+  const { t, locale } = usePreferences()
+  const nodeNames = Object.fromEntries(nodes.map((node) => [node.id, node.name]))
+  const domainNames = Object.fromEntries(domains.map((domain) => [domain.id, domain.name]))
+  const items = jobs
+    .filter((job) => job.status === 'queued' || job.status === 'running' || (job.status === 'failed' && !job.retry_job_id))
+    .sort((left, right) => new Date(right.created_at).getTime() - new Date(left.created_at).getTime())
+
+  return (
+    <div className="content-page page-enter">
+      <PageHeader title={t('pending.title')} description={t('pending.description')} />
+      <Bezel className="operation-panel pending-panel">
+        {items.length === 0 ? (
+          <EmptyState icon="check" title={t('pending.empty')} description="" />
+        ) : <div className="pending-list">{items.map((job) => {
+          const failed = job.status === 'failed'
+          const target = domainNames[job.domain_id ?? ''] || nodeNames[job.node_id] || t('audit.controller')
+          return (
+            <article className={`pending-row pending-${job.status}`} key={job.id}>
+              <StatusIcon tone={failed ? 'error' : job.status === 'running' ? 'info' : 'warning'} />
+              <div className="pending-main">
+                <span><strong>{jobTypeLabel(job.type, t)}</strong><small>{target}</small></span>
+                <time>{relativeTime(job.created_at, locale)}</time>
+              </div>
+              <span className={`pending-status pending-status-${job.status}`}>{t(`pending.${job.status}`)}</span>
+              {failed && <details className="pending-error">
+                <summary>{t('pending.reason')}<Icon name="chevron" size={14} /></summary>
+                <div><p>{job.error || t('pending.noReason')}</p><button type="button" disabled={busy === `retry-${job.id}`} onClick={() => onRetry(job)}><Icon name="refresh" size={15} />{busy === `retry-${job.id}` ? t('common.queueing') : t('pending.retry')}</button></div>
+              </details>}
+            </article>
+          )
+        })}</div>}
+      </Bezel>
+    </div>
+  )
+}
+
 export function ControllerUpdatePage({ job, node }: { job?: JobRecord; node?: NodeRecord }) {
   const { t } = usePreferences()
   useEffect(() => {
@@ -310,7 +348,7 @@ export function ControllerUpdatePage({ job, node }: { job?: JobRecord; node?: No
 }
 
 export function SettingsPage({
-  dnsAccounts, acmeAccounts, settings, busy, onAddDNS, onAddACME, onEditDNS, onEditACME, onPollSeconds, onPassword, onLogout
+  dnsAccounts, acmeAccounts, settings, busy, onAddDNS, onAddACME, onEditDNS, onEditACME, onPollSeconds, onPassword, onAccess
 }: {
   dnsAccounts: DNSAccount[]
   acmeAccounts: ACMEAccount[]
@@ -322,7 +360,7 @@ export function SettingsPage({
   onEditACME: (account: ACMEAccount) => void
   onPollSeconds: (seconds: number) => void
   onPassword: () => void
-  onLogout: () => void
+  onAccess: () => void
 }) {
   const { t } = usePreferences()
   return (
@@ -340,6 +378,13 @@ export function SettingsPage({
           <SectionHeading title={t('settings.nodeStatus')} />
           <label className="poll-frequency-row"><span><Icon name="clock" size={20} /><strong>{t('settings.nodePollFrequency')}</strong></span><SelectField ariaLabel={t('settings.nodePollFrequency')} value={String(settings.node_poll_seconds)} disabled={busy} onChange={(value) => onPollSeconds(Number(value))} options={[10, 30, 60, 120, 300].map((seconds) => ({ value: String(seconds), label: t('settings.seconds', { count: seconds }) }))} /></label>
         </Bezel>
+        <Bezel className="settings-card settings-access-card">
+          <SectionHeading title={t('settings.accessProtection')} />
+          <div className="settings-compact-list">
+            <button type="button" onClick={onAccess}><span className="settings-icon"><Icon name="shield" size={20} /></span><span><strong>Cloudflare Turnstile</strong><small>{t(settings.turnstile_enabled ? 'settings.enabled' : 'settings.disabled')}</small></span><Icon name="chevron" size={16} /></button>
+            <button type="button" onClick={onAccess}><span className="settings-icon"><Icon name="lock" size={20} /></span><span><strong>{t('settings.ipAllowlist')}</strong><small>{settings.panel_allowed_cidrs.length ? t('settings.ruleCount', { count: settings.panel_allowed_cidrs.length }) : t('settings.disabled')}</small></span><Icon name="chevron" size={16} /></button>
+          </div>
+        </Bezel>
       </div>
       <div className="settings-list">
         <button type="button" className="settings-action-row" onClick={onPassword}>
@@ -348,7 +393,6 @@ export function SettingsPage({
           <span className="settings-value">{t('settings.changePassword')} <Icon name="chevron" size={15} /></span>
         </button>
       </div>
-      <button type="button" className="logout-row compact-logout-row" onClick={onLogout}><Icon name="logout" size={18} />{t('app.logout')}</button>
     </div>
   )
 }
@@ -375,8 +419,18 @@ function NodeStatusProbe({ node }: { node: NodeRecord }) {
   return <div className="node-status-probe" aria-label={t(`common.${node.status}`)}><span className="probe-label"><StatusDot tone={node.status === 'online' ? 'good' : node.status === 'offline' ? 'danger' : 'warning'} />{t(`common.${node.status}`)}</span><span className="probe-bars">{fillers.map((_, index) => <i className="probe-empty" key={`empty-${index}`} />)}{samples.map((sample, index) => <i className={`probe-${sample.status}`} key={`${sample.observed_at}-${index}`} title={sample.observed_at} />)}</span></div>
 }
 
-function certificateSource(source: string, t: (key: string, variables?: Record<string, string | number>) => string): string {
-  return t(source === 'acme' ? 'certificate.sourceACME' : source === 'upload' ? 'certificate.sourceUpload' : 'certificate.sourceLocal')
+function jobTypeLabel(type: string, t: (key: string, variables?: Record<string, string | number>) => string): string {
+  const key = ({
+    apply_domain: 'pending.applyDomain',
+    delete_domain: 'pending.deleteDomain',
+    sync_certificate: 'pending.syncCertificate',
+    issue_certificate: 'pending.issueCertificate',
+    capture_certificate: 'pending.captureCertificate',
+    reload_nginx: 'pending.reloadNginx',
+    update_atlas: 'pending.updateAtlas',
+    update_system: 'pending.updateSystem',
+  } as Record<string, string>)[type]
+  return key ? t(key) : type.replaceAll('_', ' ')
 }
 
 function formatDate(value: string, locale: string): string {

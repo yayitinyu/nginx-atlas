@@ -1065,6 +1065,235 @@ func TestTakeoverPathRequiresExactNginxDirectoryBoundary(t *testing.T) {
 	}
 }
 
+func TestUpdateDomainAcceptsEditorPayloadAndPersistsNginxSettings(t *testing.T) {
+	stateStore, err := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	box, err := securebox.New(bytes.Repeat([]byte{0x71}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminToken := strings.Repeat("u", 32)
+	controller, err := New(Config{AdminToken: adminToken}, stateStore, box, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if err := stateStore.Update(func(state *model.State) error {
+		state.Nodes["node_primary"] = model.Node{ID: "node_primary", Name: "Primary", Status: model.NodeOnline, CreatedAt: now}
+		state.Nodes["node_backup"] = model.Node{ID: "node_backup", Name: "Backup", Status: model.NodeOnline, CreatedAt: now}
+		state.Certificates["crt_wildcard"] = model.Certificate{
+			ID: "crt_wildcard", Domain: "*.example.com", Source: model.CertificateUpload,
+			DNSNames: []string{"*.example.com"}, NotAfter: now.Add(60 * 24 * time.Hour), CreatedAt: now, UpdatedAt: now,
+		}
+		state.DNSAccounts["dns_primary"] = model.DNSAccount{ID: "dns_primary", Name: "Cloudflare", Provider: "cloudflare", CreatedAt: now, UpdatedAt: now}
+		state.ACMEAccounts["acme_primary"] = model.ACMEAccount{ID: "acme_primary", Name: "ACME", Email: "admin@example.com", DirectoryURL: "https://acme-v02.api.letsencrypt.org/directory", CreatedAt: now, UpdatedAt: now}
+		state.Domains["dom_api"] = model.Domain{
+			ID: "dom_api", Name: "api.example.com", NodeID: "node_primary", UpstreamHost: "127.0.0.1", UpstreamPort: 8080,
+			CertificateID: "crt_wildcard", CertificateMode: model.CertificateUpload, Enabled: true,
+			CloudflareEnabled: true, CloudflareRecordContent: "old.example.com", CreatedAt: now, UpdatedAt: now,
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	request := createDomainRequest{
+		Domain: "api.example.com", NodeID: "node_primary", UpstreamHost: "127.0.0.2", UpstreamPort: 9090,
+		CertificateMode: "upload", CertificateID: "crt_wildcard", RenewBeforeDays: 30,
+		SyncNodeIDs: []string{"node_backup"}, NginxWebsocket: true, NginxHTTP2: true, NginxGzip: false,
+	}
+	updated := performJSON(t, controller.Handler(), http.MethodPut, "/api/v1/domains/dom_api", request, "Bearer "+adminToken)
+	if updated.Code != http.StatusOK {
+		t.Fatalf("update domain returned %d: %s", updated.Code, updated.Body.String())
+	}
+	domain := stateStore.Snapshot().Domains["dom_api"]
+	if domain.UpstreamHost != "127.0.0.2" || domain.UpstreamPort != 9090 || !domain.NginxWebsocket || !domain.NginxHTTP2 || domain.NginxGzip {
+		t.Fatalf("domain editor values were not persisted: %+v", domain)
+	}
+	if len(domain.SyncNodeIDs) != 1 || domain.SyncNodeIDs[0] != "node_backup" {
+		t.Fatalf("sync nodes were not persisted: %+v", domain.SyncNodeIDs)
+	}
+	if domain.CloudflareEnabled || domain.CloudflareRecordContent != "" {
+		t.Fatalf("disabled Cloudflare state was not cleared: %+v", domain)
+	}
+	job := stateStore.Snapshot().Jobs[domain.LastJobID]
+	if job.Type != protocol.JobApplyDomain || job.Status != model.JobQueued {
+		t.Fatalf("updated domain did not queue an apply job: %+v", job)
+	}
+
+	request.CertificateMode = "acme"
+	request.CertificateID = ""
+	request.ACMEAccountID = "acme_primary"
+	request.DNSAccountID = "dns_primary"
+	request.AutoRenew = true
+	updated = performJSON(t, controller.Handler(), http.MethodPut, "/api/v1/domains/dom_api", request, "Bearer "+adminToken)
+	if updated.Code != http.StatusOK {
+		t.Fatalf("switch domain to ACME returned %d: %s", updated.Code, updated.Body.String())
+	}
+	domain = stateStore.Snapshot().Domains["dom_api"]
+	job = stateStore.Snapshot().Jobs[domain.LastJobID]
+	if domain.CertificateID != "" || job.Type != protocol.JobIssueCertificate {
+		t.Fatalf("switching from uploaded certificate to ACME reused the old certificate: domain=%+v job=%+v", domain, job)
+	}
+
+	partial := performJSON(t, controller.Handler(), http.MethodPut, "/api/v1/domains/dom_api", map[string]any{
+		"upstream_port": 9091,
+	}, "Bearer "+adminToken)
+	if partial.Code != http.StatusOK {
+		t.Fatalf("partial domain update returned %d: %s", partial.Code, partial.Body.String())
+	}
+	domain = stateStore.Snapshot().Domains["dom_api"]
+	if domain.UpstreamPort != 9091 || !domain.NginxWebsocket || !domain.NginxHTTP2 || domain.NginxGzip || len(domain.SyncNodeIDs) != 1 {
+		t.Fatalf("partial domain update discarded existing editor settings: %+v", domain)
+	}
+}
+
+func TestTurnstileSettingsProtectLoginWithoutExposingSecret(t *testing.T) {
+	var observedRemoteIP string
+	verifier := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Errorf("parse verifier form: %v", err)
+		}
+		if got := r.Form.Get("secret"); got != "turnstile-secret" {
+			t.Errorf("verifier secret = %q", got)
+		}
+		observedRemoteIP = r.Form.Get("remoteip")
+		_ = json.NewEncoder(w).Encode(map[string]any{"success": r.Form.Get("response") == "valid-token", "action": turnstileAction})
+	}))
+	defer verifier.Close()
+
+	stateStore, err := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	box, err := securebox.New(bytes.Repeat([]byte{0x72}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminToken := strings.Repeat("t", 32)
+	controller, err := New(Config{AdminToken: adminToken, TurnstileVerifyURL: verifier.URL}, stateStore, box, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings := performJSON(t, controller.Handler(), http.MethodPut, "/api/v1/settings", map[string]any{
+		"turnstile_enabled": true, "turnstile_site_key": "site-key", "turnstile_secret": "turnstile-secret",
+	}, "Bearer "+adminToken)
+	if settings.Code != http.StatusOK || strings.Contains(settings.Body.String(), "turnstile-secret") {
+		t.Fatalf("save settings returned %d or exposed secret: %s", settings.Code, settings.Body.String())
+	}
+	var view settingsView
+	decodeRecorder(t, settings, &view)
+	if !view.TurnstileEnabled || !view.TurnstileSecretConfigured || view.TurnstileSiteKey != "site-key" {
+		t.Fatalf("unexpected Turnstile settings view: %+v", view)
+	}
+
+	missing := performJSON(t, controller.Handler(), http.MethodPost, "/api/v1/session", map[string]string{"password": adminToken}, "")
+	if missing.Code != http.StatusForbidden {
+		t.Fatalf("login without Turnstile returned %d: %s", missing.Code, missing.Body.String())
+	}
+	accepted := performJSON(t, controller.Handler(), http.MethodPost, "/api/v1/session", map[string]string{
+		"password": adminToken, "turnstile_token": "valid-token",
+	}, "")
+	if accepted.Code != http.StatusOK {
+		t.Fatalf("verified login returned %d: %s", accepted.Code, accepted.Body.String())
+	}
+	if observedRemoteIP != "192.0.2.1" {
+		t.Fatalf("verifier remote IP = %q, want 192.0.2.1", observedRemoteIP)
+	}
+}
+
+func TestPanelIPWhitelistPreventsLockoutAndExemptsHealth(t *testing.T) {
+	stateStore, err := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	box, err := securebox.New(bytes.Repeat([]byte{0x73}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminToken := strings.Repeat("i", 32)
+	controller, err := New(Config{AdminToken: adminToken}, stateStore, box, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	lockout := performJSONFromIP(t, controller.Handler(), http.MethodPut, "/api/v1/settings", map[string]any{
+		"panel_allowed_cidrs": []string{"198.51.100.0/24"},
+	}, "Bearer "+adminToken, "203.0.113.9")
+	if lockout.Code != http.StatusBadRequest {
+		t.Fatalf("lockout allowlist returned %d: %s", lockout.Code, lockout.Body.String())
+	}
+	allowed := performJSONFromIP(t, controller.Handler(), http.MethodPut, "/api/v1/settings", map[string]any{
+		"panel_allowed_cidrs": []string{"203.0.113.9", "203.0.113.9/32"},
+	}, "Bearer "+adminToken, "203.0.113.9")
+	if allowed.Code != http.StatusOK {
+		t.Fatalf("save allowlist returned %d: %s", allowed.Code, allowed.Body.String())
+	}
+	if got := stateStore.Snapshot().Settings.PanelAllowedCIDRs; len(got) != 1 || got[0] != "203.0.113.9/32" {
+		t.Fatalf("allowlist was not normalized: %+v", got)
+	}
+
+	blocked := performJSONFromIP(t, controller.Handler(), http.MethodGet, "/api/v1/dashboard", nil, "Bearer "+adminToken, "198.51.100.7")
+	if blocked.Code != http.StatusForbidden {
+		t.Fatalf("outside IP returned %d: %s", blocked.Code, blocked.Body.String())
+	}
+	inside := performJSONFromIP(t, controller.Handler(), http.MethodGet, "/api/v1/dashboard", nil, "Bearer "+adminToken, "203.0.113.9")
+	if inside.Code != http.StatusOK {
+		t.Fatalf("allowed IP returned %d: %s", inside.Code, inside.Body.String())
+	}
+	health := performJSONFromIP(t, controller.Handler(), http.MethodGet, "/healthz", nil, "", "198.51.100.7")
+	if health.Code != http.StatusOK {
+		t.Fatalf("health endpoint was blocked: %d", health.Code)
+	}
+}
+
+func TestFailedJobCanBeRetriedOnceWithoutLosingFailure(t *testing.T) {
+	stateStore, err := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	box, err := securebox.New(bytes.Repeat([]byte{0x74}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminToken := strings.Repeat("r", 32)
+	controller, err := New(Config{AdminToken: adminToken}, stateStore, box, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if err := stateStore.Update(func(state *model.State) error {
+		state.Nodes["node_retry"] = model.Node{ID: "node_retry", Name: "Retry", Status: model.NodeOnline, CreatedAt: now}
+		state.Jobs["job_failed"] = model.Job{
+			ID: "job_failed", NodeID: "node_retry", Type: protocol.JobReloadNginx, Status: model.JobFailed,
+			Payload: json.RawMessage(`{}`), Attempts: 3, MaxAttempts: 3, Error: "nginx reload failed", CreatedAt: now, FinishedAt: &now,
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	retry := performJSON(t, controller.Handler(), http.MethodPost, "/api/v1/jobs/job_failed/retry", map[string]any{}, "Bearer "+adminToken)
+	if retry.Code != http.StatusAccepted {
+		t.Fatalf("retry failed job returned %d: %s", retry.Code, retry.Body.String())
+	}
+	var created model.Job
+	decodeRecorder(t, retry, &created)
+	snapshot := stateStore.Snapshot()
+	if created.Status != model.JobQueued || created.RetryOfID != "job_failed" || created.Attempts != 0 {
+		t.Fatalf("unexpected retried job: %+v", created)
+	}
+	if snapshot.Jobs["job_failed"].Error != "nginx reload failed" || snapshot.Jobs["job_failed"].RetryJobID != created.ID {
+		t.Fatalf("original failure was not preserved: %+v", snapshot.Jobs["job_failed"])
+	}
+	again := performJSON(t, controller.Handler(), http.MethodPost, "/api/v1/jobs/job_failed/retry", map[string]any{}, "Bearer "+adminToken)
+	if again.Code != http.StatusConflict {
+		t.Fatalf("duplicate retry returned %d: %s", again.Code, again.Body.String())
+	}
+}
+
 func TestVersionUpdateAvailableOnlyAllowsNewerRelease(t *testing.T) {
 	tests := []struct {
 		current string
@@ -1111,6 +1340,24 @@ func performJSON(t *testing.T, handler http.Handler, method, path string, body a
 		t.Fatal(err)
 	}
 	request := httptest.NewRequest(method, path, bytes.NewReader(payload))
+	request.Header.Set("Content-Type", "application/json")
+	if authorization != "" {
+		request.Header.Set("Authorization", authorization)
+	}
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	return recorder
+}
+
+func performJSONFromIP(t *testing.T, handler http.Handler, method, path string, body any, authorization, realIP string) *httptest.ResponseRecorder {
+	t.Helper()
+	payload, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(method, path, bytes.NewReader(payload))
+	request.RemoteAddr = "127.0.0.1:12345"
+	request.Header.Set("X-Real-IP", realIP)
 	request.Header.Set("Content-Type", "application/json")
 	if authorization != "" {
 		request.Header.Set("Authorization", authorization)

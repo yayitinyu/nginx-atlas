@@ -105,7 +105,11 @@ type Domain struct {
 }
 
 type ControllerSettings struct {
-	NodePollSeconds int `json:"node_poll_seconds,omitempty"`
+	NodePollSeconds           int      `json:"node_poll_seconds,omitempty"`
+	TurnstileEnabled          bool     `json:"turnstile_enabled,omitempty"`
+	TurnstileSiteKey          string   `json:"turnstile_site_key,omitempty"`
+	TurnstileSecretCiphertext string   `json:"turnstile_secret_ciphertext,omitempty"`
+	PanelAllowedCIDRs         []string `json:"panel_allowed_cidrs,omitempty"`
 }
 
 type Certificate struct {
@@ -188,6 +192,8 @@ type Job struct {
 	CreatedAt   time.Time       `json:"created_at"`
 	StartedAt   *time.Time      `json:"started_at,omitempty"`
 	FinishedAt  *time.Time      `json:"finished_at,omitempty"`
+	RetryOfID   string          `json:"retry_of_id,omitempty"`
+	RetryJobID  string          `json:"retry_job_id,omitempty"`
 }
 
 type AuditEvent struct {

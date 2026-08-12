@@ -29,16 +29,18 @@ import (
 const maxJSONBody = 2 << 20
 
 type Config struct {
-	Address          string
-	PublicURL        string
-	AdminToken       string
-	Version          string
-	Repository       string
-	ReleaseAPIURL    string
-	CloudflareAPIURL string
-	PollAfter        time.Duration
-	OfflineAfter     time.Duration
-	Demo             bool
+	Address            string
+	PublicURL          string
+	AdminToken         string
+	Version            string
+	Repository         string
+	ReleaseAPIURL      string
+	CloudflareAPIURL   string
+	TurnstileVerifyURL string
+	HTTPClient         *http.Client
+	PollAfter          time.Duration
+	OfflineAfter       time.Duration
+	Demo               bool
 }
 
 type Server struct {
@@ -49,6 +51,7 @@ type Server struct {
 	adminTokenHash [32]byte
 	sessionMu      sync.RWMutex
 	adminSessions  map[[32]byte]time.Time
+	httpClient     *http.Client
 	handler        http.Handler
 }
 
@@ -74,6 +77,12 @@ func New(config Config, stateStore *store.Store, box *securebox.Box, logger *slo
 	if strings.TrimSpace(config.CloudflareAPIURL) == "" {
 		config.CloudflareAPIURL = "https://api.cloudflare.com/client/v4"
 	}
+	if strings.TrimSpace(config.TurnstileVerifyURL) == "" {
+		config.TurnstileVerifyURL = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
+	}
+	if config.HTTPClient == nil {
+		config.HTTPClient = &http.Client{Timeout: 10 * time.Second}
+	}
 	config.PublicURL = strings.TrimRight(config.PublicURL, "/")
 	if config.PollAfter < 3*time.Second {
 		config.PollAfter = 10 * time.Second
@@ -90,6 +99,7 @@ func New(config Config, stateStore *store.Store, box *securebox.Box, logger *slo
 		config: config, store: stateStore, box: box, logger: logger,
 		adminTokenHash: sha256.Sum256([]byte(config.AdminToken)),
 		adminSessions:  make(map[[32]byte]time.Time),
+		httpClient:     config.HTTPClient,
 	}
 	if config.Demo {
 		if err := s.seedDemo(); err != nil {
@@ -130,6 +140,7 @@ func (s *Server) routes() http.Handler {
 	mux.Handle("POST /api/v1/agent/poll", s.nodeAuth(http.HandlerFunc(s.handleAgentPoll)))
 	mux.Handle("POST /api/v1/agent/jobs/{id}/result", s.nodeAuth(http.HandlerFunc(s.handleAgentJobResult)))
 
+	mux.HandleFunc("GET /api/v1/login-config", s.handleLoginConfig)
 	mux.HandleFunc("POST /api/v1/session", s.handleLogin)
 	mux.Handle("GET /api/v1/session", s.adminAuth(http.HandlerFunc(s.handleSession)))
 	mux.Handle("GET /api/v1/dashboard", s.adminAuth(http.HandlerFunc(s.handleDashboard)))
@@ -165,8 +176,9 @@ func (s *Server) routes() http.Handler {
 	mux.Handle("PUT /api/v1/acme-accounts/{id}", s.adminAuth(http.HandlerFunc(s.handleUpdateACMEAccount)))
 	mux.Handle("PUT /api/v1/settings/admin-password", s.adminAuth(http.HandlerFunc(s.handleChangeAdminPassword)))
 	mux.Handle("GET /api/v1/audit", s.adminAuth(http.HandlerFunc(s.handleAudit)))
+	mux.Handle("POST /api/v1/jobs/{id}/retry", s.adminAuth(http.HandlerFunc(s.handleRetryJob)))
 	mux.Handle("/", s.frontendHandler())
-	return s.securityHeaders(s.requestLog(mux))
+	return s.securityHeaders(s.requestLog(s.panelAccess(mux)))
 }
 
 func (s *Server) adminAuth(next http.Handler) http.Handler {
@@ -249,7 +261,7 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; frame-ancestors 'none'; base-uri 'self'; form-action 'self'")
 		next.ServeHTTP(w, r)
 	})
 }
@@ -308,9 +320,18 @@ func (s *Server) handleSession(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	var request struct {
-		Password string `json:"password"`
+		Password       string `json:"password"`
+		TurnstileToken string `json:"turnstile_token"`
 	}
 	if !decodeJSON(w, r, &request) {
+		return
+	}
+	if err := s.verifyTurnstile(r.Context(), s.store.Snapshot(), request.TurnstileToken, s.clientIP(r)); err != nil {
+		if errors.Is(err, errTurnstileUnavailable) {
+			writeError(w, http.StatusServiceUnavailable, "安全验证暂时不可用", "turnstile_unavailable", nil)
+		} else {
+			writeError(w, http.StatusForbidden, "请完成安全验证", "turnstile_failed", nil)
+		}
 		return
 	}
 	if len(request.Password) > 256 || !s.verifyAdminCredential(request.Password) {
