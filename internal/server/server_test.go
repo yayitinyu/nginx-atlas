@@ -69,7 +69,7 @@ func TestEnrollmentExchangesOneTimeTokenWithoutPersistingSecrets(t *testing.T) {
 		t.Fatalf("one-time token reuse returned %d", reuseRecorder.Code)
 	}
 
-	pollRecorder := performJSON(t, controller.Handler(), http.MethodPost, "/api/v1/agent/poll", protocol.PollRequest{Report: protocol.NodeReport{Hostname: "tokyo", OS: "linux", Arch: "amd64", NginxHealthy: true}}, "AtlasNode "+credentials.NodeID+"."+credentials.NodeSecret)
+	pollRecorder := performJSON(t, controller.Handler(), http.MethodPost, "/api/v1/agent/poll", protocol.PollRequest{Report: &protocol.NodeReport{Hostname: "tokyo", OS: "linux", Arch: "amd64", NginxHealthy: true}}, "AtlasNode "+credentials.NodeID+"."+credentials.NodeSecret)
 	if pollRecorder.Code != http.StatusOK {
 		t.Fatalf("poll returned %d: %s", pollRecorder.Code, pollRecorder.Body.String())
 	}
@@ -127,7 +127,7 @@ func TestEnrollmentUsesReportedHostnameWhenNameIsOmitted(t *testing.T) {
 	}
 }
 
-func TestNodePollSettingControlsAgentResponses(t *testing.T) {
+func TestNodePollSettingSeparatesTaskAndReportIntervals(t *testing.T) {
 	stateStore, err := store.Open(filepath.Join(t.TempDir(), "state.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -167,20 +167,174 @@ func TestNodePollSettingControlsAgentResponses(t *testing.T) {
 	}
 	var credentials protocol.EnrollResponse
 	decodeRecorder(t, enrolled, &credentials)
-	if credentials.PollAfter != 60 {
-		t.Fatalf("enroll poll interval = %d, want 60", credentials.PollAfter)
+	if credentials.PollAfter != 10 {
+		t.Fatalf("enroll task poll interval = %d, want 10", credentials.PollAfter)
 	}
 
 	polled := performJSON(t, controller.Handler(), http.MethodPost, "/api/v1/agent/poll", protocol.PollRequest{
-		Report: protocol.NodeReport{Hostname: "edge-poll-01", OS: "linux", Arch: "amd64"},
+		Report: &protocol.NodeReport{Hostname: "edge-poll-01", OS: "linux", Arch: "amd64"},
 	}, "AtlasNode "+credentials.NodeID+"."+credentials.NodeSecret)
 	if polled.Code != http.StatusOK {
 		t.Fatalf("poll returned %d: %s", polled.Code, polled.Body.String())
 	}
 	var response protocol.PollResponse
 	decodeRecorder(t, polled, &response)
-	if response.PollAfter != 60 {
-		t.Fatalf("poll interval = %d, want 60", response.PollAfter)
+	if response.PollAfter != 10 || response.ReportAfter != 60 {
+		t.Fatalf("poll intervals = task %d report %d, want 10 and 60", response.PollAfter, response.ReportAfter)
+	}
+}
+
+func TestAgentPollRedispatchesUnacknowledgedRunningJob(t *testing.T) {
+	stateStore, err := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	box, err := securebox.New(bytes.Repeat([]byte{0x36}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminToken := strings.Repeat("q", 32)
+	controller, err := New(Config{AdminToken: adminToken}, stateStore, box, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	created := performJSON(t, controller.Handler(), http.MethodPost, "/api/v1/enrollments", map[string]any{"ttl_minutes": 30}, "Bearer "+adminToken)
+	var enrollment struct {
+		Token string `json:"token"`
+	}
+	decodeRecorder(t, created, &enrollment)
+	enrolled := performJSON(t, controller.Handler(), http.MethodPost, "/api/v1/agent/enroll", protocol.EnrollRequest{
+		Token: enrollment.Token, Report: protocol.NodeReport{Hostname: "redispatch-node", OS: "linux", Arch: "amd64"},
+	}, "")
+	var credentials protocol.EnrollResponse
+	decodeRecorder(t, enrolled, &credentials)
+	var queued model.Job
+	if err := stateStore.Update(func(state *model.State) error {
+		var enqueueErr error
+		queued, enqueueErr = enqueueJob(state, credentials.NodeID, "", protocol.JobReloadNginx, struct{}{})
+		return enqueueErr
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	first := performJSON(t, controller.Handler(), http.MethodPost, "/api/v1/agent/poll", protocol.PollRequest{}, "AtlasNode "+credentials.NodeID+"."+credentials.NodeSecret)
+	var firstResponse protocol.PollResponse
+	decodeRecorder(t, first, &firstResponse)
+	if firstResponse.Job == nil || firstResponse.Job.ID != queued.ID {
+		t.Fatalf("first poll did not dispatch queued job: %+v", firstResponse.Job)
+	}
+	firstStartedAt := stateStore.Snapshot().Jobs[queued.ID].StartedAt
+	second := performJSON(t, controller.Handler(), http.MethodPost, "/api/v1/agent/poll", protocol.PollRequest{}, "AtlasNode "+credentials.NodeID+"."+credentials.NodeSecret)
+	var secondResponse protocol.PollResponse
+	decodeRecorder(t, second, &secondResponse)
+	if secondResponse.Job == nil || secondResponse.Job.ID != queued.ID {
+		t.Fatalf("unacknowledged job was not redispatched: %+v", secondResponse.Job)
+	}
+	snapshot := stateStore.Snapshot()
+	if snapshot.Jobs[queued.ID].Attempts != 2 || snapshot.Nodes[credentials.NodeID].RunningJobID != queued.ID {
+		t.Fatalf("redispatch state is inconsistent: job=%+v node=%+v", snapshot.Jobs[queued.ID], snapshot.Nodes[credentials.NodeID])
+	}
+	if firstStartedAt == nil || snapshot.Jobs[queued.ID].StartedAt == nil || !snapshot.Jobs[queued.ID].StartedAt.Equal(*firstStartedAt) {
+		t.Fatalf("redispatch reset the running timeout: first=%v second=%v", firstStartedAt, snapshot.Jobs[queued.ID].StartedAt)
+	}
+	if snapshot.Nodes[credentials.NodeID].Hostname != "redispatch-node" {
+		t.Fatalf("heartbeat without report erased inventory: %+v", snapshot.Nodes[credentials.NodeID])
+	}
+}
+
+func TestClearPendingJobsRemovesQueuedAndFailedButKeepsRunning(t *testing.T) {
+	stateStore, err := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	box, err := securebox.New(bytes.Repeat([]byte{0x37}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminToken := strings.Repeat("c", 32)
+	controller, err := New(Config{AdminToken: adminToken}, stateStore, box, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if err := stateStore.Update(func(state *model.State) error {
+		state.Nodes["node_clear"] = model.Node{ID: "node_clear", Name: "Clear", Status: model.NodeOnline, RunningJobID: "job_running", LastSeenAt: &now, CreatedAt: now}
+		state.Domains["dom_clear"] = model.Domain{ID: "dom_clear", Name: "clear.example.com", NodeID: "node_clear", LastJobID: "job_queued", LastError: "old", Deleting: true, CreatedAt: now, UpdatedAt: now}
+		state.Jobs["job_queued"] = model.Job{ID: "job_queued", NodeID: "node_clear", DomainID: "dom_clear", Type: protocol.JobDeleteDomain, Status: model.JobQueued, MaxAttempts: 3, CreatedAt: now}
+		state.Jobs["job_failed"] = model.Job{ID: "job_failed", NodeID: "node_clear", Type: protocol.JobReloadNginx, Status: model.JobFailed, MaxAttempts: 3, CreatedAt: now, FinishedAt: &now}
+		state.Jobs["job_running"] = model.Job{ID: "job_running", NodeID: "node_clear", Type: protocol.JobReloadNginx, Status: model.JobRunning, MaxAttempts: 3, CreatedAt: now, StartedAt: &now}
+		state.Jobs["job_succeeded"] = model.Job{ID: "job_succeeded", NodeID: "node_clear", Type: protocol.JobReloadNginx, Status: model.JobSucceeded, MaxAttempts: 3, CreatedAt: now, FinishedAt: &now}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	cleared := performJSON(t, controller.Handler(), http.MethodDelete, "/api/v1/jobs", nil, "Bearer "+adminToken)
+	if cleared.Code != http.StatusOK {
+		t.Fatalf("clear jobs returned %d: %s", cleared.Code, cleared.Body.String())
+	}
+	var result map[string]int
+	decodeRecorder(t, cleared, &result)
+	if result["cleared"] != 2 {
+		t.Fatalf("cleared = %d, want 2", result["cleared"])
+	}
+	snapshot := stateStore.Snapshot()
+	if _, ok := snapshot.Jobs["job_queued"]; ok {
+		t.Fatal("queued job was not cleared")
+	}
+	if _, ok := snapshot.Jobs["job_failed"]; ok {
+		t.Fatal("failed job was not cleared")
+	}
+	if _, ok := snapshot.Jobs["job_running"]; !ok {
+		t.Fatal("running job was cleared")
+	}
+	if _, ok := snapshot.Jobs["job_succeeded"]; !ok {
+		t.Fatal("succeeded history was cleared")
+	}
+	domain := snapshot.Domains["dom_clear"]
+	if domain.Deleting || !domain.Enabled || domain.LastJobID != "" || domain.LastError != "" {
+		t.Fatalf("cleared deletion did not restore domain: %+v", domain)
+	}
+}
+
+func TestMaintenanceFailsAbandonedQueueWithoutInterruptingBusyNode(t *testing.T) {
+	stateStore, err := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	box, err := securebox.New(bytes.Repeat([]byte{0x39}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller, err := New(Config{AdminToken: strings.Repeat("m", 32)}, stateStore, box, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	old := now.Add(-queuedJobTimeout - time.Minute)
+	if err := stateStore.Update(func(state *model.State) error {
+		state.Nodes["node_stale"] = model.Node{ID: "node_stale", Status: model.NodeOnline, LastSeenAt: &now, CreatedAt: now}
+		state.Nodes["node_busy"] = model.Node{ID: "node_busy", Status: model.NodeOnline, RunningJobID: "job_busy", LastSeenAt: &now, CreatedAt: now}
+		state.Jobs["job_stale"] = model.Job{ID: "job_stale", NodeID: "node_stale", Type: protocol.JobReloadNginx, Status: model.JobQueued, MaxAttempts: 3, CreatedAt: old}
+		state.Jobs["job_recent_retry"] = model.Job{ID: "job_recent_retry", NodeID: "node_stale", Type: protocol.JobReloadNginx, Status: model.JobQueued, MaxAttempts: 3, CreatedAt: old, QueuedAt: &now}
+		state.Jobs["job_waiting"] = model.Job{ID: "job_waiting", NodeID: "node_busy", Type: protocol.JobReloadNginx, Status: model.JobQueued, MaxAttempts: 3, CreatedAt: old}
+		state.Jobs["job_busy"] = model.Job{ID: "job_busy", NodeID: "node_busy", Type: protocol.JobUpdateSystem, Status: model.JobRunning, Attempts: 1, MaxAttempts: 3, CreatedAt: old, StartedAt: &now}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	controller.runMaintenance()
+	snapshot := stateStore.Snapshot()
+	if snapshot.Jobs["job_stale"].Status != model.JobFailed {
+		t.Fatalf("abandoned queued job status = %s", snapshot.Jobs["job_stale"].Status)
+	}
+	if snapshot.Jobs["job_waiting"].Status != model.JobQueued {
+		t.Fatalf("busy node's queued job status = %s", snapshot.Jobs["job_waiting"].Status)
+	}
+	if snapshot.Jobs["job_recent_retry"].Status != model.JobQueued {
+		t.Fatalf("recently requeued job status = %s", snapshot.Jobs["job_recent_retry"].Status)
 	}
 }
 
@@ -566,6 +720,18 @@ func TestCertificateRenewalRejectsRevokedIssuerNode(t *testing.T) {
 	controller.runMaintenance()
 	if jobs := stateStore.Snapshot().Jobs; len(jobs) != 0 {
 		t.Fatalf("revoked issuer node received renewal jobs: %+v", jobs)
+	}
+	if err := stateStore.Update(func(state *model.State) error {
+		node := state.Nodes["node_revoked"]
+		node.Status = model.NodeOffline
+		state.Nodes[node.ID] = node
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	controller.runMaintenance()
+	if jobs := stateStore.Snapshot().Jobs; len(jobs) != 0 {
+		t.Fatalf("offline issuer node received renewal jobs: %+v", jobs)
 	}
 }
 
@@ -1107,6 +1273,13 @@ func TestUpdateDomainAcceptsEditorPayloadAndPersistsNginxSettings(t *testing.T) 
 	updated := performJSON(t, controller.Handler(), http.MethodPut, "/api/v1/domains/dom_api", request, "Bearer "+adminToken)
 	if updated.Code != http.StatusOK {
 		t.Fatalf("update domain returned %d: %s", updated.Code, updated.Body.String())
+	}
+	var updateView map[string]any
+	decodeRecorder(t, updated, &updateView)
+	for _, field := range []string{"cloudflare_enabled", "cloudflare_proxied", "nginx_gzip"} {
+		if _, ok := updateView[field]; !ok {
+			t.Fatalf("domain editor response omitted false setting %q: %s", field, updated.Body.String())
+		}
 	}
 	domain := stateStore.Snapshot().Domains["dom_api"]
 	if domain.UpstreamHost != "127.0.0.2" || domain.UpstreamPort != 9090 || !domain.NginxWebsocket || !domain.NginxHTTP2 || domain.NginxGzip {

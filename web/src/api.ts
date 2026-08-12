@@ -139,6 +139,7 @@ export const api = {
   retryJob: (id: string) => request<JobRecord>(`/api/v1/jobs/${encodeURIComponent(id)}/retry`, {
     method: 'POST', body: '{}',
   }),
+  clearPendingJobs: () => request<{ cleared: number }>('/api/v1/jobs', { method: 'DELETE' }),
   createDNSAccount: (input: { name: string; provider: string; credentials: Record<string, string>; keep_credentials?: boolean }) =>
     request<DNSAccount>('/api/v1/dns-accounts', { method: 'POST', body: JSON.stringify(input) }),
   updateDNSAccount: (id: string, input: { name: string; provider: string; credentials: Record<string, string>; keep_credentials: boolean }) =>

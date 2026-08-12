@@ -24,12 +24,24 @@ interface Props {
 
 type CertificateChoice = 'existing' | 'acme'
 const currentNodeCertificate = '__current_node_certificate__'
+const manualDomainEntry = '__manual_domain__'
+
+interface CertificateDomainBase {
+  value: string
+  coversRoot: boolean
+  coversSubdomain: boolean
+}
 
 export function DomainDrawer({ open, nodes, certificates, dnsAccounts, acmeAccounts, busy, editingDomain, onClose, onSubmit, onUpdate }: Props) {
   const { t } = usePreferences()
   const availableNodes = useMemo(() => nodes.filter((node) => node.status !== 'revoked'), [nodes])
   const cloudflareAccounts = useMemo(() => dnsAccounts.filter((account) => account.provider.toLowerCase() === 'cloudflare'), [dnsAccounts])
+  const certificateDomainBases = useMemo(() => collectCertificateDomainBases(certificates), [certificates])
+  const draftKey = editingDomain ? `edit:${editingDomain.id}` : 'create'
+  const [initializedFor, setInitializedFor] = useState('')
   const [domain, setDomain] = useState('')
+  const [domainBase, setDomainBase] = useState(manualDomainEntry)
+  const [domainLabel, setDomainLabel] = useState('')
   const [nodeID, setNodeID] = useState('')
   const [upstreamHost, setUpstreamHost] = useState('127.0.0.1')
   const [port, setPort] = useState('')
@@ -48,9 +60,14 @@ export function DomainDrawer({ open, nodes, certificates, dnsAccounts, acmeAccou
   const [error, setError] = useState('')
 
   useEffect(() => {
-    if (!open) return
+    if (!open) {
+      setInitializedFor('')
+      return
+    }
     if (editingDomain) {
       setDomain(editingDomain.name)
+      setDomainBase(manualDomainEntry)
+      setDomainLabel('')
       setNodeID(editingDomain.node_id)
       setUpstreamHost(editingDomain.upstream_host || '127.0.0.1')
       setPort(editingDomain.upstream_port ? String(editingDomain.upstream_port) : '')
@@ -59,15 +76,17 @@ export function DomainDrawer({ open, nodes, certificates, dnsAccounts, acmeAccou
       setDNSAccountID(editingDomain.dns_account_id ?? (dnsAccounts[0]?.id ?? ''))
       setACMEAccountID(editingDomain.acme_account_id ?? (acmeAccounts[0]?.id ?? ''))
       setAutoRenew(editingDomain.auto_renew ?? true)
-      setCloudflareEnabled(editingDomain.cloudflare_enabled ?? false)
+      setCloudflareEnabled(editingDomain.cloudflare_enabled)
       setCloudflareAccountID(editingDomain.cloudflare_dns_account_id ?? (cloudflareAccounts[0]?.id ?? ''))
-      setCloudflareProxied(editingDomain.cloudflare_proxied ?? true)
+      setCloudflareProxied(editingDomain.cloudflare_proxied)
       setRecordContent(editingDomain.cloudflare_record_content ?? '')
-      setNginxWebsocket(editingDomain.nginx_websocket ?? false)
-      setNginxHttp2(editingDomain.nginx_http2 ?? true)
-      setNginxGzip(editingDomain.nginx_gzip ?? true)
+      setNginxWebsocket(editingDomain.nginx_websocket)
+      setNginxHttp2(editingDomain.nginx_http2)
+      setNginxGzip(editingDomain.nginx_gzip)
     } else {
       const firstNode = availableNodes[0]
+      setDomainBase(manualDomainEntry)
+      setDomainLabel('')
       setDomain('')
       setNodeID(firstNode?.id ?? '')
       setUpstreamHost('127.0.0.1')
@@ -86,27 +105,32 @@ export function DomainDrawer({ open, nodes, certificates, dnsAccounts, acmeAccou
       setNginxGzip(true)
     }
     setError('')
-  }, [open, editingDomain])
+    setInitializedFor(draftKey)
+  }, [open, draftKey])
 
   useEffect(() => {
-    if (!open) return
+    if (!open || initializedFor !== draftKey) return
     if (!availableNodes.some((node) => node.id === nodeID)) {
-      const firstNode = availableNodes[0]
-      setNodeID(firstNode?.id ?? '')
-      setRecordContent(preferredAddress(firstNode))
+      const preferredNode = availableNodes.find((node) => node.id === editingDomain?.node_id) ?? availableNodes[0]
+      setNodeID(preferredNode?.id ?? '')
+      if (!editingDomain) setRecordContent(preferredAddress(preferredNode))
     }
     if (!dnsAccounts.some((account) => account.id === dnsAccountID)) {
-      setDNSAccountID(dnsAccounts[0]?.id ?? '')
+      const preferredDNS = dnsAccounts.find((account) => account.id === editingDomain?.dns_account_id) ?? dnsAccounts[0]
+      setDNSAccountID(preferredDNS?.id ?? '')
     }
     if (!acmeAccounts.some((account) => account.id === acmeAccountID)) {
-      setACMEAccountID(acmeAccounts[0]?.id ?? '')
+      const preferredACME = acmeAccounts.find((account) => account.id === editingDomain?.acme_account_id) ?? acmeAccounts[0]
+      setACMEAccountID(preferredACME?.id ?? '')
     }
     if (!cloudflareAccounts.some((account) => account.id === cloudflareAccountID)) {
-      setCloudflareAccountID(cloudflareAccounts[0]?.id ?? '')
+      const preferredCloudflare = cloudflareAccounts.find((account) => account.id === editingDomain?.cloudflare_dns_account_id) ?? cloudflareAccounts[0]
+      setCloudflareAccountID(preferredCloudflare?.id ?? '')
     }
-  }, [open, availableNodes, nodeID, dnsAccounts, dnsAccountID, acmeAccounts, acmeAccountID, cloudflareAccounts, cloudflareAccountID])
+  }, [open, initializedFor, draftKey, editingDomain, availableNodes, nodeID, dnsAccounts, dnsAccountID, acmeAccounts, acmeAccountID, cloudflareAccounts, cloudflareAccountID])
 
   const normalizedDomain = domain.trim().toLowerCase()
+  const usesCertificateDomain = !editingDomain && Boolean(domainBase) && domainBase !== manualDomainEntry
   const eligibleCertificates = useMemo(() => certificates.filter((certificate) =>
     normalizedDomain && (certificate.domain === normalizedDomain || certificate.dns_names.some((name) => coversDomain(name, normalizedDomain))),
   ), [certificates, normalizedDomain])
@@ -130,14 +154,34 @@ export function DomainDrawer({ open, nodes, certificates, dnsAccounts, acmeAccou
   ]
 
   useEffect(() => {
-    if (choice !== 'existing') return
+    if (!open || initializedFor !== draftKey || choice !== 'existing') return
     const currentLocal = certificateID === currentNodeCertificate && editingDomain?.certificate_mode === 'local' && editingDomain.node_id === nodeID
     if (certificateID && !currentLocal && !eligibleCertificates.some((certificate) => certificate.id === certificateID)) {
       setCertificateID(eligibleCertificates[0]?.id ?? '')
-    } else if (!certificateID && eligibleCertificates.length > 0) {
-      setCertificateID(eligibleCertificates[0]?.id ?? '')
+    } else if (!certificateID) {
+      const preferredCertificate = eligibleCertificates.find((certificate) => certificate.id === editingDomain?.certificate_id)
+      const preferredLocal = editingDomain?.certificate_mode === 'local' && editingDomain.node_id === nodeID
+      setCertificateID(preferredLocal ? currentNodeCertificate : (preferredCertificate?.id ?? eligibleCertificates[0]?.id ?? ''))
     }
-  }, [choice, certificateID, eligibleCertificates, editingDomain, nodeID])
+  }, [open, initializedFor, draftKey, choice, certificateID, eligibleCertificates, editingDomain, nodeID])
+
+  function selectDomainBase(value: string) {
+    setDomainBase(value)
+    if (value === manualDomainEntry) {
+      setDomainLabel('')
+      setDomain('')
+      return
+    }
+    const option = certificateDomainBases.find((item) => item.value === value)
+    const nextLabel = option ? suggestedDomainLabel(option) : '@'
+    setDomainLabel(nextLabel)
+    setDomain(composeDomain(nextLabel, value))
+  }
+
+  function updateDomainLabel(value: string) {
+    setDomainLabel(value)
+    setDomain(composeDomain(value, domainBase))
+  }
 
   function selectNode(value: string) {
     setNodeID(value)
@@ -201,7 +245,8 @@ export function DomainDrawer({ open, nodes, certificates, dnsAccounts, acmeAccou
         <div className="drawer-body">
           <section className="form-section">
             <div className="form-section-heading"><span>01</span><div><strong>{t('domain.stepRoute')}</strong><small>{t('domain.routeHint')}</small></div></div>
-            <div className="form-row"><label htmlFor="domain-name">{t('certificate.domain')}</label><div className="field-control"><Icon name="globe" size={18} /><input id="domain-name" value={domain} disabled={Boolean(editingDomain)} onChange={(event) => setDomain(event.target.value)} placeholder="api.example.com" autoComplete="off" /><span className="field-state">{normalizedDomain.includes('.') && <Icon name="check" size={18} />}</span></div></div>
+            {!editingDomain && certificateDomainBases.length > 0 && <div className="form-row"><label>{t('domain.certificateDomain')}</label><SelectField ariaLabel={t('domain.certificateDomain')} value={domainBase} onChange={selectDomainBase} placeholder={t('common.select')} icon="shield" options={[...certificateDomainBases.map((option) => ({ value: option.value, label: option.value })), { value: manualDomainEntry, label: t('domain.fullDomain') }]} /></div>}
+            <div className="form-row"><label htmlFor="domain-name">{usesCertificateDomain ? t('domain.hostLabel') : t('certificate.domain')}</label><div className={`field-control ${usesCertificateDomain ? 'composed-domain-field' : ''}`}><Icon name="globe" size={18} /><input id="domain-name" value={usesCertificateDomain ? domainLabel : domain} disabled={Boolean(editingDomain)} onChange={(event) => usesCertificateDomain ? updateDomainLabel(event.target.value) : setDomain(event.target.value)} placeholder={usesCertificateDomain ? '@ / www' : 'api.example.com'} autoComplete="off" />{usesCertificateDomain && <span className="domain-base-chip">{domainBase}</span>}<span className="field-state">{normalizedDomain.includes('.') && <Icon name="check" size={18} />}</span></div></div>
             <div className="form-row"><label>{t('domain.targetNode')}</label><SelectField ariaLabel={t('domain.targetNode')} value={nodeID} onChange={selectNode} placeholder={t('common.select')} icon="server" options={availableNodes.map((node) => ({ value: node.id, label: node.name, description: node.os_name || (node.status === 'online' ? t('common.online') : t('common.offline')) }))} /></div>
             <div className="form-row form-row-split"><label htmlFor="upstream-host">{t('domain.upstreamHost')}</label><div className="split-fields"><div className="field-control"><input id="upstream-host" value={upstreamHost} onChange={(event) => setUpstreamHost(event.target.value)} placeholder="127.0.0.1" /></div><div className="port-field"><span>{t('domain.projectPort')}</span><div className="field-control"><input aria-label={t('domain.projectPort')} inputMode="numeric" value={port} onChange={(event) => setPort(event.target.value.replace(/\D/g, '').slice(0, 5))} placeholder="8080" /></div></div></div></div>
           </section>
@@ -253,6 +298,35 @@ function coversDomain(name: string, domain: string): boolean {
   if (!normalized.startsWith('*.')) return false
   const suffix = normalized.slice(1)
   return domain.endsWith(suffix) && domain.slice(0, -suffix.length).indexOf('.') === -1
+}
+
+function collectCertificateDomainBases(certificates: CertificateRecord[]): CertificateDomainBase[] {
+  const bases = new Map<string, CertificateDomainBase>()
+  for (const certificate of certificates) {
+    for (const rawName of new Set([certificate.domain, ...certificate.dns_names])) {
+      const normalized = rawName.trim().toLowerCase().replace(/\.$/, '')
+      if (!normalized || normalized.includes(' ') || !normalized.includes('.')) continue
+      const wildcard = normalized.startsWith('*.')
+      const value = wildcard ? normalized.slice(2) : normalized
+      const current = bases.get(value) ?? { value, coversRoot: false, coversSubdomain: false }
+      if (wildcard) current.coversSubdomain = true
+      else current.coversRoot = true
+      bases.set(value, current)
+    }
+  }
+  return [...bases.values()].sort((left, right) => left.value.localeCompare(right.value))
+}
+
+function suggestedDomainLabel(option: CertificateDomainBase): string {
+  return option.coversRoot ? '@' : option.coversSubdomain ? 'www' : '@'
+}
+
+function composeDomain(label: string, base: string): string {
+  const normalizedBase = base.trim().toLowerCase().replace(/^\.+|\.+$/g, '')
+  const normalizedLabel = label.trim().toLowerCase().replace(/^\.+|\.+$/g, '')
+  if (!normalizedBase || normalizedBase === manualDomainEntry) return normalizedLabel
+  if (!normalizedLabel || normalizedLabel === '@') return normalizedBase
+  return `${normalizedLabel}.${normalizedBase}`
 }
 
 function preferredAddress(node?: NodeRecord): string {

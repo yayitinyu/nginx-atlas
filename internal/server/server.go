@@ -176,6 +176,7 @@ func (s *Server) routes() http.Handler {
 	mux.Handle("PUT /api/v1/acme-accounts/{id}", s.adminAuth(http.HandlerFunc(s.handleUpdateACMEAccount)))
 	mux.Handle("PUT /api/v1/settings/admin-password", s.adminAuth(http.HandlerFunc(s.handleChangeAdminPassword)))
 	mux.Handle("GET /api/v1/audit", s.adminAuth(http.HandlerFunc(s.handleAudit)))
+	mux.Handle("DELETE /api/v1/jobs", s.adminAuth(http.HandlerFunc(s.handleClearPendingJobs)))
 	mux.Handle("POST /api/v1/jobs/{id}/retry", s.adminAuth(http.HandlerFunc(s.handleRetryJob)))
 	mux.Handle("/", s.frontendHandler())
 	return s.securityHeaders(s.requestLog(s.panelAccess(mux)))

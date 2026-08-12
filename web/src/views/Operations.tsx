@@ -15,6 +15,7 @@ export function DomainsPage({ domains, nodes, onAdd, onEdit, onDelete }: {
 }) {
   const { t } = usePreferences()
   const [query, setQuery] = useState('')
+  const [copiedDomain, setCopiedDomain] = useState('')
   const normalized = query.trim().toLowerCase()
   const filtered = useMemo(() => domains.filter((domain) =>
     !normalized
@@ -22,6 +23,16 @@ export function DomainsPage({ domains, nodes, onAdd, onEdit, onDelete }: {
     || domain.node_name.toLowerCase().includes(normalized)
     || `${domain.upstream_host}:${domain.upstream_port}`.includes(normalized),
   ), [domains, normalized])
+
+  async function copyDomain(value: string) {
+    try {
+      await navigator.clipboard.writeText(value)
+      setCopiedDomain(value)
+      window.setTimeout(() => setCopiedDomain((current) => current === value ? '' : current), 1800)
+    } catch {
+      setCopiedDomain('')
+    }
+  }
 
   return (
     <div className="content-page page-enter">
@@ -44,6 +55,7 @@ export function DomainsPage({ domains, nodes, onAdd, onEdit, onDelete }: {
             onOpen={onEdit}
             showActions={(domain) => (
               <div className="domain-row-actions">
+                <IconButton name={copiedDomain === domain.name ? 'check' : 'copy'} label={`${t(copiedDomain === domain.name ? 'dialog.copied' : 'domain.copy')} ${domain.name}`} onClick={() => void copyDomain(domain.name)} />
                 <IconButton name="edit" label={`${t('common.edit')} ${domain.name}`} onClick={() => onEdit(domain)} />
                 <IconButton name="trash" label={`${t('common.delete')} ${domain.name}`} onClick={() => onDelete(domain)} />
               </div>
@@ -280,12 +292,13 @@ export function AuditPage({ events, domains, nodes }: { events: AuditEvent[]; do
   )
 }
 
-export function PendingPage({ jobs, nodes, domains, busy, onRetry }: {
+export function PendingPage({ jobs, nodes, domains, busy, onRetry, onClear }: {
   jobs: JobRecord[]
   nodes: NodeRecord[]
   domains: DomainRecord[]
   busy: string
   onRetry: (job: JobRecord) => void
+  onClear: () => void
 }) {
   const { t, locale } = usePreferences()
   const nodeNames = Object.fromEntries(nodes.map((node) => [node.id, node.name]))
@@ -293,10 +306,11 @@ export function PendingPage({ jobs, nodes, domains, busy, onRetry }: {
   const items = jobs
     .filter((job) => job.status === 'queued' || job.status === 'running' || (job.status === 'failed' && !job.retry_job_id))
     .sort((left, right) => new Date(right.created_at).getTime() - new Date(left.created_at).getTime())
+  const clearable = items.some((job) => job.status === 'queued' || job.status === 'failed')
 
   return (
     <div className="content-page page-enter">
-      <PageHeader title={t('pending.title')} description={t('pending.description')} />
+      <PageHeader title={t('pending.title')} description={t('pending.description')} action={clearable && <button type="button" className="pending-clear-button" disabled={busy === 'clear-jobs'} onClick={onClear}><Icon name="trash" size={16} />{t('pending.clear')}</button>} />
       <Bezel className="operation-panel pending-panel">
         {items.length === 0 ? (
           <EmptyState icon="check" title={t('pending.empty')} description="" />
@@ -380,10 +394,14 @@ export function SettingsPage({
         </Bezel>
         <Bezel className="settings-card settings-access-card">
           <SectionHeading title={t('settings.accessProtection')} />
-          <div className="settings-compact-list">
-            <button type="button" onClick={onAccess}><span className="settings-icon"><Icon name="shield" size={20} /></span><span><strong>Cloudflare Turnstile</strong><small>{t(settings.turnstile_enabled ? 'settings.enabled' : 'settings.disabled')}</small></span><Icon name="chevron" size={16} /></button>
-            <button type="button" onClick={onAccess}><span className="settings-icon"><Icon name="lock" size={20} /></span><span><strong>{t('settings.ipAllowlist')}</strong><small>{settings.panel_allowed_cidrs.length ? t('settings.ruleCount', { count: settings.panel_allowed_cidrs.length }) : t('settings.disabled')}</small></span><Icon name="chevron" size={16} /></button>
-          </div>
+          <button type="button" className="access-protection-button" aria-label={t('settings.accessProtection')} onClick={onAccess}>
+            <span className="access-protection-icon"><Icon name="shield" size={21} /></span>
+            <span className="access-protection-copy">
+              <span><i className={settings.turnstile_enabled ? 'access-active' : ''} aria-hidden="true" />Turnstile</span>
+              <span><i className={settings.panel_allowed_cidrs.length ? 'access-active' : ''} aria-hidden="true" />{t('settings.ipShort')}</span>
+            </span>
+            <Icon name="chevron" size={17} />
+          </button>
         </Bezel>
       </div>
       <div className="settings-list">

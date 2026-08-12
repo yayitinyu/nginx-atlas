@@ -81,7 +81,7 @@ func (s *Server) handleAgentEnroll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, protocol.EnrollResponse{
-		NodeID: node.ID, NodeSecret: secret, PollAfter: int(s.nodePollAfter(s.store.Snapshot()).Seconds()),
+		NodeID: node.ID, NodeSecret: secret, PollAfter: int(s.config.PollAfter.Seconds()),
 	})
 }
 
@@ -98,17 +98,51 @@ func (s *Server) handleAgentPoll(w http.ResponseWriter, r *http.Request) {
 		if !ok || node.Status == model.NodeRevoked {
 			return errNotFound
 		}
+		wasOnline := node.Status == model.NodeOnline
 		node.Status = model.NodeOnline
 		node.LastSeenAt = &now
-		applyNodeReport(&node, request.Report)
-		appendNodeStatusSample(&node, model.NodeOnline, now)
+		if request.Report != nil {
+			applyNodeReport(&node, *request.Report)
+			appendNodeStatusSample(&node, model.NodeOnline, now)
+		} else if !wasOnline {
+			appendNodeStatusSample(&node, model.NodeOnline, now)
+		}
 
 		if node.RunningJobID != "" {
 			if job, ok := state.Jobs[node.RunningJobID]; ok && job.Status == model.JobRunning {
+				if job.Attempts < job.MaxAttempts {
+					job.Attempts++
+				}
+				if job.StartedAt == nil {
+					job.StartedAt = &now
+				}
+				state.Jobs[job.ID] = job
+				selected = &job
 				state.Nodes[nodeID] = node
 				return nil
 			}
 			node.RunningJobID = ""
+		}
+		orphanedRunning := make([]model.Job, 0, 1)
+		for _, job := range state.Jobs {
+			if job.NodeID == nodeID && job.Status == model.JobRunning {
+				orphanedRunning = append(orphanedRunning, job)
+			}
+		}
+		sort.Slice(orphanedRunning, func(i, j int) bool { return orphanedRunning[i].CreatedAt.Before(orphanedRunning[j].CreatedAt) })
+		if len(orphanedRunning) > 0 {
+			job := orphanedRunning[0]
+			if job.Attempts < job.MaxAttempts {
+				job.Attempts++
+			}
+			if job.StartedAt == nil {
+				job.StartedAt = &now
+			}
+			state.Jobs[job.ID] = job
+			node.RunningJobID = job.ID
+			selected = &job
+			state.Nodes[nodeID] = node
+			return nil
 		}
 		queued := make([]model.Job, 0)
 		for _, job := range state.Jobs {
@@ -133,9 +167,12 @@ func (s *Server) handleAgentPoll(w http.ResponseWriter, r *http.Request) {
 		wrapStoreError(w, err)
 		return
 	}
-	response := protocol.PollResponse{PollAfter: int(s.nodePollAfter(s.store.Snapshot()).Seconds()), ServerNow: now}
+	snapshot := s.store.Snapshot()
+	response := protocol.PollResponse{
+		PollAfter: int(s.config.PollAfter.Seconds()), ReportAfter: int(s.nodePollAfter(snapshot).Seconds()), ServerNow: now,
+	}
 	if selected != nil {
-		wireJob, err := s.buildWireJob(*selected, s.store.Snapshot())
+		wireJob, err := s.buildWireJob(*selected, snapshot)
 		if err != nil {
 			s.failDispatch(*selected, err)
 			writeError(w, http.StatusInternalServerError, "无法生成节点任务", "job_dispatch_error", nil)
@@ -189,6 +226,7 @@ func (s *Server) handleAgentJobResult(w http.ResponseWriter, r *http.Request) {
 			current.Error = truncate(request.Error, 2048)
 			if current.Attempts < current.MaxAttempts {
 				current.Status = model.JobQueued
+				current.QueuedAt = &now
 				current.StartedAt = nil
 				s.addAudit(state, "warning", "job.retry", "任务失败，已安排自动重试", nodeID, current.DomainID, current.ID)
 			} else {

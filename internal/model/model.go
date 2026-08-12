@@ -90,14 +90,14 @@ type Domain struct {
 	ObservedOnly            bool              `json:"observed_only,omitempty"`
 	TakenOver               bool              `json:"taken_over,omitempty"`
 	ConfigPath              string            `json:"config_path,omitempty"`
-	CloudflareEnabled       bool              `json:"cloudflare_enabled,omitempty"`
+	CloudflareEnabled       bool              `json:"cloudflare_enabled"`
 	CloudflareDNSAccountID  string            `json:"cloudflare_dns_account_id,omitempty"`
-	CloudflareProxied       bool              `json:"cloudflare_proxied,omitempty"`
+	CloudflareProxied       bool              `json:"cloudflare_proxied"`
 	CloudflareRecordType    string            `json:"cloudflare_record_type,omitempty"`
 	CloudflareRecordContent string            `json:"cloudflare_record_content,omitempty"`
-	NginxWebsocket          bool              `json:"nginx_websocket,omitempty"`
-	NginxHTTP2              bool              `json:"nginx_http2,omitempty"`
-	NginxGzip               bool              `json:"nginx_gzip,omitempty"`
+	NginxWebsocket          bool              `json:"nginx_websocket"`
+	NginxHTTP2              bool              `json:"nginx_http2"`
+	NginxGzip               bool              `json:"nginx_gzip"`
 	LastJobID               string            `json:"last_job_id,omitempty"`
 	LastError               string            `json:"last_error,omitempty"`
 	CreatedAt               time.Time         `json:"created_at"`
@@ -190,6 +190,7 @@ type Job struct {
 	MaxAttempts int             `json:"max_attempts"`
 	Error       string          `json:"error,omitempty"`
 	CreatedAt   time.Time       `json:"created_at"`
+	QueuedAt    *time.Time      `json:"queued_at,omitempty"`
 	StartedAt   *time.Time      `json:"started_at,omitempty"`
 	FinishedAt  *time.Time      `json:"finished_at,omitempty"`
 	RetryOfID   string          `json:"retry_of_id,omitempty"`

@@ -9,7 +9,10 @@ import (
 	"github.com/yayitinyu/nginx-atlas/internal/protocol"
 )
 
-const runningJobTimeout = 20 * time.Minute
+const (
+	runningJobTimeout = 20 * time.Minute
+	queuedJobTimeout  = 10 * time.Minute
+)
 
 func (s *Server) runScheduler(ctx context.Context) {
 	s.runMaintenance()
@@ -40,7 +43,30 @@ func (s *Server) runMaintenance() {
 				state.Nodes[id] = node
 			}
 		}
+		runningByNode := make(map[string]bool)
+		for _, job := range state.Jobs {
+			if job.Status == model.JobRunning {
+				runningByNode[job.NodeID] = true
+			}
+		}
 		for id, job := range state.Jobs {
+			if job.Status == model.JobQueued && now.Sub(jobQueueTime(job)) > queuedJobTimeout {
+				node, nodeExists := state.Nodes[job.NodeID]
+				if !nodeExists || node.Status == model.NodeRevoked || !runningByNode[job.NodeID] {
+					job.Status = model.JobFailed
+					job.Error = "node did not pick up the queued task before the timeout"
+					job.FinishedAt = &now
+					restoreFailedDomainDeletion(state, job, job.Error, now)
+					if domain, ok := state.Domains[job.DomainID]; ok {
+						domain.LastError = job.Error
+						domain.UpdatedAt = now
+						state.Domains[domain.ID] = domain
+					}
+					state.Jobs[id] = job
+					s.addAudit(state, "error", "job.queue.timeout", "节点未领取任务，排队已结束", job.NodeID, job.DomainID, job.ID)
+				}
+				continue
+			}
 			if job.Status != model.JobRunning || job.StartedAt == nil || now.Sub(*job.StartedAt) <= timeoutForJob(job.Type) {
 				continue
 			}
@@ -50,6 +76,7 @@ func (s *Server) runMaintenance() {
 			}
 			if job.Attempts < job.MaxAttempts {
 				job.Status = model.JobQueued
+				job.QueuedAt = &now
 				job.StartedAt = nil
 				job.Error = "agent did not report a result before the timeout"
 				s.addAudit(state, "warning", "job.timeout.retry", "节点任务超时，已重新排队", job.NodeID, job.DomainID, job.ID)
@@ -72,7 +99,7 @@ func (s *Server) runMaintenance() {
 				continue
 			}
 			node, nodeExists := state.Nodes[domain.NodeID]
-			if !nodeExists || node.Status == model.NodeRevoked {
+			if !nodeExists || node.Status != model.NodeOnline {
 				continue
 			}
 			if _, ok := state.ACMEAccounts[domain.ACMEAccountID]; !ok {
@@ -113,7 +140,7 @@ func (s *Server) runMaintenance() {
 				continue
 			}
 			node, ok := state.Nodes[certificate.IssuerNodeID]
-			if !ok || node.Status == model.NodeRevoked {
+			if !ok || node.Status != model.NodeOnline {
 				continue
 			}
 			if _, ok := state.ACMEAccounts[certificate.ACMEAccountID]; !ok {
@@ -144,6 +171,13 @@ func (s *Server) runMaintenance() {
 	if err != nil {
 		s.logger.Error("maintenance failed", "error", err)
 	}
+}
+
+func jobQueueTime(job model.Job) time.Time {
+	if job.QueuedAt != nil {
+		return *job.QueuedAt
+	}
+	return job.CreatedAt
 }
 
 func timeoutForJob(jobType string) time.Duration {

@@ -35,12 +35,13 @@ type ClientConfig struct {
 }
 
 type Client struct {
-	config   ClientConfig
-	executor *Executor
-	runner   CommandRunner
-	http     *http.Client
-	logger   *slog.Logger
-	state    clientState
+	config       ClientConfig
+	executor     *Executor
+	runner       CommandRunner
+	http         *http.Client
+	logger       *slog.Logger
+	state        clientState
+	nextReportAt time.Time
 }
 
 type clientState struct {
@@ -149,9 +150,24 @@ func (c *Client) enroll(ctx context.Context) error {
 
 func (c *Client) pollOnce(ctx context.Context) (time.Duration, error) {
 	var response protocol.PollResponse
-	request := protocol.PollRequest{Report: c.report(ctx)}
+	request := protocol.PollRequest{}
+	if c.nextReportAt.IsZero() || !time.Now().Before(c.nextReportAt) {
+		report := c.report(ctx)
+		request.Report = &report
+	}
 	if err := c.doJSON(ctx, http.MethodPost, "/api/v1/agent/poll", request, &response, true); err != nil {
 		return c.config.PollInterval, err
+	}
+	reportAfter := time.Duration(response.ReportAfter) * time.Second
+	if reportAfter < 3*time.Second || reportAfter > 5*time.Minute {
+		reportAfter = time.Duration(response.PollAfter) * time.Second
+	}
+	if reportAfter < 3*time.Second || reportAfter > 5*time.Minute {
+		reportAfter = c.config.PollInterval
+	}
+	nextReportAt := time.Now().Add(reportAfter)
+	if request.Report != nil || c.nextReportAt.IsZero() || nextReportAt.Before(c.nextReportAt) {
+		c.nextReportAt = nextReportAt
 	}
 	if response.Job == nil {
 		return time.Duration(response.PollAfter) * time.Second, nil

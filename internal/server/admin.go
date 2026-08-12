@@ -176,6 +176,7 @@ func (s *Server) handleRetryJob(w http.ResponseWriter, r *http.Request) {
 		}
 		retried.Error = ""
 		retried.CreatedAt = now
+		retried.QueuedAt = &now
 		retried.StartedAt = nil
 		retried.FinishedAt = nil
 		retried.RetryOfID = failed.ID
@@ -213,6 +214,50 @@ func (s *Server) handleRetryJob(w http.ResponseWriter, r *http.Request) {
 	}
 	retried.Payload = nil
 	writeJSON(w, http.StatusAccepted, retried)
+}
+
+func (s *Server) handleClearPendingJobs(w http.ResponseWriter, _ *http.Request) {
+	now := time.Now().UTC()
+	cleared := 0
+	err := s.store.Update(func(state *model.State) error {
+		removed := make(map[string]model.Job)
+		for id, job := range state.Jobs {
+			if job.Status == model.JobQueued || job.Status == model.JobFailed {
+				removed[id] = job
+			}
+		}
+		for id, job := range removed {
+			delete(state.Jobs, id)
+			cleared++
+			if node, ok := state.Nodes[job.NodeID]; ok && node.RunningJobID == id {
+				node.RunningJobID = ""
+				state.Nodes[node.ID] = node
+			}
+		}
+		for id, domain := range state.Domains {
+			job, ok := removed[domain.LastJobID]
+			if !ok {
+				continue
+			}
+			domain.LastJobID = ""
+			domain.LastError = ""
+			domain.UpdatedAt = now
+			if job.Type == protocol.JobDeleteDomain {
+				domain.Deleting = false
+				domain.Enabled = true
+			}
+			state.Domains[id] = domain
+		}
+		if cleared > 0 {
+			s.addAudit(state, "warning", "jobs.cleared", "排队与失败任务已清除")
+		}
+		return nil
+	})
+	if err != nil {
+		wrapStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]int{"cleared": cleared})
 }
 
 func jobNeedsAttention(state model.State, job model.Job) bool {
@@ -2225,9 +2270,10 @@ func enqueueJob(state *model.State, nodeID, domainID, jobType string, spec any) 
 	if err != nil {
 		return model.Job{}, err
 	}
+	now := time.Now().UTC()
 	job := model.Job{
 		ID: jobID, NodeID: nodeID, DomainID: domainID, Type: jobType, Status: model.JobQueued,
-		Payload: payload, MaxAttempts: 3, CreatedAt: time.Now().UTC(),
+		Payload: payload, MaxAttempts: 3, CreatedAt: now, QueuedAt: &now,
 	}
 	state.Jobs[job.ID] = job
 	return job, nil

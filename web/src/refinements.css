@@ -1,7 +1,12 @@
-/* Deliberately loaded after the legacy stylesheet so compact controls stay compact. */
+/* Loaded after the legacy stylesheet so the final control geometry is stable. */
 .utility-select {
-  width: 34px !important;
-  min-height: 34px !important;
+  width: 32px !important;
+  min-height: 32px !important;
+  border: 1px solid var(--line) !important;
+  border-radius: 9px !important;
+  color: var(--text-soft) !important;
+  background: color-mix(in srgb, var(--surface-strong) 84%, transparent) !important;
+  box-shadow: inset 0 1px 0 var(--glass-highlight) !important;
 }
 
 .utility-select svg,
@@ -35,37 +40,132 @@
 }
 
 .login-preference-select {
-  width: 90px;
-  min-width: 90px;
-  min-height: 32px;
-  padding-inline: 9px;
-  border-radius: 9px;
-  font-size: 10.5px;
+  width: 94px;
+  min-width: 94px;
+  min-height: 30px;
+  grid-template-columns: 15px minmax(0, 1fr) 12px;
+  gap: 5px;
+  padding-inline: 7px;
+  border-radius: 8px;
+  font-size: 10px;
+  background: color-mix(in srgb, var(--surface-strong) 78%, transparent);
+  box-shadow: inset 0 1px 0 var(--glass-highlight), 0 5px 16px rgba(12, 36, 24, .06);
+}
+
+.login-card-centered { min-width: 0; box-sizing: border-box; }
+
+.settings-access-card .bezel-core {
+  background:
+    radial-gradient(circle at 88% 12%, color-mix(in srgb, var(--accent) 10%, transparent), transparent 42%),
+    color-mix(in srgb, var(--surface) 88%, transparent);
+}
+
+.access-protection-button {
+  width: 100%;
+  min-height: 91px;
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 13px;
+  padding: 13px 16px;
+  border-top: 1px solid var(--line);
+  color: var(--text);
+  background: color-mix(in srgb, var(--surface-strong) 58%, transparent);
+  text-align: left;
+  transition: background .2s, color .2s;
+}
+
+.access-protection-button:hover { background: color-mix(in srgb, var(--accent-soft) 60%, var(--surface-strong)); }
+.access-protection-icon { width: 42px; height: 42px; display: grid; place-items: center; border-radius: 11px; color: var(--accent-text); background: var(--accent-soft); }
+.access-protection-copy { min-width: 0; display: flex; align-items: center; gap: 7px; }
+.access-protection-copy > span { min-height: 30px; display: inline-flex; align-items: center; gap: 7px; padding: 0 10px; border: 1px solid color-mix(in srgb, var(--line) 75%, transparent); border-radius: 9px; color: var(--muted); background: color-mix(in srgb, var(--surface-strong) 68%, transparent); font-size: 11px; font-weight: 650; white-space: nowrap; }
+.access-protection-copy i { width: 6px; height: 6px; border-radius: 50%; background: var(--faint); }
+.access-protection-copy i.access-active { background: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+
+.pending-clear-button { min-height: 36px; display: inline-flex; align-items: center; gap: 7px; padding: 0 12px; border: 1px solid color-mix(in srgb, var(--danger) 24%, var(--line)); border-radius: 10px; color: var(--danger); background: color-mix(in srgb, var(--danger-soft) 72%, transparent); font-size: 12px; font-weight: 700; }
+.pending-clear-button:hover { background: var(--danger-soft); }
+.pending-clear-button:disabled { opacity: .45; }
+
+.turnstile-slot { width: 100%; min-height: 65px; }
+.turnstile-slot > div { width: 100% !important; }
+.turnstile-slot iframe { width: 100% !important; max-width: 100%; }
+
+.composed-domain-field { grid-template-columns: auto minmax(72px, .45fr) minmax(110px, auto) auto; }
+.domain-base-chip { min-width: 0; overflow: hidden; padding: 6px 9px; border-radius: 8px; color: var(--text-soft); background: var(--surface-soft); font-size: 12px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+
+.domain-table-head,
+.certificate-list-head,
+.audit-head { font-size: 12px; }
+.domain-name { font-size: 14px; }
+.domain-name small,
+.route-target,
+.certificate-cell,
+.node-cell,
+.runtime-cell,
+.panel-footer,
+.sync-dialog-list small,
+.pending-main small,
+.pending-main time { font-size: 12px; }
+.sync-dialog-list strong,
+.pending-main strong { font-size: 14px; }
+.pending-status,
+.pending-error summary,
+.pending-error p,
+.pending-error button { font-size: 12px; }
+
+@media (min-width: 901px) {
+  .certificate-dialog-form .certificate-mode strong,
+  .certificate-dialog-form .switch-row strong,
+  .certificate-dialog-form .node-check-list strong { font-size: 14px; }
+  .certificate-dialog-form .certificate-mode small,
+  .certificate-dialog-form .switch-row small,
+  .certificate-dialog-form .node-check-list small { font-size: 12px; }
+  .certificate-dialog-form .dialog-field > span,
+  .certificate-dialog-form .certificate-node-field > span,
+  .certificate-dialog-form .certificate-names-field > span,
+  .certificate-dialog-form .account-fields label > span,
+  .domain-drawer .form-row > label,
+  .domain-drawer .source-select > span { font-size: 13px; }
 }
 
 @media (max-width: 900px) {
   .mobile-menu-compact {
-    width: 188px;
-    padding: 8px;
-    border-radius: 13px;
+    top: calc(58px + env(safe-area-inset-top));
+    right: 12px;
+    width: 184px;
+    padding: 9px;
+    border-color: var(--line-strong);
+    border-radius: 15px;
+    background: color-mix(in srgb, var(--surface-strong) 93%, transparent);
+    box-shadow: 0 18px 52px rgba(5, 21, 13, .2), inset 0 1px 0 var(--glass-highlight);
+    backdrop-filter: blur(24px) saturate(140%);
   }
 
   .mobile-menu-body {
-    gap: 5px;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
   }
 
   .mobile-preference-select {
-    min-height: 34px;
-    padding-inline: 7px;
-    border-radius: 8px;
-    font-size: 10.5px;
+    min-width: 0;
+    width: 100%;
+    min-height: 36px;
+    padding-inline: 8px;
+    border-radius: 10px;
+    border-color: var(--line-strong);
+    font-size: 10px;
+    background: color-mix(in srgb, var(--surface) 78%, transparent);
   }
 
   .compact-menu-item {
-    min-height: 36px;
+    grid-column: 1 / -1;
+    min-height: 38px;
     gap: 8px;
+    justify-content: center;
+    margin-top: 1px;
     padding-inline: 9px;
-    border-radius: 8px;
+    border: 0;
+    border-radius: 9px;
     font-size: 12px;
   }
 
@@ -79,27 +179,46 @@
   }
 
   .login-preference-select {
-    width: 82px;
-    min-width: 82px;
-    min-height: 31px;
-    padding-inline: 8px;
-    font-size: 10px;
+    width: 94px;
+    min-width: 94px;
+    min-height: 30px;
+    padding-inline: 7px;
+    font-size: 9.5px;
   }
+
+  .access-protection-button { min-height: 78px; padding-inline: 13px; }
+  .access-protection-copy { gap: 5px; }
+  .access-protection-copy > span { min-height: 28px; padding-inline: 8px; font-size: 10.5px; }
+  .access-settings-form { gap: 12px; padding: 14px; }
+  .access-turnstile-row { min-height: 58px; padding: 11px; }
+  .access-key-grid { gap: 9px; }
+  .allowlist-field textarea { min-height: 94px; }
+  .pending-clear-button { min-height: 34px; padding-inline: 10px; font-size: 11px; }
 
   .certificate-actions button {
     min-height: 40px;
     font-size: 12px;
   }
+
+  .composed-domain-field { grid-template-columns: auto minmax(58px, .4fr) minmax(92px, auto) auto; }
+  .domain-base-chip { max-width: 42vw; }
+  .domain-drawer .form-section-heading strong,
+  .domain-drawer .cloudflare-heading strong,
+  .domain-drawer .switch-row strong { font-size: 14px; }
+  .domain-drawer .switch-row small { font-size: 12px; }
 }
 
 @media (max-width: 360px) {
-  .login-preference-select {
-    width: 76px;
-    min-width: 76px;
-  }
-
   .preference-select-content {
     width: 104px;
     min-width: 104px;
+  }
+
+  .turnstile-slot { min-height: 53px; overflow: visible; }
+  .turnstile-slot > div {
+    width: 300px !important;
+    flex: 0 0 300px;
+    transform: scale(.79);
+    transform-origin: top center;
   }
 }

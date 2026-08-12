@@ -69,14 +69,14 @@ export interface DomainRecord {
   observed_only?: boolean
   taken_over?: boolean
   config_path?: string
-  cloudflare_enabled?: boolean
+  cloudflare_enabled: boolean
   cloudflare_dns_account_id?: string
-  cloudflare_proxied?: boolean
+  cloudflare_proxied: boolean
   cloudflare_record_type?: string
   cloudflare_record_content?: string
-  nginx_websocket?: boolean
-  nginx_http2?: boolean
-  nginx_gzip?: boolean
+  nginx_websocket: boolean
+  nginx_http2: boolean
+  nginx_gzip: boolean
   last_job_id?: string
   last_error?: string
   job_status?: JobStatus

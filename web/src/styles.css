@@ -1247,8 +1247,8 @@ body.login-active #root { height: 100dvh; min-height: 0; overflow: hidden; }
 .command-warning { display: flex; align-items: flex-start; gap: 8px; margin: 0; color: var(--danger); font-size: 11px; line-height: 1.55; }
 
 .domain-table-actions .domain-table-head,
-.domain-table-actions .domain-row { grid-template-columns: minmax(170px,1.3fr) minmax(135px,1fr) minmax(112px,.9fr) minmax(112px,.85fr) minmax(95px,.72fr) 96px; }
-.domain-row-actions { display: grid; grid-template-columns: repeat(2, 40px); gap: 6px; }
+.domain-table-actions .domain-row { grid-template-columns: minmax(170px,1.3fr) minmax(135px,1fr) minmax(112px,.9fr) minmax(112px,.85fr) minmax(95px,.72fr) 138px; }
+.domain-row-actions { display: grid; grid-template-columns: repeat(3, 40px); gap: 6px; }
 .domain-row-actions .icon-button { width: 40px; height: 40px; border-color: var(--line); background: var(--surface-soft); }
 .domain-row-actions .icon-button:last-child { color: var(--danger); }
 
@@ -1271,7 +1271,7 @@ body.login-active #root { height: 100dvh; min-height: 0; overflow: hidden; }
 .settings-compact-list > button + button { border-top: 1px solid var(--line); }
 .settings-compact-list > button:hover { background: var(--surface-hover); }
 .settings-compact-list > button > span:nth-child(2) { min-width: 0; display: flex; flex-direction: column; }
-.settings-compact-list strong { font-size: 13px; }
+.settings-compact-list strong { overflow: hidden; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
 .settings-compact-list small { overflow: hidden; color: var(--muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .poll-frequency-row { min-height: 91px; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 13px 16px; border-top: 1px solid var(--line); }
 .poll-frequency-row > span { display: inline-flex; align-items: center; gap: 11px; }
@@ -1343,7 +1343,7 @@ body.login-active #root { height: 100dvh; min-height: 0; overflow: hidden; }
   .domain-table-actions .certificate-cell { grid-column: 1; }
   .domain-table-actions .runtime-cell { grid-column: 2; }
   .domain-table-actions .row-action { position: static; grid-column: 1 / -1; width: 100%; transform: none; justify-self: stretch; margin-top: 4px; }
-  .domain-row-actions { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .domain-row-actions { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
   .domain-row-actions .icon-button { width: 100%; min-height: 42px; }
 
   .certificate-summary { gap: 9px; }

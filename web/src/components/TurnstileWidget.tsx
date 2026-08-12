@@ -4,6 +4,7 @@ interface TurnstileAPI {
   render: (container: HTMLElement, options: {
     sitekey: string
     theme: 'light' | 'dark'
+    size: 'flexible'
     action: string
     callback: (token: string) => void
     'error-callback': () => void
@@ -66,6 +67,7 @@ export function TurnstileWidget({ siteKey, theme, onToken, onError }: {
       widgetID = turnstile.render(containerRef.current, {
         sitekey: siteKey,
         theme,
+        size: 'flexible',
         action: 'turnstile-spin-v1',
         callback: onToken,
         'error-callback': () => { onToken(''); onError() },

@@ -48,13 +48,14 @@ type NodeReport struct {
 }
 
 type PollRequest struct {
-	Report NodeReport `json:"report"`
+	Report *NodeReport `json:"report,omitempty"`
 }
 
 type PollResponse struct {
-	Job       *WireJob  `json:"job,omitempty"`
-	PollAfter int       `json:"poll_after_seconds"`
-	ServerNow time.Time `json:"server_now"`
+	Job         *WireJob  `json:"job,omitempty"`
+	PollAfter   int       `json:"poll_after_seconds"`
+	ReportAfter int       `json:"report_after_seconds"`
+	ServerNow   time.Time `json:"server_now"`
 }
 
 type WireJob struct {
@@ -69,11 +70,11 @@ type CertificateBundle struct {
 }
 
 type ApplyDomainPayload struct {
-	Domain              string             `json:"domain"`
-	UpstreamHost        string             `json:"upstream_host"`
-	UpstreamPort        int                `json:"upstream_port"`
-	TLS                 bool               `json:"tls"`
-	UseLocalCertificate bool               `json:"use_local_certificate"`
+	Domain              string `json:"domain"`
+	UpstreamHost        string `json:"upstream_host"`
+	UpstreamPort        int    `json:"upstream_port"`
+	TLS                 bool   `json:"tls"`
+	UseLocalCertificate bool   `json:"use_local_certificate"`
 	// LocalCertificateDir is the node path that already holds fullchain.pem /
 	// privkey.pem for this domain (for example a shared wildcard directory).
 	// When empty, the agent falls back to /etc/ssl/<domain>.
