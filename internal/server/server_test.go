@@ -11,6 +11,7 @@ import (
 	"encoding/pem"
 	"io"
 	"math/big"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -79,6 +80,203 @@ func TestEnrollmentExchangesOneTimeTokenWithoutPersistingSecrets(t *testing.T) {
 	}
 	if bytes.Contains(stateBytes, []byte(enrollment.Token)) || bytes.Contains(stateBytes, []byte(credentials.NodeSecret)) {
 		t.Fatal("plaintext enrollment or node secret was persisted")
+	}
+}
+
+func TestEnrollmentUsesReportedHostnameWhenNameIsOmitted(t *testing.T) {
+	stateStore, err := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	box, err := securebox.New(bytes.Repeat([]byte{0x32}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminToken := strings.Repeat("h", 32)
+	controller, err := New(Config{AdminToken: adminToken, PublicURL: "https://atlas.example.com"}, stateStore, box, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	created := performJSON(t, controller.Handler(), http.MethodPost, "/api/v1/enrollments", map[string]any{"ttl_minutes": 30}, "Bearer "+adminToken)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create enrollment returned %d: %s", created.Code, created.Body.String())
+	}
+	var enrollment struct {
+		Token   string `json:"token"`
+		Command string `json:"command"`
+	}
+	decodeRecorder(t, created, &enrollment)
+	if strings.Contains(enrollment.Command, "--name") {
+		t.Fatalf("generated command still requires a name: %s", enrollment.Command)
+	}
+
+	enrolled := performJSON(t, controller.Handler(), http.MethodPost, "/api/v1/agent/enroll", protocol.EnrollRequest{
+		Token: enrollment.Token, Report: protocol.NodeReport{Hostname: "edge-tokyo-01", OS: "linux", Arch: "amd64"},
+	}, "")
+	if enrolled.Code != http.StatusCreated {
+		t.Fatalf("enroll returned %d: %s", enrolled.Code, enrolled.Body.String())
+	}
+	for _, node := range stateStore.Snapshot().Nodes {
+		if node.Name != "edge-tokyo-01" {
+			t.Fatalf("node name = %q, want reported hostname", node.Name)
+		}
+		if len(node.StatusHistory) != 1 || node.StatusHistory[0].Status != model.NodeOnline {
+			t.Fatalf("initial status history missing: %+v", node.StatusHistory)
+		}
+	}
+}
+
+func TestNodePollSettingControlsAgentResponses(t *testing.T) {
+	stateStore, err := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	box, err := securebox.New(bytes.Repeat([]byte{0x35}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminToken := strings.Repeat("p", 32)
+	controller, err := New(Config{AdminToken: adminToken, PublicURL: "https://atlas.example.com"}, stateStore, box, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	updated := performJSON(t, controller.Handler(), http.MethodPut, "/api/v1/settings", settingsView{NodePollSeconds: 60}, "Bearer "+adminToken)
+	if updated.Code != http.StatusOK {
+		t.Fatalf("update settings returned %d: %s", updated.Code, updated.Body.String())
+	}
+	invalid := performJSON(t, controller.Handler(), http.MethodPut, "/api/v1/settings", settingsView{NodePollSeconds: 9}, "Bearer "+adminToken)
+	if invalid.Code != http.StatusBadRequest {
+		t.Fatalf("invalid poll setting returned %d", invalid.Code)
+	}
+
+	created := performJSON(t, controller.Handler(), http.MethodPost, "/api/v1/enrollments", map[string]any{"ttl_minutes": 30}, "Bearer "+adminToken)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create enrollment returned %d: %s", created.Code, created.Body.String())
+	}
+	var enrollment struct {
+		Token string `json:"token"`
+	}
+	decodeRecorder(t, created, &enrollment)
+	enrolled := performJSON(t, controller.Handler(), http.MethodPost, "/api/v1/agent/enroll", protocol.EnrollRequest{
+		Token: enrollment.Token, Report: protocol.NodeReport{Hostname: "edge-poll-01", OS: "linux", Arch: "amd64"},
+	}, "")
+	if enrolled.Code != http.StatusCreated {
+		t.Fatalf("enroll returned %d: %s", enrolled.Code, enrolled.Body.String())
+	}
+	var credentials protocol.EnrollResponse
+	decodeRecorder(t, enrolled, &credentials)
+	if credentials.PollAfter != 60 {
+		t.Fatalf("enroll poll interval = %d, want 60", credentials.PollAfter)
+	}
+
+	polled := performJSON(t, controller.Handler(), http.MethodPost, "/api/v1/agent/poll", protocol.PollRequest{
+		Report: protocol.NodeReport{Hostname: "edge-poll-01", OS: "linux", Arch: "amd64"},
+	}, "AtlasNode "+credentials.NodeID+"."+credentials.NodeSecret)
+	if polled.Code != http.StatusOK {
+		t.Fatalf("poll returned %d: %s", polled.Code, polled.Body.String())
+	}
+	var response protocol.PollResponse
+	decodeRecorder(t, polled, &response)
+	if response.PollAfter != 60 {
+		t.Fatalf("poll interval = %d, want 60", response.PollAfter)
+	}
+}
+
+func TestDeletingDomainDisappearsFromCountsUntilJobFinishes(t *testing.T) {
+	stateStore, err := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	box, err := securebox.New(bytes.Repeat([]byte{0x33}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminToken := strings.Repeat("d", 32)
+	controller, err := New(Config{AdminToken: adminToken}, stateStore, box, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if err := stateStore.Update(func(state *model.State) error {
+		state.Nodes["node_1"] = model.Node{ID: "node_1", Name: "node-1", Status: model.NodeOnline, CreatedAt: now}
+		state.Domains["dom_1"] = model.Domain{ID: "dom_1", Name: "api.example.com", NodeID: "node_1", Enabled: true, CreatedAt: now, UpdatedAt: now}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	deleted := performJSON(t, controller.Handler(), http.MethodDelete, "/api/v1/domains/dom_1", nil, "Bearer "+adminToken)
+	if deleted.Code != http.StatusAccepted {
+		t.Fatalf("delete domain returned %d: %s", deleted.Code, deleted.Body.String())
+	}
+	retained := stateStore.Snapshot().Domains["dom_1"]
+	if !retained.Deleting || retained.Enabled {
+		t.Fatalf("queued deletion state is wrong: %+v", retained)
+	}
+	domains := performJSON(t, controller.Handler(), http.MethodGet, "/api/v1/domains", nil, "Bearer "+adminToken)
+	var views []domainView
+	decodeRecorder(t, domains, &views)
+	if len(views) != 0 {
+		t.Fatalf("deleting domain remained visible in counts: %+v", views)
+	}
+
+	job := stateStore.Snapshot().Jobs[retained.LastJobID]
+	if err := stateStore.Update(func(state *model.State) error {
+		restoreFailedDomainDeletion(state, job, "delete failed", now)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	restored := stateStore.Snapshot().Domains["dom_1"]
+	if restored.Deleting || !restored.Enabled || restored.LastError != "delete failed" {
+		t.Fatalf("failed deletion was not restored: %+v", restored)
+	}
+}
+
+func TestCertificateUploadInfersDomainFromCertificate(t *testing.T) {
+	stateStore, err := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	box, err := securebox.New(bytes.Repeat([]byte{0x34}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminToken := strings.Repeat("u", 32)
+	controller, err := New(Config{AdminToken: adminToken}, stateStore, box, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certificatePEM, privateKeyPEM := makeServerTestCertificate(t, "upload.example.com", time.Now().UTC())
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	certificatePart, err := writer.CreateFormFile("certificate", "anything.crt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = certificatePart.Write(certificatePEM)
+	keyPart, err := writer.CreateFormFile("private_key", "key.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = keyPart.Write(privateKeyPEM)
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/certificates/upload", &body)
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	request.Header.Set("Authorization", "Bearer "+adminToken)
+	recorder := httptest.NewRecorder()
+	controller.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("upload returned %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var view certificateView
+	decodeRecorder(t, recorder, &view)
+	if view.Domain != "upload.example.com" {
+		t.Fatalf("inferred domain = %q", view.Domain)
 	}
 }
 

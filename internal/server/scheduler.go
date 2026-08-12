@@ -32,8 +32,11 @@ func (s *Server) runMaintenance() {
 			if node.Status == model.NodeRevoked {
 				continue
 			}
-			if node.LastSeenAt == nil || now.Sub(*node.LastSeenAt) > s.config.OfflineAfter {
-				node.Status = model.NodeOffline
+			if node.LastSeenAt == nil || now.Sub(*node.LastSeenAt) > s.nodeOfflineAfter(*state) {
+				if node.Status != model.NodeOffline {
+					node.Status = model.NodeOffline
+					appendNodeStatusSample(&node, model.NodeOffline, now)
+				}
 				state.Nodes[id] = node
 			}
 		}
@@ -54,6 +57,7 @@ func (s *Server) runMaintenance() {
 				job.Status = model.JobFailed
 				job.Error = "agent did not report a result before the timeout"
 				job.FinishedAt = &now
+				restoreFailedDomainDeletion(state, job, job.Error, now)
 				s.addAudit(state, "error", "job.timeout", "节点任务多次超时", job.NodeID, job.DomainID, job.ID)
 			}
 			state.Jobs[id] = job

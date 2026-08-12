@@ -103,7 +103,7 @@ curl -fsSL https://github.com/yayitinyu/nginx-atlas/releases/latest/download/ins
   | sudo bash -s -- uninstall-agent
 ```
 
-添加其他 VPS 时不应复用固定令牌。请在面板“节点 → 添加节点”中生成一次性命令；它会自动采用正确的主控地址、短期令牌和节点名称。
+添加其他 VPS 时不应复用固定令牌。请在面板“概览 → 安装与卸载 → 安装节点”中获取一次性命令；它会自动采用正确的主控地址和短期令牌，节点首次注册时使用主机名，之后可在节点管理中改名。
 
 ### 1. 本地构建
 
@@ -156,16 +156,15 @@ sudo bash deploy/install.sh server \
 
 ### 4. 添加其他 VPS
 
-进入“节点”页面，点击“添加节点”，复制生成的命令，在目标 VPS 上执行即可。命令形如：
+进入“概览”页面，展开“安装节点”，复制命令并在目标 VPS 上执行。命令形如：
 
 ```bash
 curl -fsSL https://atlas.example.com/install.sh | sudo bash -s -- agent \
   --server https://atlas.example.com \
-  --token '<一次性令牌>' \
-  --name 'Tokyo-02'
+  --token '<一次性令牌>'
 ```
 
-令牌默认 30 分钟过期且只能使用一次。注册完成后，节点保存独立随机密钥；主控只持久化其 SHA-256 哈希。
+令牌默认 30 分钟过期且只能使用一次。注册完成后，节点保存独立随机密钥；主控只持久化其 SHA-256 哈希。卸载节点与卸载主控的命令也集中在同一区域。
 
 ## 添加域名
 
@@ -182,16 +181,18 @@ curl -fsSL https://atlas.example.com/install.sh | sudo bash -s -- agent \
 
 ## DNS 与 ACME 账户
 
-DNS 提供商名称及环境变量采用 [lego 官方 DNS provider 文档](https://go-acme.github.io/lego/dns/) 的定义。例如 Cloudflare 推荐使用：
+设置页只维护一个 Cloudflare DNS 账户和一个 ACME 账户：分别填写最小权限 Cloudflare API Token 与 ACME 邮箱。申请证书时会自动使用这两个账户，不再重复选择。
+
+Cloudflare 凭据采用 [lego 官方 DNS provider 文档](https://go-acme.github.io/lego/dns/) 的变量：
 
 ```text
 Provider: cloudflare
 Credential: CLOUDFLARE_DNS_API_TOKEN=<最小权限 API Token>
 ```
 
-禁止 `manual` 和 `exec` 提供商进入无人值守任务，避免交互阻塞或任意程序执行。DNS 环境变量名必须是大写字母、数字与下划线，凭据不会出现在 API 列表、审计日志或任务持久化数据中。
+凭据不会出现在 API 列表、日志或任务持久化数据中。
 
-启用域名的 Cloudflare 同步时，主控使用选中的加密 API Token 查找最长匹配的活动 Zone，再创建或更新同名记录。建议 Token 只授予所需 Zone 的 DNS 编辑与 Zone 读取权限。
+启用域名的 Cloudflare 同步时，主控使用已配置的加密 API Token 查找最长匹配的活动 Zone，再创建或更新同名记录。建议 Token 只授予所需 Zone 的 DNS 编辑与 Zone 读取权限。
 
 ACME 账户默认目录：
 
@@ -199,21 +200,24 @@ ACME 账户默认目录：
 https://acme-v02.api.letsencrypt.org/directory
 ```
 
-也支持自定义 HTTPS ACME 目录与可选 EAB KID/HMAC。代理使用当前 lego v5 命令格式：`lego run --dns ... --renew-days 30`；证书仍会在主控侧重新验证后才被保存和同步。参见 [lego 官方签发/续期文档](https://go-acme.github.io/lego/usage/cli/renew-a-certificate/)。
+代理使用当前 lego v5 命令格式：`lego run --dns ... --renew-days 30`；证书仍会在主控侧重新验证后才被保存和同步。参见 [lego 官方签发/续期文档](https://go-acme.github.io/lego/usage/cli/renew-a-certificate/)。
 
 ## 证书同步与续期
 
 - 证书和私钥在主控状态文件中使用 AES-256-GCM 加密，并绑定独立用途标签。
+- 上传证书时不要求特定文件名或手工填写域名；主控从证书 SAN/CN 识别域名，节点部署时统一写为 `fullchain.pem` 与 `privkey.pem`。
 - 队列中仅保存证书、域名和账户 ID；代理领取任务时才短暂解密并通过 HTTPS 下发。
 - 节点将新文件写入同目录临时文件，设置 `fullchain.pem` 为 `0644`、`privkey.pem` 为 `0600`，再原子替换。
 - 每个节点独立执行证书校验、`nginx -t` 和 reload；失败会恢复它自己的旧版本。
 - 调度器每 15 秒处理离线与超时任务，并在证书进入 `renew_before_days` 窗口时创建 ACME 续期任务。
 - 关闭证书自动续期会同时停止关联域名的后续调度，但不会取消已经进入运行状态的任务。
-- 证书页可编辑签发节点、DNS/ACME 账户、续期窗口与 SAN 名称；例如一张证书同时覆盖 `nanami.im` 与 `*.nanami.im`。
+- 证书页可编辑签发节点、续期窗口与 SAN 名称；例如一张证书同时覆盖 `nanami.im` 与 `*.nanami.im`。DNS/ACME 账户自动使用设置页中的唯一配置。
 
 ## 节点维护与规则接管
 
 - “节点 → 管理节点”可改名、检查最新 GitHub Release、更新 Atlas Agent，并在 APT 节点上确认执行软件包与 Nginx 更新；标记为“主控 VPS”的本机节点会更新主控与 Agent 共用的二进制并依次重启两项服务。
+- 节点安装、节点卸载与主控卸载命令集中在概览页；节点页只保留状态与维护操作。
+- 设置页可将节点状态获取频率设为 10–300 秒；主控会相应调整离线判定窗口。
 - Atlas 更新包必须来自受信任的 GitHub HTTPS 地址，并同时通过 Release `checksums.txt` 的 SHA-256 与更新后二进制版本校验；当前二进制会先备份。
 - 系统更新固定执行 `apt-get update`、保留现有配置的 `upgrade` 与 `nginx --only-upgrade`，前后都运行 `nginx -t`，最后才 reload。
 - 卸载命令仅移除节点 Agent、凭据与服务；不会删除 Nginx、`/etc/nginx` 或 `/etc/ssl`。主控所在节点会保留共享二进制与主控数据。

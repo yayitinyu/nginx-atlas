@@ -1,6 +1,5 @@
 import { useEffect, useId, useMemo, useState, type FormEvent, type ReactNode } from 'react'
-import type { ACMEAccount, CertificateAutomationInput, CertificateRecord, DNSAccount, EnrollmentResponse, NodeRecord, ReleaseInfo, UninstallCommand } from '../types'
-import { api } from '../api'
+import type { ACMEAccount, CertificateAutomationInput, CertificateRecord, DNSAccount, NodeRecord, ReleaseInfo } from '../types'
 import { usePreferences } from '../preferences'
 import { Icon } from './Icon'
 import { ActionButton, IconButton, StatusDot } from './Primitives'
@@ -10,7 +9,7 @@ export type DNSAccountInput = { name: string; provider: string; credentials: Rec
 export type ACMEAccountInput = { name: string; email: string; directory_url: string; eab_kid: string; eab_hmac: string; keep_eab: boolean }
 export type CertificateAutomationSettingsInput = { node_id: string; auto_renew: boolean; renew_before_days: number; acme_account_id: string; dns_account_id: string; dns_names: string[] }
 export type CertificateSubmission =
-  | { mode: 'upload'; input: CertificateAutomationInput; fullchain: File; privkey: File }
+  | { mode: 'upload'; input: CertificateAutomationInput; certificate: File; privateKey: File }
   | { mode: 'issue' | 'import'; input: CertificateAutomationInput }
 
 function DialogShell({ open, title, description, onClose, children, wide = false }: {
@@ -33,36 +32,17 @@ function DialogShell({ open, title, description, onClose, children, wide = false
   return (
     <div className="modal-layer" role="presentation" onMouseDown={(event) => event.currentTarget === event.target && onClose()}>
       <section className={`form-dialog ${wide ? 'form-dialog-wide' : ''}`} role="dialog" aria-modal="true" aria-labelledby={titleID}>
-        <header><div><h2 id={titleID}>{title}</h2><p>{description}</p></div><IconButton name="close" label={t('common.close')} onClick={onClose} /></header>
+        <header><div><h2 id={titleID}>{title}</h2>{description && <p>{description}</p>}</div><IconButton name="close" label={t('common.close')} onClick={onClose} /></header>
         {children}
       </section>
     </div>
   )
 }
 
-export function NodeDialog({ open, busy, result, onClose, onCreate }: {
-  open: boolean
-  busy: boolean
-  result?: EnrollmentResponse
-  onClose: () => void
-  onCreate: (name: string) => Promise<void>
-}) {
-  const { t } = usePreferences()
-  const [name, setName] = useState('')
-  const [copied, setCopied] = useState(false)
-  useEffect(() => { if (open && !result) { setName(''); setCopied(false) } }, [open, result])
-  return (
-    <DialogShell open={open} title={result ? t('dialog.commandReady') : t('dialog.nodeTitle')} description={result ? t('dialog.commandHint') : t('dialog.nodeDescription')} onClose={onClose}>
-      {result ? <div className="command-result"><pre>{result.command}</pre><button className="copy-command" onClick={() => { void navigator.clipboard.writeText(result.command); setCopied(true) }}><Icon name={copied ? 'check' : 'copy'} size={17} />{copied ? t('dialog.copied') : t('dialog.copyCommand')}</button><small>{t('dialog.commandHint')}</small></div> : <form className="dialog-form" onSubmit={(event) => { event.preventDefault(); void onCreate(name) }}><label><span>{t('dialog.nodeName')}</span><div className="field-control"><Icon name="server" size={17} /><input value={name} onChange={(event) => setName(event.target.value)} placeholder={t('dialog.nodeNamePlaceholder')} autoFocus /></div></label><ActionButton wide plain leadingIcon="terminal" disabled={busy || name.trim().length < 2}>{busy ? t('common.queueing') : t('dialog.generate')}</ActionButton></form>}
-    </DialogShell>
-  )
-}
-
-export function NodeManageDialog({ open, node, release, uninstall, busy, onClose, onRename, onCheckRelease, onUpdateAtlas, onUpdateSystem }: {
+export function NodeManageDialog({ open, node, release, busy, onClose, onRename, onCheckRelease, onUpdateAtlas, onUpdateSystem }: {
   open: boolean
   node?: NodeRecord
   release?: ReleaseInfo
-  uninstall?: UninstallCommand
   busy: string
   onClose: () => void
   onRename: (name: string) => Promise<void>
@@ -73,22 +53,25 @@ export function NodeManageDialog({ open, node, release, uninstall, busy, onClose
   const { t, locale } = usePreferences()
   const [name, setName] = useState('')
   const [confirm, setConfirm] = useState<'atlas' | 'system'>()
-  const [copied, setCopied] = useState(false)
-  const [enrollmentCmd, setEnrollmentCmd] = useState('')
-  const [enrollmentCopied, setEnrollmentCopied] = useState(false)
-  const [fetchingCmd, setFetchingCmd] = useState(false)
   useEffect(() => {
     if (!open || !node) return
     setName(node.name)
     setConfirm(undefined)
-    setCopied(false)
-    setEnrollmentCmd('')
-    setEnrollmentCopied(false)
   }, [open, node?.id, node?.name])
   if (!node) return null
   const nodeNeedsUpdate = Boolean(release && node.agent_version && (node.agent_version === 'dev' || isVersionNewer(release.latest_version, node.agent_version)))
-  return <DialogShell open={open} title={t('nodes.manageTitle', { node: node.name })} description={t(node.controller_installed ? 'nodes.manageControllerDescription' : 'nodes.manageDescription')} onClose={onClose} wide><div className="node-manage-dialog"><section className="node-manage-identity"><span className="node-machine"><Icon name="server" size={24} /></span><span><span className="node-name-line"><strong>{node.name}</strong>{node.controller_installed && <span className="controller-badge"><Icon name="home" size={13} />{t('nodes.controller')}</span>}</span><small>{node.os_name || [node.os, node.arch].filter(Boolean).join(' / ')}</small></span><span className={`node-state node-state-${node.status}`}>{t(`common.${node.status}`)}</span></section><form className="rename-node-form" onSubmit={(event) => { event.preventDefault(); void onRename(name.trim()) }}><label><span>{t('nodes.rename')}</span><div className="field-control"><Icon name="edit" size={17} /><input value={name} onChange={(event) => setName(event.target.value)} /></div></label><button type="submit" disabled={busy === 'rename' || name.trim().length < 2 || name.trim() === node.name}>{busy === 'rename' ? t('common.saving') : t('common.save')}</button></form><section className="node-action-section"><div className="node-action-heading"><span><strong>{t(node.controller_installed ? 'nodes.controllerRelease' : 'nodes.atlasRelease')}</strong><small>{t('nodes.versionPair', { current: node.agent_version || '—', latest: release?.latest_version || '—' })}</small></span><button type="button" onClick={() => void onCheckRelease()} disabled={busy === 'release'}><Icon name="refresh" size={16} />{t('nodes.checkUpdate')}</button></div>{release && <div className={nodeNeedsUpdate ? 'release-card release-available' : 'release-card'}><span><Icon name={nodeNeedsUpdate ? 'download' : 'check'} size={20} /></span><div><strong>{nodeNeedsUpdate ? t('nodes.updateAvailable', { version: release.latest_version }) : t('nodes.upToDate')}</strong><small>{release.published_at ? new Intl.DateTimeFormat(locale, { year: 'numeric', month: 'short', day: '2-digit' }).format(new Date(release.published_at)) : release.repository}</small></div>{confirm === 'atlas' ? <div className="inline-confirm"><button type="button" onClick={() => setConfirm(undefined)}>{t('common.cancel')}</button><button type="button" onClick={() => void onUpdateAtlas()} disabled={busy === 'atlas'}>{busy === 'atlas' ? t('common.queueing') : t('nodes.confirmUpdate')}</button></div> : <button type="button" className="node-primary-action" onClick={() => setConfirm('atlas')}><Icon name="download" size={16} />{t('nodes.updateAtlas')}</button>}</div>}</section><section className="node-action-section"><div className="system-update-card"><span className="node-action-icon"><Icon name="package" size={21} /></span><span><strong>{t('nodes.systemUpdate')}</strong><small>{node.package_manager === 'apt' ? t('nodes.systemUpdateHint') : t('nodes.systemUpdateUnsupported')}</small></span>{confirm === 'system' ? <div className="inline-confirm danger-confirm"><button type="button" onClick={() => setConfirm(undefined)}>{t('common.cancel')}</button><button type="button" onClick={() => void onUpdateSystem()} disabled={busy === 'system'}>{busy === 'system' ? t('common.queueing') : t('nodes.confirmSystemUpdate')}</button></div> : <button type="button" onClick={() => setConfirm('system')} disabled={node.package_manager !== 'apt'}><Icon name="refresh" size={16} />{t('nodes.updatePackages')}</button>}</div></section><section className="node-action-section reinstall-section"><div><strong>{t('nodes.reinstallTitle')}</strong><small>{t('nodes.reinstallHint')}</small></div>{enrollmentCmd ? <div className="uninstall-command"><pre>{enrollmentCmd}</pre><button type="button" onClick={() => { void navigator.clipboard.writeText(enrollmentCmd); setEnrollmentCopied(true) }}><Icon name={enrollmentCopied ? 'check' : 'copy'} size={17} />{enrollmentCopied ? t('dialog.copied') : t('nodes.copyInstall')}</button></div> : <button type="button" className="inline-action" disabled={fetchingCmd} onClick={async () => { setFetchingCmd(true); try { const res = await api.createEnrollment(node.name); setEnrollmentCmd(res.command) } catch (err) { console.error(err) } finally { setFetchingCmd(false) } }}><Icon name="terminal" size={16} />{fetchingCmd ? t('common.loading') : t('nodes.generateInstallCommand')}</button>}</section><section className="node-action-section uninstall-section"><div><strong>{t('nodes.uninstallTitle')}</strong><small>{t('nodes.uninstallHint')}</small></div>{uninstall ? <div className="uninstall-command"><pre>{uninstall.command}</pre><button type="button" onClick={() => { void navigator.clipboard.writeText(uninstall.command); setCopied(true) }}><Icon name={copied ? 'check' : 'copy'} size={17} />{copied ? t('dialog.copied') : t('nodes.copyUninstall')}</button></div> : <div className="loading-inline"><span className="loading-orbit" />{t('common.loading')}</div>}</section></div></DialogShell>
+  return (
+    <DialogShell open={open} title={t('nodes.manageTitle', { node: node.name })} description={t(node.controller_installed ? 'nodes.manageControllerDescription' : 'nodes.manageDescription')} onClose={onClose} wide>
+      <div className="node-manage-dialog node-manage-refined">
+        <section className="node-manage-identity"><span className="node-machine"><Icon name="server" size={24} /></span><span><span className="node-name-line"><strong>{node.name}</strong>{node.controller_installed && <span className="controller-badge"><Icon name="home" size={13} />{t('nodes.controller')}</span>}</span><small>{node.os_name || [node.os, node.arch].filter(Boolean).join(' / ')}</small></span><span className={`node-state node-state-${node.status}`}>{t(`common.${node.status}`)}</span></section>
+        <form className="rename-node-form" onSubmit={(event) => { event.preventDefault(); void onRename(name.trim()) }}><label><span>{t('nodes.rename')}</span><div className="field-control"><Icon name="edit" size={17} /><input value={name} onChange={(event) => setName(event.target.value)} /></div></label><button type="submit" disabled={busy === 'rename' || name.trim().length < 2 || name.trim() === node.name}>{busy === 'rename' ? t('common.saving') : t('common.save')}</button></form>
+        <section className="node-action-section"><div className="node-action-heading"><span><strong>{t(node.controller_installed ? 'nodes.controllerRelease' : 'nodes.atlasRelease')}</strong><small>{t('nodes.versionPair', { current: node.agent_version || '—', latest: release?.latest_version || '—' })}</small></span><button type="button" onClick={() => void onCheckRelease()} disabled={busy === 'release'}><Icon name="refresh" size={16} />{t('nodes.checkUpdate')}</button></div>{release && <div className={nodeNeedsUpdate ? 'release-card release-available' : 'release-card'}><span><Icon name={nodeNeedsUpdate ? 'download' : 'check'} size={20} /></span><div><strong>{nodeNeedsUpdate ? t('nodes.updateAvailable', { version: release.latest_version }) : t('nodes.upToDate')}</strong><small>{release.published_at ? new Intl.DateTimeFormat(locale, { year: 'numeric', month: 'short', day: '2-digit' }).format(new Date(release.published_at)) : release.repository}</small></div>{nodeNeedsUpdate && (confirm === 'atlas' ? <div className="inline-confirm"><button type="button" onClick={() => setConfirm(undefined)}>{t('common.cancel')}</button><button type="button" onClick={() => void onUpdateAtlas()} disabled={busy === 'atlas'}>{busy === 'atlas' ? t('common.queueing') : t('nodes.confirmUpdate')}</button></div> : <button type="button" className="node-primary-action" onClick={() => setConfirm('atlas')}><Icon name="download" size={16} />{t('nodes.updateAtlas')}</button>)}</div>}</section>
+        <section className="node-action-section"><div className="system-update-card"><span className="node-action-icon"><Icon name="package" size={21} /></span><span><strong>{t('nodes.systemUpdate')}</strong><small>{node.package_manager === 'apt' ? t('nodes.systemUpdateHint') : t('nodes.systemUpdateUnsupported')}</small></span>{confirm === 'system' ? <div className="inline-confirm danger-confirm"><button type="button" onClick={() => setConfirm(undefined)}>{t('common.cancel')}</button><button type="button" onClick={() => void onUpdateSystem()} disabled={busy === 'system'}>{busy === 'system' ? t('common.queueing') : t('nodes.confirmSystemUpdate')}</button></div> : <button type="button" onClick={() => setConfirm('system')} disabled={node.package_manager !== 'apt'}><Icon name="refresh" size={16} />{t('nodes.updatePackages')}</button>}</div></section>
+      </div>
+    </DialogShell>
+  )
 }
+
 
 export function DNSAccountDialog({ open, account, busy, onClose, onSave }: {
   open: boolean
@@ -98,32 +81,21 @@ export function DNSAccountDialog({ open, account, busy, onClose, onSave }: {
   onSave: (input: DNSAccountInput, id?: string) => Promise<void>
 }) {
   const { t } = usePreferences()
-  const [name, setName] = useState('')
-  const [provider, setProvider] = useState('cloudflare')
-  const [replaceCredentials, setReplaceCredentials] = useState(true)
-  const [credentials, setCredentials] = useState([{ key: 'CLOUDFLARE_DNS_API_TOKEN', value: '' }])
+  const [token, setToken] = useState('')
   useEffect(() => {
     if (!open) return
-    setName(account?.name ?? '')
-    setProvider(account?.provider ?? 'cloudflare')
-    setReplaceCredentials(!account)
-    setCredentials(account?.credential_keys.length ? account.credential_keys.map((key) => ({ key, value: '' })) : [{ key: 'CLOUDFLARE_DNS_API_TOKEN', value: '' }])
+    setToken('')
   }, [open, account?.id])
   function submit(event: FormEvent) {
     event.preventDefault()
-    const values = replaceCredentials ? Object.fromEntries(credentials.map((item) => [item.key.trim().toUpperCase(), item.value.trim()])) : {}
-    void onSave({ name: name.trim(), provider: provider.trim().toLowerCase(), credentials: values, keep_credentials: Boolean(account) && !replaceCredentials }, account?.id)
+    const value = token.trim()
+    void onSave({ name: 'Cloudflare', provider: 'cloudflare', credentials: value ? { CLOUDFLARE_DNS_API_TOKEN: value } : {}, keep_credentials: Boolean(account) && !value }, account?.id)
   }
-  const invalidCredentials = replaceCredentials && credentials.some((item) => !item.key.trim() || !item.value.trim())
   return (
     <DialogShell open={open} title={account ? t('dialog.dnsEditTitle') : t('dialog.dnsAddTitle')} description={t('dialog.dnsDescription')} onClose={onClose}>
       <form className="dialog-form" onSubmit={submit}>
-        <label><span>{t('dialog.accountName')}</span><div className="field-control"><input value={name} onChange={(event) => setName(event.target.value)} placeholder="Cloudflare" /></div></label>
-        <label><span>{t('dialog.provider')}</span><div className="field-control"><input value={provider} onChange={(event) => setProvider(event.target.value.toLowerCase())} placeholder="cloudflare" /></div></label>
-        {account && <label className="switch-row compact-switch"><button type="button" role="switch" aria-checked={!replaceCredentials} className={!replaceCredentials ? 'switch-on' : ''} onClick={() => setReplaceCredentials((value) => !value)}><i /></button><span><strong>{t('dialog.keepCredentials')}</strong><small>{t('dialog.credentialHint')}</small></span></label>}
-        {replaceCredentials && <div className="credential-editor"><div className="credential-title"><span>{t('dialog.credentials')}</span><button type="button" onClick={() => setCredentials((items) => [...items, { key: '', value: '' }])}><Icon name="plus" size={15} />{t('dialog.addCredential')}</button></div>{credentials.map((item, index) => <div className="credential-line" key={`${item.key}-${index}`}><input aria-label={t('dialog.credentialName', { index: index + 1 })} value={item.key} onChange={(event) => setCredentials((items) => items.map((value, itemIndex) => itemIndex === index ? { ...value, key: event.target.value.toUpperCase() } : value))} placeholder="CLOUDFLARE_DNS_API_TOKEN" /><input aria-label={t('dialog.credentialValue', { index: index + 1 })} type="password" value={item.value} onChange={(event) => setCredentials((items) => items.map((value, itemIndex) => itemIndex === index ? { ...value, value: event.target.value } : value))} placeholder="••••••••••••" />{credentials.length > 1 && <IconButton name="close" label={t('dialog.removeCredential')} type="button" onClick={() => setCredentials((items) => items.filter((_, itemIndex) => itemIndex !== index))} />}</div>)}</div>}
-        {replaceCredentials && <div className="dialog-note"><Icon name="shield" size={17} /><span>{t('dialog.credentialHint')}</span></div>}
-        <ActionButton wide plain disabled={busy || name.trim().length < 2 || invalidCredentials}>{busy ? t('common.saving') : t('common.save')}</ActionButton>
+        <label><span>{t('settings.cloudflareToken')}</span><div className="field-control"><Icon name="key" size={17} /><input type="password" value={token} onChange={(event) => setToken(event.target.value)} placeholder={account ? t('dialog.keepCredentials') : 'Cloudflare API Token'} autoFocus /></div></label>
+        <ActionButton wide plain disabled={busy || (!account && !token.trim())}>{busy ? t('common.saving') : t('common.save')}</ActionButton>
       </form>
     </DialogShell>
   )
@@ -137,30 +109,16 @@ export function ACMEAccountDialog({ open, account, busy, onClose, onSave }: {
   onSave: (input: ACMEAccountInput, id?: string) => Promise<void>
 }) {
   const { t } = usePreferences()
-  const [name, setName] = useState('')
   const [email, setEmail] = useState('')
-  const [directory, setDirectory] = useState('https://acme-v02.api.letsencrypt.org/directory')
-  const [eabMode, setEABMode] = useState<'none' | 'keep' | 'replace'>('none')
-  const [eabKID, setEABKID] = useState('')
-  const [eabHMAC, setEABHMAC] = useState('')
   useEffect(() => {
     if (!open) return
-    setName(account?.name ?? '')
     setEmail(account?.email ?? '')
-    setDirectory(account?.directory_url ?? 'https://acme-v02.api.letsencrypt.org/directory')
-    setEABMode(account?.has_eab ? 'keep' : 'none')
-    setEABKID('')
-    setEABHMAC('')
   }, [open, account?.id])
-  const eabInvalid = eabMode === 'replace' && (!eabKID.trim() || !eabHMAC.trim())
   return (
     <DialogShell open={open} title={account ? t('dialog.acmeEditTitle') : t('dialog.acmeAddTitle')} description={t('dialog.acmeDescription')} onClose={onClose}>
-      <form className="dialog-form" onSubmit={(event) => { event.preventDefault(); void onSave({ name: name.trim(), email: email.trim(), directory_url: directory.trim(), eab_kid: eabMode === 'replace' ? eabKID.trim() : '', eab_hmac: eabMode === 'replace' ? eabHMAC : '', keep_eab: eabMode === 'keep' }, account?.id) }}>
-        <label><span>{t('dialog.accountName')}</span><div className="field-control"><input value={name} onChange={(event) => setName(event.target.value)} placeholder="Let's Encrypt" /></div></label>
+      <form className="dialog-form" onSubmit={(event) => { event.preventDefault(); void onSave({ name: account?.name ?? "Let's Encrypt", email: email.trim(), directory_url: account?.directory_url ?? 'https://acme-v02.api.letsencrypt.org/directory', eab_kid: '', eab_hmac: '', keep_eab: Boolean(account?.has_eab) }, account?.id) }}>
         <label><span>{t('dialog.email')}</span><div className="field-control"><input type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="admin@example.com" /></div></label>
-        <label><span>{t('dialog.directory')}</span><div className="field-control"><input type="url" value={directory} onChange={(event) => setDirectory(event.target.value)} /></div></label>
-        <div className="eab-details"><span className="eab-label">{t('dialog.eab')}</span><div className="segmented-control eab-segments">{account?.has_eab && <button type="button" className={eabMode === 'keep' ? 'selected' : ''} onClick={() => setEABMode('keep')}>{t('dialog.keepEAB')}</button>}<button type="button" className={eabMode === 'replace' ? 'selected' : ''} onClick={() => setEABMode('replace')}>{t('dialog.replaceCredentials')}</button><button type="button" className={eabMode === 'none' ? 'selected' : ''} onClick={() => setEABMode('none')}>{t('dialog.clearEAB')}</button></div>{eabMode === 'replace' && <><label><span>{t('dialog.eabKID')}</span><div className="field-control"><input value={eabKID} onChange={(event) => setEABKID(event.target.value)} /></div></label><label><span>{t('dialog.eabHMAC')}</span><div className="field-control"><input type="password" value={eabHMAC} onChange={(event) => setEABHMAC(event.target.value)} /></div></label></>}</div>
-        <ActionButton wide plain disabled={busy || name.trim().length < 2 || !email.includes('@') || eabInvalid}>{busy ? t('common.saving') : t('common.save')}</ActionButton>
+        <ActionButton wide plain disabled={busy || !email.includes('@')}>{busy ? t('common.saving') : t('common.save')}</ActionButton>
       </form>
     </DialogShell>
   )
@@ -223,11 +181,10 @@ export function CertificateDialog({ open, nodes, dnsAccounts, acmeAccounts, busy
   async function submit(event: FormEvent) {
     event.preventDefault()
     setError('')
-    const certificateDomain = (mode === 'import' ? nodeDomain : domain).trim().toLowerCase()
-    if (!certificateDomain.includes('.')) { setError(t('certificate.validationDomain')); return }
+    const certificateDomain = (mode === 'upload' ? '' : mode === 'import' ? nodeDomain : domain).trim().toLowerCase()
+    if (mode !== 'upload' && !certificateDomain.includes('.')) { setError(t('certificate.validationDomain')); return }
     if (mode === 'upload' && (!fullchain || !privkey)) { setError(t('certificate.validationFiles')); return }
     if ((mode !== 'upload' || autoRenew) && !nodeID) { setError(t('certificate.validationNode')); return }
-    if ((mode === 'issue' || autoRenew) && (!dnsAccountID || !acmeAccountID)) { setError(t('certificate.validationAccounts')); return }
     const input: CertificateAutomationInput = {
       domain: certificateDomain,
       node_id: mode === 'upload' && !autoRenew ? '' : nodeID,
@@ -238,27 +195,25 @@ export function CertificateDialog({ open, nodes, dnsAccounts, acmeAccounts, busy
       sync_node_ids: syncNodeIDs,
       dns_names: mode === 'issue' ? [certificateDomain, ...additionalNames] : [],
     }
-    if (mode === 'upload') await onSubmit({ mode, input, fullchain: fullchain!, privkey: privkey! })
+    if (mode === 'upload') await onSubmit({ mode, input, certificate: fullchain!, privateKey: privkey! })
     else await onSubmit({ mode, input })
   }
 
   const nodeOptions = availableNodes.map((node) => ({ value: node.id, label: node.name, description: node.status === 'online' ? t('common.online') : t('common.offline') }))
-  const showAutomation = mode === 'issue' || autoRenew
   const otherNodes = availableNodes.filter((node) => node.id !== nodeID || mode === 'upload')
   return (
-    <DialogShell open={open} title={t('certificate.add')} description={t('certificate.description')} onClose={onClose} wide>
+    <DialogShell open={open} title={t('certificate.add')} description="" onClose={onClose} wide>
       <form className="certificate-dialog-form" onSubmit={submit}>
         <div className="certificate-mode-grid">
           {(['upload', 'issue', 'import'] as const).map((item) => <button type="button" className={mode === item ? 'certificate-mode selected' : 'certificate-mode'} onClick={() => switchMode(item)} key={item}><Icon name={item === 'upload' ? 'upload' : item === 'issue' ? 'certificate' : 'server'} size={24} /><span><strong>{t(`certificate.mode${item === 'upload' ? 'Upload' : item === 'issue' ? 'Issue' : 'Import'}`)}</strong><small>{t(`certificate.mode${item === 'upload' ? 'Upload' : item === 'issue' ? 'Issue' : 'Import'}Hint`)}</small></span>{mode === item && <Icon name="check" size={16} weight="bold" />}</button>)}
         </div>
         <div className="certificate-dialog-scroll">
-          {mode !== 'import' && <label className="dialog-field"><span>{t('certificate.domain')}</span><div className="field-control"><Icon name="globe" size={17} /><input value={domain} onChange={(event) => setDomain(event.target.value)} placeholder="atlas.example.com" /></div></label>}
+          {mode === 'issue' && <label className="dialog-field"><span>{t('certificate.domain')}</span><div className="field-control"><Icon name="globe" size={17} /><input value={domain} onChange={(event) => setDomain(event.target.value)} placeholder="atlas.example.com" /></div></label>}
           {mode === 'issue' && <CertificateNamesField primary={domain.trim().toLowerCase()} values={additionalNames} draft={nameDraft} onDraft={setNameDraft} onChange={setAdditionalNames} />}
           {(mode === 'issue' || mode === 'import' || autoRenew) && <label className="dialog-field"><span>{mode === 'import' ? t('certificate.sourceNode') : t('certificate.signingNode')}</span><SelectField ariaLabel={t('certificate.signingNode')} value={nodeID} onChange={(value) => { setNodeID(value); setSyncNodeIDs((items) => items.filter((id) => id !== value)) }} placeholder={t('common.select')} icon="server" options={nodeOptions} /></label>}
           {mode === 'import' && <label className="dialog-field"><span>{t('certificate.nodeCertificate')}</span><SelectField ariaLabel={t('certificate.nodeCertificate')} value={nodeDomain} onChange={setNodeDomain} placeholder={t('certificate.noNodeCertificates')} icon="shield" options={importableCertificates.map((certificate) => ({ value: certificate.domain, label: certificate.domain, description: certificate.not_after ? new Date(certificate.not_after).toLocaleDateString() : certificate.path }))} /></label>}
-          {mode === 'upload' && <div className="certificate-upload-grid"><FileField label={t('certificate.fullchain')} file={fullchain} onChange={setFullchain} accept=".pem,.crt" /><FileField label={t('certificate.privkey')} file={privkey} onChange={setPrivkey} accept=".pem,.key" /></div>}
+          {mode === 'upload' && <div className="certificate-upload-surface"><div className="upload-recognition"><Icon name="shield" size={20} /><span>{t('certificate.detectDomain')}</span></div><div className="certificate-upload-grid"><FileField label={t('certificate.certificateFile')} file={fullchain} onChange={setFullchain} accept="" /><FileField label={t('certificate.privateKeyFile')} file={privkey} onChange={setPrivkey} accept="" /></div></div>}
           <label className="switch-row"><button type="button" role="switch" aria-checked={autoRenew} className={autoRenew ? 'switch-on' : ''} onClick={() => setAutoRenew((value) => !value)}><i /></button><span><strong>{t('certificate.renewToggle')}</strong><small>{t('certificate.renewHint', { days: 30 })}</small></span></label>
-          {showAutomation && <div className="account-fields certificate-account-fields"><label><span>{t('certificate.dnsAccount')}</span><SelectField ariaLabel={t('certificate.dnsAccount')} value={dnsAccountID} onChange={setDNSAccountID} placeholder={t('common.select')} icon="dns" options={dnsAccounts.map((account) => ({ value: account.id, label: account.name, description: account.provider }))} /></label><label><span>{t('certificate.acmeAccount')}</span><SelectField ariaLabel={t('certificate.acmeAccount')} value={acmeAccountID} onChange={setACMEAccountID} placeholder={t('common.select')} icon="key" options={acmeAccounts.map((account) => ({ value: account.id, label: account.name, description: account.email }))} /></label></div>}
           <div className="certificate-node-field"><span>{t('certificate.syncNodes')}</span><div className="node-check-list">{otherNodes.length ? otherNodes.map((node) => <button type="button" className={syncNodeIDs.includes(node.id) ? 'selected' : ''} onClick={() => setSyncNodeIDs((items) => items.includes(node.id) ? items.filter((id) => id !== node.id) : [...items, node.id])} key={node.id}><StatusDot tone={node.status === 'online' ? 'good' : 'warning'} /><span><strong>{node.name}</strong><small>{node.hostname || node.status}</small></span>{syncNodeIDs.includes(node.id) && <Icon name="check" size={16} weight="bold" />}</button>) : <small>{t('common.none')}</small>}</div><small>{t('certificate.syncHint')}</small></div>
           {error && <div className="form-error" role="alert"><Icon name="warning" size={16} />{error}</div>}
         </div>
@@ -357,13 +312,28 @@ export function CertificateAutomationDialog({ open, certificate, nodes, dnsAccou
   function submit(event: FormEvent) {
     event.preventDefault()
     const days = Number(renewDays)
-    if (!nodeID || !dnsAccountID || !acmeAccountID || !Number.isInteger(days) || days < 7 || days > 60) {
+    if (!nodeID || !Number.isInteger(days) || days < 7 || days > 60) {
       setError(t('certificate.validationAutomation'))
       return
     }
     void onSave({ node_id: nodeID, dns_account_id: dnsAccountID, acme_account_id: acmeAccountID, auto_renew: autoRenew, renew_before_days: days, dns_names: [certificate!.domain, ...names] })
   }
-  return <DialogShell open={open} title={t('certificate.editAutomation')} description={t('certificate.editAutomationHint', { domain: certificate.domain })} onClose={onClose} wide><form className="certificate-dialog-form automation-dialog-form" onSubmit={submit}><div className="certificate-dialog-scroll"><CertificateNamesField primary={certificate.domain} values={names} draft={nameDraft} onDraft={setNameDraft} onChange={setNames} /><div className="account-fields certificate-account-fields"><label><span>{t('certificate.signingNode')}</span><SelectField ariaLabel={t('certificate.signingNode')} value={nodeID} onChange={setNodeID} icon="server" options={availableNodes.map((node) => ({ value: node.id, label: node.name, description: node.os_name || node.hostname }))} /></label><label><span>{t('certificate.dnsAccount')}</span><SelectField ariaLabel={t('certificate.dnsAccount')} value={dnsAccountID} onChange={setDNSAccountID} icon="dns" options={dnsAccounts.map((account) => ({ value: account.id, label: account.name, description: account.provider }))} /></label><label><span>{t('certificate.acmeAccount')}</span><SelectField ariaLabel={t('certificate.acmeAccount')} value={acmeAccountID} onChange={setACMEAccountID} icon="key" options={acmeAccounts.map((account) => ({ value: account.id, label: account.name, description: account.email }))} /></label><label><span>{t('certificate.renewDays')}</span><div className="field-control"><Icon name="clock" size={17} /><input inputMode="numeric" value={renewDays} onChange={(event) => setRenewDays(event.target.value.replace(/\D/g, '').slice(0, 2))} /></div></label></div><label className="switch-row"><button type="button" role="switch" aria-checked={autoRenew} className={autoRenew ? 'switch-on' : ''} onClick={() => setAutoRenew((value) => !value)}><i /></button><span><strong>{t('certificate.renewToggle')}</strong><small>{t('certificate.renewHint', { days: Number(renewDays) || 30 })}</small></span></label>{error && <div className="form-error" role="alert"><Icon name="warning" size={16} />{error}</div>}</div><footer className="certificate-dialog-footer"><button className="text-button" type="button" onClick={onClose}>{t('common.cancel')}</button><ActionButton type="submit" plain disabled={busy}>{busy ? t('common.saving') : t('common.save')}</ActionButton></footer></form></DialogShell>
+  return (
+    <DialogShell open={open} title={t('certificate.editAutomation')} description={t('certificate.editAutomationHint', { domain: certificate.domain })} onClose={onClose} wide>
+      <form className="certificate-dialog-form automation-dialog-form" onSubmit={submit}>
+        <div className="certificate-dialog-scroll">
+          <CertificateNamesField primary={certificate.domain} values={names} draft={nameDraft} onDraft={setNameDraft} onChange={setNames} />
+          <div className="account-fields certificate-account-fields compact-automation-fields">
+            <label><span>{t('certificate.signingNode')}</span><SelectField ariaLabel={t('certificate.signingNode')} value={nodeID} onChange={setNodeID} icon="server" options={availableNodes.map((node) => ({ value: node.id, label: node.name, description: node.os_name || node.hostname }))} /></label>
+            <label><span>{t('certificate.renewDays')}</span><div className="field-control"><Icon name="clock" size={17} /><input inputMode="numeric" value={renewDays} onChange={(event) => setRenewDays(event.target.value.replace(/\D/g, '').slice(0, 2))} /></div></label>
+          </div>
+          <label className="switch-row"><button type="button" role="switch" aria-checked={autoRenew} className={autoRenew ? 'switch-on' : ''} onClick={() => setAutoRenew((value) => !value)}><i /></button><span><strong>{t('certificate.renewToggle')}</strong><small>{t('certificate.renewHint', { days: Number(renewDays) || 30 })}</small></span></label>
+          {error && <div className="form-error" role="alert"><Icon name="warning" size={16} />{error}</div>}
+        </div>
+        <footer className="certificate-dialog-footer"><button className="text-button" type="button" onClick={onClose}>{t('common.cancel')}</button><ActionButton type="submit" plain disabled={busy}>{busy ? t('common.saving') : t('common.save')}</ActionButton></footer>
+      </form>
+    </DialogShell>
+  )
 }
 
 export function SyncDialog({ open, certificate, nodes, busy, onClose, onSync }: {

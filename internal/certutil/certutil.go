@@ -82,13 +82,13 @@ func parseLeaf(data []byte) (*x509.Certificate, error) {
 		}
 		return cert, nil
 	}
-	return nil, errors.New("fullchain.pem does not contain an X.509 certificate")
+	return nil, errors.New("certificate file does not contain an X.509 certificate")
 }
 
 func parsePrivateKey(data []byte) (crypto.Signer, error) {
 	block, _ := pem.Decode(data)
 	if block == nil {
-		return nil, errors.New("privkey.pem does not contain a PEM private key")
+		return nil, errors.New("private key file does not contain a PEM key")
 	}
 	parsers := []func([]byte) (any, error){
 		func(der []byte) (any, error) { return x509.ParsePKCS8PrivateKey(der) },
@@ -104,7 +104,7 @@ func parsePrivateKey(data []byte) (crypto.Signer, error) {
 			return signer, nil
 		}
 	}
-	return nil, errors.New("privkey.pem contains an unsupported private key")
+	return nil, errors.New("private key file contains an unsupported key")
 }
 
 func matchPublicKey(certKey, privateKey crypto.PublicKey) error {

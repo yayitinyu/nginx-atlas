@@ -110,7 +110,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, _ *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"nodes": nodes, "domains": domains, "certificates": certificates, "audit": audit, "jobs": jobs,
-		"server_time": time.Now().UTC(),
+		"settings": s.effectiveSettings(state), "server_time": time.Now().UTC(),
 	})
 }
 
@@ -149,7 +149,7 @@ func (s *Server) handleCreateEnrollment(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	request.Name = strings.TrimSpace(request.Name)
-	if len(request.Name) < 2 || len(request.Name) > 64 {
+	if len(request.Name) > 64 {
 		writeError(w, http.StatusBadRequest, "节点名称需为 2–64 个字符", "invalid_node_name", nil)
 		return
 	}
@@ -186,8 +186,8 @@ func (s *Server) handleCreateEnrollment(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	baseURL := s.publicURL(r)
-	command := fmt.Sprintf("curl -fsSL %s/install.sh | sudo bash -s -- agent --server %s --token %s --name %s",
-		shellQuote(baseURL), shellQuote(baseURL), shellQuote(token), shellQuote(request.Name))
+	command := fmt.Sprintf("curl -fsSL %s/install.sh | sudo bash -s -- agent --server %s --token %s",
+		shellQuote(baseURL), shellQuote(baseURL), shellQuote(token))
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"id": enrollmentID, "name": request.Name, "token": token, "expires_at": expiresAt, "command": command,
 	})
@@ -411,7 +411,7 @@ func (s *Server) handleCreateDomain(w http.ResponseWriter, r *http.Request) {
 			CloudflareEnabled: request.CloudflareEnabled, CloudflareDNSAccountID: request.CloudflareDNSAccountID,
 			CloudflareProxied: request.CloudflareProxied, CloudflareRecordType: request.CloudflareRecordType,
 			CloudflareRecordContent: request.CloudflareRecordContent,
-			NginxWebsocket: request.NginxWebsocket, NginxHTTP2: request.NginxHTTP2, NginxGzip: request.NginxGzip,
+			NginxWebsocket:          request.NginxWebsocket, NginxHTTP2: request.NginxHTTP2, NginxGzip: request.NginxGzip,
 		}
 		state.Domains[domainID] = created
 		var job model.Job
@@ -650,6 +650,9 @@ func (s *Server) handleDeleteDomain(w http.ResponseWriter, r *http.Request) {
 			s.addAudit(state, "info", "domain.observation.removed", "已停止管理节点现有域名；原 Nginx 配置未修改", domain.NodeID, domain.ID)
 			return nil
 		}
+		if domainIsDeleting(*state, domain) {
+			return errConflict
+		}
 		restorePath := ""
 		if domain.TakenOver {
 			restorePath = domain.ConfigPath
@@ -659,6 +662,7 @@ func (s *Server) handleDeleteDomain(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 		domain.Enabled = false
+		domain.Deleting = true
 		domain.LastJobID = job.ID
 		domain.UpdatedAt = time.Now().UTC()
 		state.Domains[domain.ID] = domain
@@ -667,6 +671,10 @@ func (s *Server) handleDeleteDomain(w http.ResponseWriter, r *http.Request) {
 	})
 	if errors.Is(err, errNotFound) {
 		writeError(w, http.StatusNotFound, "域名不存在", "not_found", nil)
+		return
+	}
+	if errors.Is(err, errConflict) {
+		writeError(w, http.StatusConflict, "域名正在删除", "delete_in_progress", nil)
 		return
 	}
 	if err != nil {
@@ -814,12 +822,18 @@ func (s *Server) handleIssueCertificate(w http.ResponseWriter, r *http.Request) 
 	}
 	request.DNSNames = dnsNames
 	request.RenewBeforeDays = normalizeRenewBeforeDays(request.RenewBeforeDays)
-	if request.RenewBeforeDays < 7 || request.RenewBeforeDays > 60 || request.ACMEAccountID == "" || request.DNSAccountID == "" {
-		writeError(w, http.StatusBadRequest, "自动签发需要有效续期窗口、DNS 与 ACME 账户", "invalid_automation", nil)
+	if request.RenewBeforeDays < 7 || request.RenewBeforeDays > 60 {
+		writeError(w, http.StatusBadRequest, "自动签发需要有效续期窗口", "invalid_automation", nil)
 		return
 	}
 	var job model.Job
 	err = s.store.Update(func(state *model.State) error {
+		if request.ACMEAccountID == "" {
+			request.ACMEAccountID = firstACMEAccountID(*state)
+		}
+		if request.DNSAccountID == "" {
+			request.DNSAccountID = firstDNSAccountID(*state)
+		}
 		if node, ok := state.Nodes[request.NodeID]; !ok || node.Status == model.NodeRevoked {
 			return fmt.Errorf("%w: node", errNotFound)
 		}
@@ -889,6 +903,12 @@ func (s *Server) handleImportCertificate(w http.ResponseWriter, r *http.Request)
 			return errors.New("node has not reported a valid certificate for this domain")
 		}
 		if request.AutoRenew {
+			if request.ACMEAccountID == "" {
+				request.ACMEAccountID = firstACMEAccountID(*state)
+			}
+			if request.DNSAccountID == "" {
+				request.DNSAccountID = firstDNSAccountID(*state)
+			}
 			if _, ok := state.ACMEAccounts[request.ACMEAccountID]; !ok {
 				return fmt.Errorf("%w: acme", errNotFound)
 			}
@@ -996,24 +1016,33 @@ func (s *Server) handleUploadCertificate(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	domain := strings.ToLower(strings.TrimSpace(r.FormValue("domain")))
-	if _, err := nginxconfig.ConfigFileName(domain); err != nil {
-		writeError(w, http.StatusBadRequest, "域名无效", "invalid_domain", nil)
+	if domain != "" {
+		if _, err := nginxconfig.ConfigFileName(domain); err != nil {
+			writeError(w, http.StatusBadRequest, "域名无效", "invalid_domain", nil)
+			return
+		}
+	}
+	fullchain, err := readFirstFormFile(r, []string{"certificate", "fullchain"}, 4<<20)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "无法读取证书文件", "invalid_certificate_file", map[string]string{"reason": err.Error()})
 		return
 	}
-	fullchain, err := readFormFile(r, "fullchain", 4<<20)
+	privateKey, err := readFirstFormFile(r, []string{"private_key", "privkey"}, 1<<20)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "无法读取 fullchain.pem", "invalid_fullchain", map[string]string{"reason": err.Error()})
-		return
-	}
-	privateKey, err := readFormFile(r, "privkey", 1<<20)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "无法读取 privkey.pem", "invalid_private_key", map[string]string{"reason": err.Error()})
+		writeError(w, http.StatusBadRequest, "无法读取私钥文件", "invalid_private_key", map[string]string{"reason": err.Error()})
 		return
 	}
 	info, err := certutil.Validate(fullchain, privateKey, domain, time.Now())
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "证书校验失败", "certificate_invalid", map[string]string{"reason": err.Error()})
 		return
+	}
+	if domain == "" {
+		domain, err = inferCertificateDomain(info)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "无法从证书识别域名", "certificate_domain_missing", nil)
+			return
+		}
 	}
 	autoRenew, err := strconv.ParseBool(defaultString(r.FormValue("auto_renew"), "false"))
 	if err != nil {
@@ -1035,8 +1064,8 @@ func (s *Server) handleUploadCertificate(w http.ResponseWriter, r *http.Request)
 			return
 		}
 	}
-	if autoRenew && (issuerNodeID == "" || acmeAccountID == "" || dnsAccountID == "") {
-		writeError(w, http.StatusBadRequest, "自动续期需要签发节点、DNS 与 ACME 账户", "renewal_accounts_required", nil)
+	if autoRenew && issuerNodeID == "" {
+		writeError(w, http.StatusBadRequest, "自动续期需要签发节点", "renewal_node_required", nil)
 		return
 	}
 	if !autoRenew {
@@ -1075,6 +1104,14 @@ func (s *Server) handleUploadCertificate(w http.ResponseWriter, r *http.Request)
 			}
 		}
 		if autoRenew {
+			if certificate.ACMEAccountID == "" {
+				certificate.ACMEAccountID = firstACMEAccountID(*state)
+			}
+			if certificate.DNSAccountID == "" {
+				certificate.DNSAccountID = firstDNSAccountID(*state)
+			}
+			acmeAccountID = certificate.ACMEAccountID
+			dnsAccountID = certificate.DNSAccountID
 			if _, ok := state.ACMEAccounts[acmeAccountID]; !ok {
 				return fmt.Errorf("%w: acme", errNotFound)
 			}
@@ -1229,10 +1266,10 @@ func (s *Server) handleUpdateCertificateAutomation(w http.ResponseWriter, r *htt
 			request.NodeID = certificate.IssuerNodeID
 		}
 		if request.ACMEAccountID == "" {
-			request.ACMEAccountID = certificate.ACMEAccountID
+			request.ACMEAccountID = defaultString(certificate.ACMEAccountID, firstACMEAccountID(*state))
 		}
 		if request.DNSAccountID == "" {
-			request.DNSAccountID = certificate.DNSAccountID
+			request.DNSAccountID = defaultString(certificate.DNSAccountID, firstDNSAccountID(*state))
 		}
 		if request.AutoRenew && (request.NodeID == "" || request.ACMEAccountID == "" || request.DNSAccountID == "") {
 			return errors.New("自动续期需要签发节点、DNS 与 ACME 账户")
@@ -1293,12 +1330,15 @@ func certificateAutomationDependencies(state *model.State, certificate model.Cer
 		return certificate.IssuerNodeID, certificate.ACMEAccountID, certificate.DNSAccountID
 	}
 	for _, domain := range state.Domains {
+		if domainIsDeleting(*state, domain) {
+			continue
+		}
 		if domain.CertificateID == certificate.ID && domain.Name == certificate.Domain &&
 			domain.NodeID != "" && domain.ACMEAccountID != "" && domain.DNSAccountID != "" {
 			return domain.NodeID, domain.ACMEAccountID, domain.DNSAccountID
 		}
 	}
-	return certificate.IssuerNodeID, certificate.ACMEAccountID, certificate.DNSAccountID
+	return certificate.IssuerNodeID, defaultString(certificate.ACMEAccountID, firstACMEAccountID(*state)), defaultString(certificate.DNSAccountID, firstDNSAccountID(*state))
 }
 
 func (s *Server) handleRenewCertificate(w http.ResponseWriter, r *http.Request) {
@@ -1475,10 +1515,17 @@ func (s *Server) handleCreateDNSAccount(w http.ResponseWriter, r *http.Request) 
 	now := time.Now().UTC()
 	account := model.DNSAccount{ID: accountID, Name: request.Name, Provider: request.Provider, CredentialsCiphertext: ciphertext, CreatedAt: now, UpdatedAt: now}
 	if err := s.store.Update(func(state *model.State) error {
+		if len(state.DNSAccounts) > 0 {
+			return errConflict
+		}
 		state.DNSAccounts[account.ID] = account
 		s.addAudit(state, "info", "dns-account.created", "DNS 账户已加密保存")
 		return nil
 	}); err != nil {
+		if errors.Is(err, errConflict) {
+			writeError(w, http.StatusConflict, "DNS 账户已存在", "dns_account_exists", nil)
+			return
+		}
 		wrapStoreError(w, err)
 		return
 	}
@@ -1620,10 +1667,17 @@ func (s *Server) handleCreateACMEAccount(w http.ResponseWriter, r *http.Request)
 		EABKID: request.EABKID, EABHMACCiphertext: hmacCiphertext, CreatedAt: now, UpdatedAt: now,
 	}
 	if err := s.store.Update(func(state *model.State) error {
+		if len(state.ACMEAccounts) > 0 {
+			return errConflict
+		}
 		state.ACMEAccounts[account.ID] = account
 		s.addAudit(state, "info", "acme-account.created", "ACME 账户已保存")
 		return nil
 	}); err != nil {
+		if errors.Is(err, errConflict) {
+			writeError(w, http.StatusConflict, "ACME 账户已存在", "acme_account_exists", nil)
+			return
+		}
 		wrapStoreError(w, err)
 		return
 	}
@@ -1770,6 +1824,9 @@ func domainViews(state model.State) []domainView {
 	result := make([]domainView, 0, len(state.Domains))
 	now := time.Now()
 	for _, domain := range state.Domains {
+		if domainIsDeleting(state, domain) {
+			continue
+		}
 		view := domainView{Domain: domain, CertificateStatus: "none"}
 		if node, ok := state.Nodes[domain.NodeID]; ok {
 			view.NodeName = node.Name
@@ -1812,6 +1869,14 @@ func domainViews(state model.State) []domainView {
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].CreatedAt.Before(result[j].CreatedAt) })
 	return result
+}
+
+func domainIsDeleting(state model.State, domain model.Domain) bool {
+	if domain.Deleting {
+		return true
+	}
+	job, ok := state.Jobs[domain.LastJobID]
+	return ok && job.Type == protocol.JobDeleteDomain && job.Status != model.JobFailed
 }
 
 func certificateViews(state model.State) []certificateView {
@@ -1901,6 +1966,36 @@ func readFormFile(r *http.Request, name string, limit int64) ([]byte, error) {
 		return nil, errors.New("file exceeds size limit")
 	}
 	return data, nil
+}
+
+func readFirstFormFile(r *http.Request, names []string, limit int64) ([]byte, error) {
+	var lastErr error
+	for _, name := range names {
+		data, err := readFormFile(r, name, limit)
+		if err == nil {
+			return data, nil
+		}
+		lastErr = err
+	}
+	return nil, lastErr
+}
+
+func inferCertificateDomain(info certutil.Info) (string, error) {
+	candidates := append([]string(nil), info.DNSNames...)
+	if info.Leaf != nil {
+		candidates = append(candidates, info.Leaf.Subject.CommonName)
+	}
+	for _, candidate := range candidates {
+		candidate = strings.ToLower(strings.TrimSpace(candidate))
+		validationName := strings.TrimPrefix(candidate, "*.")
+		if candidate == "" || validationName == candidate && strings.Contains(candidate, "*") {
+			continue
+		}
+		if _, err := nginxconfig.ConfigFileName(validationName); err == nil {
+			return candidate, nil
+		}
+	}
+	return "", errors.New("certificate has no usable DNS name")
 }
 
 func shellQuote(value string) string {
