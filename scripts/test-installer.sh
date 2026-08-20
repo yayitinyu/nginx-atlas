@@ -23,9 +23,24 @@ PANEL_DOMAIN="atlas.example.com"
 install -d -m 0755 "$NGINX_CONFIG_DIR"
 cat >"$NGINX_CONFIG_DIR/atlas-$PANEL_DOMAIN.conf" <<EOF
 # Managed by Nginx Atlas. Manual changes will be replaced.
-server { server_name $PANEL_DOMAIN; }
+server {
+  server_name $PANEL_DOMAIN;
+  location / { proxy_pass http://127.0.0.1:9090; }
+}
 EOF
 panel_is_agent_managed
+
+cat >"$NGINX_CONFIG_DIR/atlas-$PANEL_DOMAIN.conf" <<EOF
+# Managed by Nginx Atlas. Manual changes will be replaced.
+server {
+  server_name $PANEL_DOMAIN;
+  location / { proxy_pass https://origin.example.com; }
+}
+EOF
+if (panel_is_agent_managed >/dev/null 2>&1); then
+  printf 'Expected external upstream rejection.\n' >&2
+  exit 1
+fi
 
 file_help="$(bash "$ROOT_DIR/deploy/install.sh" --help)"
 stdin_help="$(bash -s -- --help <"$ROOT_DIR/deploy/install.sh")"

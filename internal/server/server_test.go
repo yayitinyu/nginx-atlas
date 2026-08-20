@@ -9,6 +9,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"io"
 	"math/big"
 	"mime/multipart"
@@ -297,6 +298,143 @@ func TestClearPendingJobsRemovesQueuedAndFailedButKeepsRunning(t *testing.T) {
 	domain := snapshot.Domains["dom_clear"]
 	if domain.Deleting || !domain.Enabled || domain.LastJobID != "" || domain.LastError != "" {
 		t.Fatalf("cleared deletion did not restore domain: %+v", domain)
+	}
+}
+
+func TestAuditListsAllRetainedEventsAndCanBeCleared(t *testing.T) {
+	stateStore, err := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	box, _ := securebox.New(bytes.Repeat([]byte{0x38}, 32))
+	adminToken := strings.Repeat("d", 32)
+	controller, err := New(Config{AdminToken: adminToken}, stateStore, box, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if err := stateStore.Update(func(state *model.State) error {
+		for index := 0; index < 3; index++ {
+			store.AppendAudit(state, model.AuditEvent{ID: fmt.Sprintf("audit_%d", index), Level: "info", Action: "test.event", Message: "test", CreatedAt: now.Add(time.Duration(index) * time.Second)})
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	listed := performJSON(t, controller.Handler(), http.MethodGet, "/api/v1/audit?limit=500", nil, "Bearer "+adminToken)
+	if listed.Code != http.StatusOK {
+		t.Fatalf("list audit returned %d: %s", listed.Code, listed.Body.String())
+	}
+	var events []model.AuditEvent
+	decodeRecorder(t, listed, &events)
+	if len(events) != 3 {
+		t.Fatalf("listed %d audit events, want 3", len(events))
+	}
+
+	cleared := performJSON(t, controller.Handler(), http.MethodDelete, "/api/v1/audit", nil, "Bearer "+adminToken)
+	if cleared.Code != http.StatusOK {
+		t.Fatalf("clear audit returned %d: %s", cleared.Code, cleared.Body.String())
+	}
+	var result map[string]int
+	decodeRecorder(t, cleared, &result)
+	if result["cleared"] != 3 || len(stateStore.Snapshot().Audit) != 0 {
+		t.Fatalf("clear result=%v audit=%v", result, stateStore.Snapshot().Audit)
+	}
+}
+
+func TestBatchCertificateDeleteIsAtomicAndRejectsReferences(t *testing.T) {
+	stateStore, err := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	box, _ := securebox.New(bytes.Repeat([]byte{0x39}, 32))
+	adminToken := strings.Repeat("e", 32)
+	controller, err := New(Config{AdminToken: adminToken}, stateStore, box, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if err := stateStore.Update(func(state *model.State) error {
+		state.Certificates["free"] = model.Certificate{ID: "free", Domain: "free.example.com", CreatedAt: now, UpdatedAt: now}
+		state.Certificates["linked"] = model.Certificate{ID: "linked", Domain: "linked.example.com", CreatedAt: now, UpdatedAt: now}
+		state.Domains["linked-domain"] = model.Domain{ID: "linked-domain", Name: "linked.example.com", CertificateID: "linked", CreatedAt: now, UpdatedAt: now}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	blocked := performJSON(t, controller.Handler(), http.MethodDelete, "/api/v1/certificates", map[string]any{"ids": []string{"free", "linked"}}, "Bearer "+adminToken)
+	if blocked.Code != http.StatusConflict {
+		t.Fatalf("referenced batch delete returned %d: %s", blocked.Code, blocked.Body.String())
+	}
+	if len(stateStore.Snapshot().Certificates) != 2 {
+		t.Fatal("batch certificate delete was not atomic")
+	}
+	if err := stateStore.Update(func(state *model.State) error { delete(state.Domains, "linked-domain"); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	deleted := performJSON(t, controller.Handler(), http.MethodDelete, "/api/v1/certificates", map[string]any{"ids": []string{"free", "linked"}}, "Bearer "+adminToken)
+	if deleted.Code != http.StatusOK {
+		t.Fatalf("batch certificate delete returned %d: %s", deleted.Code, deleted.Body.String())
+	}
+	if len(stateStore.Snapshot().Certificates) != 0 {
+		t.Fatal("selected certificates were not deleted")
+	}
+}
+
+func TestUpdateAllNodesQueuesOnlyEligibleNodes(t *testing.T) {
+	var releaseServer *httptest.Server
+	releaseServer = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/releases/latest"):
+			writeJSON(w, http.StatusOK, map[string]any{
+				"tag_name": "v9.9.9", "html_url": releaseServer.URL, "published_at": time.Now().UTC(),
+				"assets": []map[string]string{
+					{"name": "nginx-atlas_9.9.9_linux_amd64.tar.gz", "browser_download_url": releaseServer.URL + "/asset"},
+					{"name": "checksums.txt", "browser_download_url": releaseServer.URL + "/checksums.txt"},
+				},
+			})
+		case r.URL.Path == "/checksums.txt":
+			_, _ = fmt.Fprintf(w, "%s  nginx-atlas_9.9.9_linux_amd64.tar.gz\n", strings.Repeat("a", 64))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer releaseServer.Close()
+
+	stateStore, err := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	box, _ := securebox.New(bytes.Repeat([]byte{0x3a}, 32))
+	adminToken := strings.Repeat("f", 32)
+	controller, err := New(Config{AdminToken: adminToken, Repository: "owner/repo", ReleaseAPIURL: releaseServer.URL}, stateStore, box, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if err := stateStore.Update(func(state *model.State) error {
+		state.Nodes["old"] = model.Node{ID: "old", Name: "Old", Status: model.NodeOnline, Arch: "amd64", AgentVersion: "1.0.0", CreatedAt: now}
+		state.Nodes["current"] = model.Node{ID: "current", Name: "Current", Status: model.NodeOnline, Arch: "amd64", AgentVersion: "9.9.9", CreatedAt: now}
+		state.Nodes["unsupported"] = model.Node{ID: "unsupported", Name: "Unsupported", Status: model.NodeOnline, Arch: "riscv64", AgentVersion: "1.0.0", CreatedAt: now}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	queued := performJSON(t, controller.Handler(), http.MethodPost, "/api/v1/nodes/update-atlas", struct{}{}, "Bearer "+adminToken)
+	if queued.Code != http.StatusAccepted {
+		t.Fatalf("update all returned %d: %s", queued.Code, queued.Body.String())
+	}
+	var result struct {
+		Queued  int         `json:"queued"`
+		Skipped int         `json:"skipped"`
+		Jobs    []model.Job `json:"jobs"`
+	}
+	decodeRecorder(t, queued, &result)
+	if result.Queued != 1 || result.Skipped != 2 || len(result.Jobs) != 1 || result.Jobs[0].NodeID != "old" {
+		t.Fatalf("unexpected update-all result: %+v", result)
 	}
 }
 

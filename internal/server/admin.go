@@ -146,6 +146,20 @@ func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, audit)
 }
 
+func (s *Server) handleClearAudit(w http.ResponseWriter, _ *http.Request) {
+	cleared := 0
+	err := s.store.Update(func(state *model.State) error {
+		cleared = len(state.Audit)
+		state.Audit = []model.AuditEvent{}
+		return nil
+	})
+	if err != nil {
+		wrapStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]int{"cleared": cleared})
+}
+
 func (s *Server) handleRetryJob(w http.ResponseWriter, r *http.Request) {
 	jobID := r.PathValue("id")
 	retryID, err := id.New("job")
@@ -348,6 +362,127 @@ func (s *Server) handleRevokeNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleRevokeNodes(w http.ResponseWriter, r *http.Request) {
+	ids, ok := decodeBatchIDs(w, r)
+	if !ok {
+		return
+	}
+	now := time.Now().UTC()
+	err := s.store.Update(func(state *model.State) error {
+		for _, nodeID := range ids {
+			node, exists := state.Nodes[nodeID]
+			if !exists || node.Status == model.NodeRevoked {
+				return errNotFound
+			}
+		}
+		for _, nodeID := range ids {
+			revokeNodeState(state, nodeID, now)
+			s.addAudit(state, "warning", "node.revoked", "节点访问凭据已撤销", nodeID)
+		}
+		return nil
+	})
+	if errors.Is(err, errNotFound) {
+		writeError(w, http.StatusNotFound, "所选节点不存在或已撤销", "not_found", nil)
+		return
+	}
+	if err != nil {
+		wrapStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]int{"deleted": len(ids)})
+}
+
+func (s *Server) handleDeleteCertificates(w http.ResponseWriter, r *http.Request) {
+	ids, ok := decodeBatchIDs(w, r)
+	if !ok {
+		return
+	}
+	err := s.store.Update(func(state *model.State) error {
+		selected := make(map[string]struct{}, len(ids))
+		for _, certificateID := range ids {
+			if _, exists := state.Certificates[certificateID]; !exists {
+				return errNotFound
+			}
+			selected[certificateID] = struct{}{}
+		}
+		for _, domain := range state.Domains {
+			if _, exists := selected[domain.CertificateID]; exists {
+				return errConflict
+			}
+		}
+		for certificateID := range selected {
+			if hasActiveCertificateReference(state, certificateID) {
+				return errConflict
+			}
+		}
+		for _, certificateID := range ids {
+			delete(state.Certificates, certificateID)
+		}
+		s.addAudit(state, "warning", "certificate.deleted", fmt.Sprintf("已移除 %d 张证书", len(ids)))
+		return nil
+	})
+	if errors.Is(err, errNotFound) {
+		writeError(w, http.StatusNotFound, "所选证书不存在", "not_found", nil)
+		return
+	}
+	if errors.Is(err, errConflict) {
+		writeError(w, http.StatusConflict, "所选证书仍被域名或执行中的任务使用", "certificate_in_use", nil)
+		return
+	}
+	if err != nil {
+		wrapStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]int{"deleted": len(ids)})
+}
+
+func decodeBatchIDs(w http.ResponseWriter, r *http.Request) ([]string, bool) {
+	var request struct {
+		IDs []string `json:"ids"`
+	}
+	if !decodeJSON(w, r, &request) {
+		return nil, false
+	}
+	if len(request.IDs) == 0 || len(request.IDs) > 100 {
+		writeError(w, http.StatusBadRequest, "请选择 1–100 项", "invalid_selection", nil)
+		return nil, false
+	}
+	seen := make(map[string]struct{}, len(request.IDs))
+	ids := make([]string, 0, len(request.IDs))
+	for _, raw := range request.IDs {
+		value := strings.TrimSpace(raw)
+		if value == "" || len(value) > 128 || strings.ContainsAny(value, "\r\n\x00") {
+			writeError(w, http.StatusBadRequest, "选择项无效", "invalid_selection", nil)
+			return nil, false
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		ids = append(ids, value)
+	}
+	if len(ids) == 0 {
+		writeError(w, http.StatusBadRequest, "请选择至少一项", "invalid_selection", nil)
+		return nil, false
+	}
+	return ids, true
+}
+
+func hasActiveCertificateReference(state *model.State, certificateID string) bool {
+	for _, job := range state.Jobs {
+		if job.Status != model.JobQueued && job.Status != model.JobRunning {
+			continue
+		}
+		var reference struct {
+			CertificateID string `json:"certificate_id"`
+		}
+		if json.Unmarshal(job.Payload, &reference) == nil && reference.CertificateID == certificateID {
+			return true
+		}
+	}
+	return false
 }
 
 type createDomainRequest struct {

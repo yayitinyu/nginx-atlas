@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -122,6 +123,61 @@ func (s *Server) handleUpdateNodeAtlas(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusAccepted, job)
+}
+
+func (s *Server) handleUpdateAllNodesAtlas(w http.ResponseWriter, r *http.Request) {
+	release, err := s.fetchLatestRelease(r.Context())
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "无法读取可验证的最新发行版", "release_unavailable", map[string]string{"reason": err.Error()})
+		return
+	}
+	jobs := make([]model.Job, 0)
+	skipped := 0
+	err = s.store.Update(func(state *model.State) error {
+		nodeIDs := make([]string, 0, len(state.Nodes))
+		for nodeID, node := range state.Nodes {
+			if node.Status != model.NodeRevoked {
+				nodeIDs = append(nodeIDs, nodeID)
+			}
+		}
+		sort.Slice(nodeIDs, func(i, j int) bool {
+			left, right := state.Nodes[nodeIDs[i]], state.Nodes[nodeIDs[j]]
+			if left.ControllerInstalled != right.ControllerInstalled {
+				return !left.ControllerInstalled
+			}
+			return strings.ToLower(left.Name) < strings.ToLower(right.Name)
+		})
+		for _, nodeID := range nodeIDs {
+			node := state.Nodes[nodeID]
+			if strings.TrimSpace(node.AgentVersion) != "" && node.AgentVersion != "dev" && !versionUpdateAvailable(node.AgentVersion, release.Version) {
+				skipped++
+				continue
+			}
+			asset, supported := release.Assets[normalizeNodeArch(node.Arch)]
+			if !supported || hasActiveNodeJob(state, nodeID, protocol.JobUpdateAtlas) {
+				skipped++
+				continue
+			}
+			job, enqueueErr := enqueueJob(state, nodeID, "", protocol.JobUpdateAtlas, protocol.UpdateAtlasPayload{
+				DownloadURL: asset.DownloadURL, SHA256: asset.SHA256, ExpectedVersion: release.Version,
+			})
+			if enqueueErr != nil {
+				return enqueueErr
+			}
+			jobs = append(jobs, job)
+			s.addAudit(state, "info", "node.atlas-update.queued", "Nginx Atlas 更新任务已加入队列", nodeID, "", job.ID)
+		}
+		return nil
+	})
+	if err != nil {
+		wrapStoreError(w, err)
+		return
+	}
+	status := http.StatusOK
+	if len(jobs) > 0 {
+		status = http.StatusAccepted
+	}
+	writeJSON(w, status, map[string]any{"queued": len(jobs), "skipped": skipped, "jobs": jobs, "version": release.Version})
 }
 
 func (s *Server) handleUpdateNodeSystem(w http.ResponseWriter, r *http.Request) {

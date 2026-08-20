@@ -122,3 +122,36 @@ func TestAgentCanUnregisterItselfBeforeLocalUninstall(t *testing.T) {
 		t.Fatalf("self-unregister deleted or left the managed domain active: %+v", preserved)
 	}
 }
+
+func TestBatchNodeRemovalRevokesEverySelectedCredential(t *testing.T) {
+	stateStore, err := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	box, _ := securebox.New(bytes.Repeat([]byte{0x6e}, 32))
+	adminToken := strings.Repeat("p", 32)
+	controller, err := New(Config{AdminToken: adminToken}, stateStore, box, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if err := stateStore.Update(func(state *model.State) error {
+		state.Nodes["one"] = model.Node{ID: "one", Name: "One", SecretHash: "one-secret", Status: model.NodeOnline, CreatedAt: now}
+		state.Nodes["two"] = model.Node{ID: "two", Name: "Two", SecretHash: "two-secret", Status: model.NodeOffline, CreatedAt: now}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	removed := performJSON(t, controller.Handler(), http.MethodDelete, "/api/v1/nodes", map[string]any{"ids": []string{"one", "two"}}, "Bearer "+adminToken)
+	if removed.Code != http.StatusOK {
+		t.Fatalf("batch removal returned %d: %s", removed.Code, removed.Body.String())
+	}
+	state := stateStore.Snapshot()
+	for _, nodeID := range []string{"one", "two"} {
+		node := state.Nodes[nodeID]
+		if node.Status != model.NodeRevoked || node.SecretHash != "" {
+			t.Fatalf("node %s was not revoked: %+v", nodeID, node)
+		}
+	}
+}

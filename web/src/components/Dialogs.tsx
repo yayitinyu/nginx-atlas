@@ -81,6 +81,59 @@ export function NodeManageDialog({ open, node, release, busy, onClose, onRename,
   )
 }
 
+export function NodeAddDialog({ open, busy, onClose, onGenerate }: {
+  open: boolean
+  busy: boolean
+  onClose: () => void
+  onGenerate: (name: string) => Promise<string>
+}) {
+  const { t } = usePreferences()
+  const [name, setName] = useState('')
+  const [command, setCommand] = useState('')
+  const [copied, setCopied] = useState(false)
+
+  useEffect(() => {
+    if (!open) return
+    setName('')
+    setCommand('')
+    setCopied(false)
+  }, [open])
+
+  async function submit(event: FormEvent) {
+    event.preventDefault()
+    const generated = await onGenerate(name.trim())
+    if (generated) setCommand(generated)
+  }
+
+  async function copyCommand() {
+    try {
+      await navigator.clipboard.writeText(command)
+      setCopied(true)
+    } catch {
+      setCopied(false)
+    }
+  }
+
+  return (
+    <DialogShell open={open} title={t('dialog.nodeTitle')} description={t('dialog.nodeDescription')} onClose={onClose} wide>
+      <form className="dialog-form node-add-dialog" onSubmit={submit}>
+        <label>
+          <span>{t('dialog.nodeName')} · {t('common.optional')}</span>
+          <div className="field-control"><Icon name="server" size={17} /><input value={name} maxLength={64} onChange={(event) => { setName(event.target.value); setCommand(''); setCopied(false) }} placeholder={t('dialog.nodeNamePlaceholder')} autoFocus /></div>
+        </label>
+        {command ? (
+          <section className="node-enrollment-command" aria-live="polite">
+            <span><Icon name="check" size={17} /><strong>{t('dialog.commandReady')}</strong></span>
+            <pre>{command}</pre>
+            <button type="button" onClick={() => void copyCommand()}><Icon name={copied ? 'check' : 'copy'} size={16} />{t(copied ? 'dialog.copied' : 'dialog.copyCommand')}</button>
+            <small><Icon name="lock" size={14} />{t('dialog.commandHint')}</small>
+          </section>
+        ) : <ActionButton type="submit" wide plain disabled={busy}>{busy ? t('common.loading') : t('dialog.generate')}</ActionButton>}
+      </form>
+    </DialogShell>
+  )
+}
+
 
 export function DNSAccountDialog({ open, account, busy, onClose, onSave }: {
   open: boolean
@@ -270,7 +323,7 @@ export function CertificateDialog({ open, nodes, dnsAccounts, acmeAccounts, busy
     else await onSubmit({ mode, input })
   }
 
-  const nodeOptions = availableNodes.map((node) => ({ value: node.id, label: node.name, description: node.status === 'online' ? t('common.online') : t('common.offline') }))
+  const nodeOptions = availableNodes.map((node) => ({ value: node.id, label: node.name, description: nodeSecondaryLabel(node, t) }))
   const otherNodes = availableNodes.filter((node) => node.id !== nodeID || mode === 'upload')
   return (
     <DialogShell open={open} title={t('certificate.add')} description="" onClose={onClose} wide>
@@ -285,7 +338,7 @@ export function CertificateDialog({ open, nodes, dnsAccounts, acmeAccounts, busy
           {mode === 'import' && <label className="dialog-field"><span>{t('certificate.nodeCertificate')}</span><SelectField ariaLabel={t('certificate.nodeCertificate')} value={nodeDomain} onChange={setNodeDomain} placeholder={t('certificate.noNodeCertificates')} icon="shield" options={importableCertificates.map((certificate) => ({ value: certificate.domain, label: certificate.domain, description: certificate.not_after ? new Date(certificate.not_after).toLocaleDateString() : certificate.path }))} /></label>}
           {mode === 'upload' && <div className="certificate-upload-surface"><div className="upload-recognition"><Icon name="shield" size={20} /><span>{t('certificate.detectDomain')}</span></div><div className="certificate-upload-grid"><FileField label={t('certificate.certificateFile')} file={fullchain} onChange={setFullchain} accept="" /><FileField label={t('certificate.privateKeyFile')} file={privkey} onChange={setPrivkey} accept="" /></div></div>}
           <label className="switch-row"><button type="button" role="switch" aria-checked={autoRenew} className={autoRenew ? 'switch-on' : ''} onClick={() => setAutoRenew((value) => !value)}><i /></button><span><strong>{t('certificate.renewToggle')}</strong><small>{t('certificate.renewHint', { days: 30 })}</small></span></label>
-          <div className="certificate-node-field"><span>{t('certificate.syncNodes')}</span><div className="node-check-list">{otherNodes.length ? otherNodes.map((node) => <button type="button" className={syncNodeIDs.includes(node.id) ? 'selected' : ''} onClick={() => setSyncNodeIDs((items) => items.includes(node.id) ? items.filter((id) => id !== node.id) : [...items, node.id])} key={node.id}><StatusDot tone={node.status === 'online' ? 'good' : 'warning'} /><span><strong>{node.name}</strong><small>{node.hostname || node.status}</small></span>{syncNodeIDs.includes(node.id) && <Icon name="check" size={16} weight="bold" />}</button>) : <small>{t('common.none')}</small>}</div><small>{t('certificate.syncHint')}</small></div>
+          <div className="certificate-node-field"><span>{t('certificate.syncNodes')}</span><div className="node-check-list">{otherNodes.length ? otherNodes.map((node) => <button type="button" className={syncNodeIDs.includes(node.id) ? 'selected' : ''} onClick={() => setSyncNodeIDs((items) => items.includes(node.id) ? items.filter((id) => id !== node.id) : [...items, node.id])} key={node.id}><StatusDot tone={node.status === 'online' ? 'good' : 'warning'} /><span><strong>{node.name}</strong><small>{nodeSecondaryLabel(node, t)}</small></span>{syncNodeIDs.includes(node.id) && <Icon name="check" size={16} weight="bold" />}</button>) : <small>{t('common.none')}</small>}</div><small>{t('certificate.syncHint')}</small></div>
           {error && <div className="form-error" role="alert"><Icon name="warning" size={16} />{error}</div>}
         </div>
         <footer className="certificate-dialog-footer"><button className="text-button" type="button" onClick={onClose}>{t('common.cancel')}</button><ActionButton type="submit" plain disabled={busy}>{busy ? t('common.queueing') : t(mode === 'upload' ? 'certificate.submitUpload' : mode === 'issue' ? 'certificate.submitIssue' : 'certificate.submitImport')}</ActionButton></footer>
@@ -326,6 +379,12 @@ function isVersionNewer(latest: string, current: string): boolean {
     if (difference !== 0) return difference > 0
   }
   return installed.prerelease && !next.prerelease
+}
+
+function nodeSecondaryLabel(node: NodeRecord, t: (key: string, variables?: Record<string, string | number>) => string): string {
+  const hostname = node.hostname?.trim()
+  if (hostname && hostname.toLocaleLowerCase() !== node.name.trim().toLocaleLowerCase()) return hostname
+  return node.os_name || t(`common.${node.status}`)
 }
 
 function FileField({ label, file, onChange, accept }: { label: string; file?: File; onChange: (file?: File) => void; accept: string }) {

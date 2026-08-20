@@ -239,6 +239,13 @@ export interface UninstallCommand {
   controller_installed: boolean
 }
 
+export interface BulkNodeUpdateResult {
+  queued: number
+  skipped: number
+  jobs: JobRecord[]
+  version: string
+}
+
 export interface EnrollmentResponse {
   id: string
   name: string

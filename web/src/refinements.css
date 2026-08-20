@@ -260,3 +260,175 @@
   .cert-identity strong { font-size: 15px; }
   .certificate-list-row { text-align: left; }
 }
+
+/* Readable data values inside route and certificate pickers. */
+.domain-drawer .custom-select-trigger > span:nth-child(2),
+.certificate-dialog-form .custom-select-trigger > span:nth-child(2) {
+  color: var(--text);
+  font-size: 15px;
+  font-weight: 680;
+  letter-spacing: -.012em;
+}
+
+.certificate-dialog-form .node-check-list {
+  gap: 9px;
+  padding: 8px;
+  border-radius: 13px;
+}
+
+.certificate-dialog-form .node-check-list button {
+  min-height: 66px;
+  grid-template-columns: 10px minmax(0, 1fr) 18px;
+  gap: 11px;
+  padding: 10px 13px;
+  border-radius: 10px;
+}
+
+.certificate-dialog-form .node-check-list button > span:nth-child(2) { gap: 2px; }
+.certificate-dialog-form .node-check-list strong { font-size: 15px; line-height: 1.35; }
+.certificate-dialog-form .node-check-list small { font-size: 12.5px; line-height: 1.35; }
+
+/* Shared bulk-selection controls. */
+.selection-toggle {
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 9px;
+  color: var(--muted);
+}
+
+button.selection-toggle:hover { background: var(--surface-hover); }
+.selection-toggle-static { width: 22px; height: 22px; flex-basis: 22px; pointer-events: none; }
+.selection-box { width: 18px; height: 18px; display: grid; place-items: center; border: 1.5px solid var(--line-strong); border-radius: 5px; background: var(--surface-strong); transition: border-color .18s, background .18s, color .18s; }
+.selection-checked .selection-box { color: #fff; border-color: var(--accent); background: var(--accent); }
+.row-selected { background: color-mix(in srgb, var(--accent-soft) 42%, transparent); }
+
+.select-all-button,
+.bulk-delete-button,
+.node-update-all-button {
+  min-height: 38px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: var(--text-soft);
+  background: color-mix(in srgb, var(--surface-strong) 82%, transparent);
+  font-size: 12.5px;
+  font-weight: 700;
+}
+
+.select-all-button:hover,
+.node-update-all-button:hover { color: var(--accent-text); border-color: color-mix(in srgb, var(--accent) 48%, var(--line)); background: var(--accent-soft); }
+.select-all-button:disabled,
+.node-update-all-button:disabled { opacity: .45; }
+.bulk-delete-button { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 28%, var(--line)); background: color-mix(in srgb, var(--danger-soft) 70%, transparent); }
+.bulk-delete-button:hover { background: var(--danger-soft); }
+.toolbar-spacer { flex: 1 1 auto; }
+
+/* Certificate selection adds a compact leading column without shrinking names. */
+.certificate-list-head,
+.certificate-list-row {
+  grid-template-columns: 38px minmax(210px, 1.35fr) minmax(120px, .72fr) minmax(145px, .78fr) 76px minmax(225px, auto);
+}
+.certificate-list-head > span:first-child,
+.row-selection { display: grid; place-items: center; }
+.certificate-list-row { transition: background .18s, border-color .18s; }
+.certificate-list-row.row-selected { box-shadow: inset 3px 0 0 var(--accent); }
+
+/* Node cards: tighter hierarchy, clearer status, and calmer surfaces. */
+.page-header-actions { display: flex; align-items: center; justify-content: flex-end; gap: 9px; }
+.node-update-all-button { min-height: 42px; padding-inline: 14px; }
+.node-selection-toolbar {
+  min-height: 54px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  color: var(--muted);
+  background: color-mix(in srgb, var(--surface) 78%, transparent);
+  font-size: 12px;
+}
+.node-selection-toolbar > span { flex: 1 1 auto; }
+
+.node-detail .bezel-core {
+  position: relative;
+  padding: 22px;
+  background:
+    radial-gradient(circle at 92% 5%, color-mix(in srgb, var(--accent) 9%, transparent), transparent 40%),
+    color-mix(in srgb, var(--surface) 92%, transparent);
+  transition: border-color .2s, box-shadow .2s, transform .2s;
+}
+.node-detail:hover .bezel-core { transform: translateY(-1px); border-color: color-mix(in srgb, var(--accent) 28%, var(--line)); }
+.node-detail-selected .bezel-core { border-color: color-mix(in srgb, var(--accent) 58%, var(--line)); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 28%, transparent), 0 14px 34px rgba(8, 37, 24, .08); }
+.node-select-toggle { position: absolute; z-index: 2; top: 18px; right: 18px; }
+.node-detail-top { grid-template-columns: 50px minmax(0, 1fr) auto; gap: 14px; padding-right: 40px; }
+.node-detail-top .node-machine { width: 50px; height: 50px; border-radius: 14px; }
+.node-detail-top strong { font-size: 18px; line-height: 1.2; letter-spacing: -.028em; }
+.node-detail-top small { margin-top: 4px; font-size: 12.5px; line-height: 1.4; }
+.node-state { min-height: 30px; padding: 0 10px; border: 1px solid var(--line); border-radius: 999px; background: color-mix(in srgb, var(--surface-strong) 78%, transparent); font-size: 12px; font-weight: 700; }
+.node-specs { gap: 8px; margin: 18px 0 4px; border: 0; overflow: visible; background: transparent; }
+.node-specs > span { min-height: 76px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 11px; background: color-mix(in srgb, var(--surface-strong) 78%, transparent); }
+.node-specs small { font-size: 12px; letter-spacing: .01em; }
+.node-specs strong { margin-top: 6px; font-size: 13px; line-height: 1.35; }
+.node-status-probe { margin-top: 14px; padding-top: 14px; }
+.probe-label { font-size: 12px; }
+.probe-bars i { height: 22px; border-radius: 4px; }
+.node-detail-footer { padding-top: 14px; font-size: 12px; }
+.node-card-actions .chip-action { min-height: 38px; padding-inline: 13px; font-size: 12.5px; }
+
+/* Enrollment and full audit surfaces. */
+.node-add-dialog { gap: 15px; }
+.node-enrollment-command { display: grid; gap: 10px; padding: 14px; border: 1px solid color-mix(in srgb, var(--accent) 34%, var(--line)); border-radius: 13px; background: var(--accent-soft); }
+.node-enrollment-command > span { display: inline-flex; align-items: center; gap: 8px; color: var(--accent-text); font-size: 14px; }
+.node-enrollment-command pre { max-height: 170px; margin: 0; overflow: auto; padding: 12px; border: 1px solid var(--line); border-radius: 10px; color: var(--text-soft); background: var(--surface-strong); font-family: var(--font-mono); font-size: 12px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+.node-enrollment-command > button { min-height: 38px; display: inline-flex; align-items: center; justify-content: center; gap: 7px; border-radius: 9px; color: var(--accent-text); background: color-mix(in srgb, var(--surface-strong) 74%, transparent); font-size: 12px; font-weight: 700; }
+.node-enrollment-command > small { display: flex; align-items: flex-start; gap: 7px; color: var(--muted); font-size: 11.5px; line-height: 1.5; }
+.audit-footer { min-height: 48px; display: flex; align-items: center; justify-content: center; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }
+
+@media (max-width: 1100px) {
+  .certificate-list-head,
+  .certificate-list-row { grid-template-columns: 38px minmax(190px, 1.2fr) 116px 125px minmax(220px, auto); }
+  .certificate-list-head > span:nth-child(5),
+  .certificate-list-row > .deployed-count { display: none; }
+}
+
+@media (max-width: 900px) {
+  .page-header-actions { width: 100%; }
+  .page-header-actions > * { flex: 1 1 0; }
+  .certificate-toolbar { grid-template-columns: minmax(0, 1fr) minmax(124px, auto); }
+  .certificate-toolbar .toolbar-spacer { display: none; }
+  .certificate-toolbar .select-all-button,
+  .certificate-toolbar .bulk-delete-button { min-width: 0; }
+  .certificate-list-row { position: relative; padding-left: 54px !important; }
+  .certificate-list-row .row-selection { position: absolute; top: 13px; left: 13px; }
+  .node-selection-toolbar { flex-wrap: wrap; }
+  .node-selection-toolbar > span { order: 3; flex-basis: 100%; text-align: left; }
+  .node-detail .bezel-core { padding: 18px; }
+  .node-select-toggle { top: 14px; right: 14px; }
+  .node-detail-top { grid-template-columns: 46px minmax(0, 1fr); padding-right: 36px; }
+  .node-detail-top .node-machine { width: 46px; height: 46px; }
+  .node-detail-top > .node-state { grid-column: 2; justify-self: start; margin-top: 5px; }
+  .node-specs { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .node-detail-footer { align-items: stretch; }
+  .node-card-actions .chip-action { width: 100%; }
+}
+
+@media (max-width: 560px) {
+  .certificate-toolbar { grid-template-columns: 1fr; }
+  .certificate-toolbar .custom-select-trigger { width: 100%; }
+  .certificate-toolbar .select-all-button,
+  .certificate-toolbar .bulk-delete-button { width: 100%; }
+  .certificate-dialog-form .node-check-list { grid-template-columns: 1fr; }
+  .node-specs { grid-template-columns: 1fr; }
+  .node-specs > span { min-height: 66px; }
+  .node-selection-toolbar .select-all-button,
+  .node-selection-toolbar .bulk-delete-button { flex: 1 1 0; }
+}

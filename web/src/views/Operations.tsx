@@ -78,7 +78,7 @@ export function DomainsPage({ domains, nodes, onAdd, onEdit, onDelete }: {
   )
 }
 
-export function CertificatesPage({ certificates, nodes, onAdd, onRenew, onToggleAutoRenew, onSync, onEdit, busy }: {
+export function CertificatesPage({ certificates, nodes, onAdd, onRenew, onToggleAutoRenew, onSync, onEdit, onDeleteSelected, busy }: {
   certificates: CertificateRecord[]
   nodes: NodeRecord[]
   onAdd: () => void
@@ -86,11 +86,13 @@ export function CertificatesPage({ certificates, nodes, onAdd, onRenew, onToggle
   onToggleAutoRenew: (certificate: CertificateRecord, enabled: boolean) => void
   onSync: (certificate: CertificateRecord) => void
   onEdit: (certificate: CertificateRecord) => void
+  onDeleteSelected: (ids: string[]) => void
   busy: string
 }) {
   const { t, locale } = usePreferences()
   const [query, setQuery] = useState('')
   const [status, setStatus] = useState<'all' | 'valid' | 'risk'>('all')
+  const [selected, setSelected] = useState<Set<string>>(() => new Set())
   const normalized = query.trim().toLowerCase()
   const filtered = certificates.filter((certificate) =>
     (!normalized || certificate.domain.includes(normalized))
@@ -99,6 +101,30 @@ export function CertificatesPage({ certificates, nodes, onAdd, onRenew, onToggle
   const expiring = certificates.filter((certificate) => certificate.status !== 'valid').length
   const autoRenew = certificates.filter((certificate) => certificate.auto_renew).length
   const syncedNodes = new Set(certificates.flatMap((certificate) => certificate.deployed_node_ids)).size
+  useEffect(() => {
+    const available = new Set(certificates.map((certificate) => certificate.id))
+    setSelected((current) => new Set([...current].filter((id) => available.has(id))))
+  }, [certificates])
+  const filteredIDs = filtered.map((certificate) => certificate.id)
+  const allFilteredSelected = filteredIDs.length > 0 && filteredIDs.every((id) => selected.has(id))
+
+  function toggleSelection(id: string) {
+    setSelected((current) => {
+      const next = new Set(current)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  function toggleFiltered() {
+    setSelected((current) => {
+      const next = new Set(current)
+      if (allFilteredSelected) filteredIDs.forEach((id) => next.delete(id))
+      else filteredIDs.forEach((id) => next.add(id))
+      return next
+    })
+  }
 
   return (
     <div className="content-page page-enter">
@@ -131,8 +157,15 @@ export function CertificatesPage({ certificates, nodes, onAdd, onRenew, onToggle
               { value: 'risk', label: t('certificate.expiringOnly') },
             ]}
           />
+          <span className="toolbar-spacer" />
+          <button type="button" className="select-all-button" onClick={toggleFiltered} disabled={filteredIDs.length === 0}>
+            <SelectionToggle checked={allFilteredSelected} label={t('common.selectAll')} />
+            {t('common.selectAll')}
+          </button>
+          {selected.size > 0 && <button type="button" className="bulk-delete-button" onClick={() => onDeleteSelected([...selected])}><Icon name="trash" size={16} />{t('certificate.deleteSelected', { count: selected.size })}</button>}
         </div>
         <div className="certificate-list-head">
+          <span><SelectionToggle checked={allFilteredSelected} label={t('common.selectAll')} onClick={toggleFiltered} /></span>
           <span>{t('domain.columnDomain')}</span>
           <span>{t('certificate.expiry')}</span>
           <span>{t('certificate.autoRenew')}</span>
@@ -155,7 +188,8 @@ export function CertificatesPage({ certificates, nodes, onAdd, onRenew, onToggle
           const renewing = busy === `renew-${certificate.id}`
           const switchLabel = t(certificate.auto_renew ? 'certificate.disableAutoRenew' : 'certificate.enableAutoRenew', { domain: certificate.domain })
           return (
-            <div className="certificate-list-row" key={certificate.id}>
+            <div className={selected.has(certificate.id) ? 'certificate-list-row row-selected' : 'certificate-list-row'} key={certificate.id}>
+              <span className="row-selection"><SelectionToggle checked={selected.has(certificate.id)} label={t('certificate.select', { domain: certificate.domain })} onClick={() => toggleSelection(certificate.id)} /></span>
               <span className="cert-identity">
                 <StatusIcon tone={certificate.status === 'valid' ? 'success' : certificate.status === 'expiring' ? 'warning' : 'error'} />
                 <strong>{certificate.domain}</strong>
@@ -209,18 +243,53 @@ function SummaryMetric({ icon, label, value, warning = false }: { icon: 'shield'
   )
 }
 
-export function NodesPage({ nodes, onManage }: { nodes: NodeRecord[]; onManage: (node: NodeRecord) => void }) {
+function SelectionToggle({ checked, label, onClick, className = '' }: { checked: boolean; label: string; onClick?: () => void; className?: string }) {
+  const copy = <><span className="selection-box">{checked && <Icon name="check" size={13} weight="bold" />}</span><span className="sr-only">{label}</span></>
+  if (!onClick) return <span className={`selection-toggle selection-toggle-static ${checked ? 'selection-checked' : ''} ${className}`} aria-hidden="true">{copy}</span>
+  return <button type="button" className={`selection-toggle ${checked ? 'selection-checked' : ''} ${className}`} role="checkbox" aria-checked={checked} aria-label={label} onClick={onClick}>{copy}</button>
+}
+
+export function NodesPage({ nodes, onManage, onAdd, onUpdateAll, onDeleteSelected, busy }: {
+  nodes: NodeRecord[]
+  onManage: (node: NodeRecord) => void
+  onAdd: () => void
+  onUpdateAll: () => void
+  onDeleteSelected: (ids: string[]) => void
+  busy: string
+}) {
   const { t, locale } = usePreferences()
+  const [selected, setSelected] = useState<Set<string>>(() => new Set())
+  useEffect(() => {
+    const available = new Set(nodes.map((node) => node.id))
+    setSelected((current) => new Set([...current].filter((id) => available.has(id))))
+  }, [nodes])
+  const allSelected = nodes.length > 0 && nodes.every((node) => selected.has(node.id))
+
+  function toggleNode(id: string) {
+    setSelected((current) => {
+      const next = new Set(current)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
   return (
     <div className="content-page page-enter">
-      <PageHeader title={t('nodes.title')} description={t('nodes.description')} />
+      <PageHeader title={t('nodes.title')} description={t('nodes.description')} action={<div className="page-header-actions"><button type="button" className="node-update-all-button" disabled={!nodes.length || busy === 'update-all-nodes'} onClick={onUpdateAll}><Icon name="download" size={17} />{busy === 'update-all-nodes' ? t('common.queueing') : t('nodes.updateAll')}</button><ActionButton leadingIcon="plus" plain onClick={onAdd}>{t('nodes.add')}</ActionButton></div>} />
+      {nodes.length > 0 && <div className="node-selection-toolbar">
+        <button type="button" className="select-all-button" onClick={() => setSelected(allSelected ? new Set() : new Set(nodes.map((node) => node.id)))}><SelectionToggle checked={allSelected} label={t('common.selectAll')} />{t('common.selectAll')}</button>
+        <span>{selected.size > 0 ? t('common.selectedCount', { count: selected.size }) : t('nodes.selectionHint')}</span>
+        {selected.size > 0 && <button type="button" className="bulk-delete-button" onClick={() => onDeleteSelected([...selected])}><Icon name="trash" size={16} />{t('nodes.deleteSelected', { count: selected.size })}</button>}
+      </div>}
       <div className="nodes-canvas">
         {nodes.length === 0 ? (
           <Bezel>
-            <EmptyState icon="server" title={t('nodes.empty')} description={t('nodes.emptyDescription')} />
+            <EmptyState icon="server" title={t('nodes.empty')} description={t('nodes.emptyDescription')} action={<button type="button" className="inline-action" onClick={onAdd}><Icon name="plus" size={16} />{t('nodes.add')}</button>} />
           </Bezel>
         ) : nodes.map((node) => (
-          <Bezel className="node-detail" key={node.id}>
+          <Bezel className={selected.has(node.id) ? 'node-detail node-detail-selected' : 'node-detail'} key={node.id}>
+            <SelectionToggle className="node-select-toggle" checked={selected.has(node.id)} label={t('nodes.select', { node: node.name })} onClick={() => toggleNode(node.id)} />
             <div className="node-detail-top">
               <span className="node-machine"><Icon name="server" size={22} /></span>
               <span>
@@ -228,7 +297,7 @@ export function NodesPage({ nodes, onManage }: { nodes: NodeRecord[]; onManage: 
                   <strong>{node.name}</strong>
                   {node.controller_installed && <span className="controller-badge"><Icon name="home" size={13} />{t('nodes.controller')}</span>}
                 </span>
-                <small>{node.hostname || t('nodes.hostnamePending')}</small>
+                <small>{node.hostname || t('nodes.hostnamePending')}{node.agent_version ? ` · Atlas ${node.agent_version}` : ''}</small>
               </span>
               <span className={`node-state node-state-${node.status}`}>
                 <StatusDot tone={node.status === 'online' && node.nginx_healthy ? 'good' : node.status === 'offline' ? 'danger' : 'warning'} />
@@ -257,13 +326,13 @@ export function NodesPage({ nodes, onManage }: { nodes: NodeRecord[]; onManage: 
   )
 }
 
-export function AuditPage({ events, domains, nodes }: { events: AuditEvent[]; domains: DomainRecord[]; nodes: NodeRecord[] }) {
+export function AuditPage({ events, domains, nodes, busy, onClear }: { events: AuditEvent[]; domains: DomainRecord[]; nodes: NodeRecord[]; busy: boolean; onClear: () => void }) {
   const { t, locale, effectiveLanguage } = usePreferences()
   const domainNames = Object.fromEntries(domains.map((domain) => [domain.id, domain.name]))
   const nodeNames = Object.fromEntries(nodes.map((node) => [node.id, node.name]))
   return (
     <div className="content-page page-enter">
-      <PageHeader title={t('audit.title')} description={t('audit.description')} />
+      <PageHeader title={t('audit.title')} description={t('audit.description')} action={events.length > 0 && <button type="button" className="pending-clear-button" disabled={busy} onClick={onClear}><Icon name="trash" size={16} />{t('audit.clear')}</button>} />
       <Bezel className="operation-panel audit-panel">
         <div className="audit-head">
           <span>{t('audit.event')}</span>
@@ -287,6 +356,7 @@ export function AuditPage({ events, domains, nodes }: { events: AuditEvent[]; do
             <span className={`audit-level audit-${event.level}`}>{t(`audit.${event.level}`)}</span>
           </div>
         ))}
+        {events.length > 0 && <div className="audit-footer">{t('audit.showingAll', { count: events.length })}</div>}
       </Bezel>
     </div>
   )

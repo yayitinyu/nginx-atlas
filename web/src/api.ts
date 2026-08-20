@@ -1,5 +1,7 @@
 import type {
   ACMEAccount,
+  AuditEvent,
+  BulkNodeUpdateResult,
   CertificateAutomationInput,
   CertificateRecord,
   CreateDomainInput,
@@ -78,19 +80,22 @@ export const api = {
   nodes: () => request<NodeRecord[]>('/api/v1/nodes'),
   domains: () => request<DomainRecord[]>('/api/v1/domains'),
   certificates: () => request<CertificateRecord[]>('/api/v1/certificates'),
+  audit: (limit = 500) => request<AuditEvent[]>(`/api/v1/audit?limit=${encodeURIComponent(limit)}`),
   dnsAccounts: () => request<DNSAccount[]>('/api/v1/dns-accounts'),
   acmeAccounts: () => request<ACMEAccount[]>('/api/v1/acme-accounts'),
-  createEnrollment: (ttlMinutes = 30) =>
+  createEnrollment: (ttlMinutes = 30, name = '') =>
     request<EnrollmentResponse>('/api/v1/enrollments', {
       method: 'POST',
-      body: JSON.stringify({ ttl_minutes: ttlMinutes }),
+      body: JSON.stringify({ ttl_minutes: ttlMinutes, name }),
     }),
   revokeNode: (id: string) => request<void>(`/api/v1/nodes/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  revokeNodes: (ids: string[]) => request<{ deleted: number }>('/api/v1/nodes', { method: 'DELETE', body: JSON.stringify({ ids }) }),
   renameNode: (id: string, name: string) => request<NodeRecord>(`/api/v1/nodes/${encodeURIComponent(id)}`, {
     method: 'PUT', body: JSON.stringify({ name }),
   }),
   releaseInfo: () => request<ReleaseInfo>('/api/v1/release'),
   updateNodeAtlas: (id: string) => request<JobRecord>(`/api/v1/nodes/${encodeURIComponent(id)}/update-atlas`, { method: 'POST', body: '{}' }),
+  updateAllNodesAtlas: () => request<BulkNodeUpdateResult>('/api/v1/nodes/update-atlas', { method: 'POST', body: '{}' }),
   updateNodeSystem: (id: string) => request<unknown>(`/api/v1/nodes/${encodeURIComponent(id)}/update-system`, { method: 'POST', body: '{}' }),
   nodeUninstallCommand: (id: string) => request<UninstallCommand>(`/api/v1/nodes/${encodeURIComponent(id)}/uninstall-command`),
   createDomain: (input: CreateDomainInput) =>
@@ -138,10 +143,12 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ node_ids: nodeIds }),
     }),
+  deleteCertificates: (ids: string[]) => request<{ deleted: number }>('/api/v1/certificates', { method: 'DELETE', body: JSON.stringify({ ids }) }),
   retryJob: (id: string) => request<JobRecord>(`/api/v1/jobs/${encodeURIComponent(id)}/retry`, {
     method: 'POST', body: '{}',
   }),
   clearPendingJobs: () => request<{ cleared: number }>('/api/v1/jobs', { method: 'DELETE' }),
+  clearAudit: () => request<{ cleared: number }>('/api/v1/audit', { method: 'DELETE' }),
   createDNSAccount: (input: { name: string; provider: string; credentials: Record<string, string>; keep_credentials?: boolean }) =>
     request<DNSAccount>('/api/v1/dns-accounts', { method: 'POST', body: JSON.stringify(input) }),
   updateDNSAccount: (id: string, input: { name: string; provider: string; credentials: Record<string, string>; keep_credentials: boolean }) =>
