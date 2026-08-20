@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"mime"
+	"net"
 	"net/http"
 	"path"
 	"strings"
@@ -32,27 +34,51 @@ type Config struct {
 	Address            string
 	PublicURL          string
 	AdminToken         string
+	LocalToken         string
+	ProxyToken         string
 	Version            string
 	Repository         string
 	ReleaseAPIURL      string
 	CloudflareAPIURL   string
 	TurnstileVerifyURL string
 	HTTPClient         *http.Client
+	CertificateRoots   *x509.CertPool
 	PollAfter          time.Duration
 	OfflineAfter       time.Duration
 	Demo               bool
 }
 
 type Server struct {
-	config         Config
-	store          *store.Store
-	box            *securebox.Box
-	logger         *slog.Logger
-	adminTokenHash [32]byte
-	sessionMu      sync.RWMutex
-	adminSessions  map[[32]byte]time.Time
-	httpClient     *http.Client
-	handler        http.Handler
+	config           Config
+	store            *store.Store
+	box              *securebox.Box
+	logger           *slog.Logger
+	adminTokenHash   [32]byte
+	localTokenHash   [32]byte
+	localTokenReady  bool
+	proxyToken       string
+	sessionMu        sync.RWMutex
+	adminSessions    map[[32]byte]time.Time
+	eventTicketMu    sync.Mutex
+	eventTickets     map[[32]byte]time.Time
+	eventPending     chan struct{}
+	eventClients     chan struct{}
+	eventPendingMu   sync.Mutex
+	eventPendingIP   map[string]int
+	nodePollMu       sync.Mutex
+	nodeNextPoll     map[string]time.Time
+	nodePollNow      func() time.Time
+	loginMu          sync.Mutex
+	loginAttempts    map[string]loginAttemptWindow
+	loginCleanupAt   time.Time
+	passwordTokens   float64
+	passwordTokenAt  time.Time
+	loginWork        chan struct{}
+	passwordWork     chan struct{}
+	loginNow         func() time.Time
+	httpClient       *http.Client
+	certificateRoots *x509.CertPool
+	handler          http.Handler
 }
 
 func New(config Config, stateStore *store.Store, box *securebox.Box, logger *slog.Logger) (*Server, error) {
@@ -63,7 +89,7 @@ func New(config Config, stateStore *store.Store, box *securebox.Box, logger *slo
 		return nil, errors.New("admin token must contain at least 24 characters")
 	}
 	if config.Address == "" {
-		config.Address = "127.0.0.1:9090"
+		config.Address = "127.0.0.1:909"
 	}
 	if strings.TrimSpace(config.Version) == "" {
 		config.Version = "dev"
@@ -84,6 +110,9 @@ func New(config Config, stateStore *store.Store, box *securebox.Box, logger *slo
 		config.HTTPClient = &http.Client{Timeout: 10 * time.Second}
 	}
 	config.PublicURL = strings.TrimRight(config.PublicURL, "/")
+	if config.PublicURL != "" && len(strings.TrimSpace(config.ProxyToken)) < 24 {
+		return nil, errors.New("proxy token must contain at least 24 characters when public URL is configured")
+	}
 	if config.PollAfter < 3*time.Second {
 		config.PollAfter = 10 * time.Second
 	}
@@ -97,9 +126,25 @@ func New(config Config, stateStore *store.Store, box *securebox.Box, logger *slo
 	}
 	s := &Server{
 		config: config, store: stateStore, box: box, logger: logger,
-		adminTokenHash: sha256.Sum256([]byte(config.AdminToken)),
-		adminSessions:  make(map[[32]byte]time.Time),
-		httpClient:     config.HTTPClient,
+		adminTokenHash:   sha256.Sum256([]byte(config.AdminToken)),
+		adminSessions:    make(map[[32]byte]time.Time),
+		eventTickets:     make(map[[32]byte]time.Time),
+		eventPending:     make(chan struct{}, 16),
+		eventClients:     make(chan struct{}, 128),
+		eventPendingIP:   make(map[string]int),
+		nodeNextPoll:     make(map[string]time.Time),
+		nodePollNow:      time.Now,
+		loginAttempts:    make(map[string]loginAttemptWindow),
+		loginWork:        make(chan struct{}, maxConcurrentLogins),
+		passwordWork:     make(chan struct{}, maxConcurrentPasswordChecks),
+		loginNow:         time.Now,
+		httpClient:       config.HTTPClient,
+		certificateRoots: config.CertificateRoots,
+		proxyToken:       strings.TrimSpace(config.ProxyToken),
+	}
+	if len(config.LocalToken) >= 24 {
+		s.localTokenHash = sha256.Sum256([]byte(config.LocalToken))
+		s.localTokenReady = true
 	}
 	if config.Demo {
 		if err := s.seedDemo(); err != nil {
@@ -139,10 +184,15 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /api/v1/agent/enroll", s.handleAgentEnroll)
 	mux.Handle("POST /api/v1/agent/poll", s.nodeAuth(http.HandlerFunc(s.handleAgentPoll)))
 	mux.Handle("POST /api/v1/agent/jobs/{id}/result", s.nodeAuth(http.HandlerFunc(s.handleAgentJobResult)))
+	mux.Handle("DELETE /api/v1/agent/self", s.nodeAuth(http.HandlerFunc(s.handleAgentUnregister)))
+	mux.Handle("POST /api/v1/local/enrollments", s.localAuth(http.HandlerFunc(s.handleCreateEnrollment)))
 
 	mux.HandleFunc("GET /api/v1/login-config", s.handleLoginConfig)
 	mux.HandleFunc("POST /api/v1/session", s.handleLogin)
 	mux.Handle("GET /api/v1/session", s.adminAuth(http.HandlerFunc(s.handleSession)))
+	mux.Handle("DELETE /api/v1/session", s.adminAuth(http.HandlerFunc(s.handleLogout)))
+	mux.Handle("POST /api/v1/events/ticket", s.adminAuth(http.HandlerFunc(s.handleEventTicket)))
+	mux.HandleFunc("GET /api/v1/events", s.handleEvents)
 	mux.Handle("GET /api/v1/dashboard", s.adminAuth(http.HandlerFunc(s.handleDashboard)))
 	mux.Handle("GET /api/v1/settings", s.adminAuth(http.HandlerFunc(s.handleSettings)))
 	mux.Handle("PUT /api/v1/settings", s.adminAuth(http.HandlerFunc(s.handleUpdateSettings)))
@@ -184,8 +234,9 @@ func (s *Server) routes() http.Handler {
 
 func (s *Server) adminAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		value := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer"))
-		if value == "" || !s.verifyAdminBearer(value) {
+		scheme, value, ok := parseAuthorization(r.Header.Get("Authorization"))
+		apiTokenValid := scheme == "AtlasAdmin" && s.config.PublicURL == "" && s.proxyToken == "" && s.store.AdminPasswordHash() == "" && directLoopbackRequest(r) && s.verifyAdminAPIToken(value)
+		if !ok || (scheme == "Bearer" && !s.verifyAdminBearer(value)) || (scheme == "AtlasAdmin" && !apiTokenValid) || (scheme != "Bearer" && scheme != "AtlasAdmin") {
 			writeError(w, http.StatusUnauthorized, "管理员令牌无效", "unauthorized", nil)
 			return
 		}
@@ -194,6 +245,18 @@ func (s *Server) adminAuth(next http.Handler) http.Handler {
 }
 
 func (s *Server) verifyAdminBearer(value string) bool {
+	if s.verifyAdminSession(value) {
+		return true
+	}
+	// Preserve bootstrap compatibility only until a human password is set.
+	// Password verification itself is restricted to the rate-limited login route.
+	return s.store.AdminPasswordHash() == "" && s.verifyAdminAPIToken(value)
+}
+
+func (s *Server) verifyAdminSession(value string) bool {
+	if len(value) < 24 || len(value) > 128 {
+		return false
+	}
 	hash := sha256.Sum256([]byte(value))
 	s.sessionMu.RLock()
 	expiresAt, ok := s.adminSessions[hash]
@@ -206,17 +269,41 @@ func (s *Server) verifyAdminBearer(value string) bool {
 		delete(s.adminSessions, hash)
 		s.sessionMu.Unlock()
 	}
-	// Accepting the configured credential directly preserves CLI and upgrade
-	// compatibility. The browser exchanges it for a short-lived session token.
-	return s.verifyAdminCredential(value)
+	return false
 }
 
-func (s *Server) verifyAdminCredential(value string) bool {
-	if encoded := s.store.Snapshot().AdminPasswordHash; encoded != "" {
-		return verifyAdminPassword(encoded, value)
+func (s *Server) verifyAdminAPIToken(value string) bool {
+	if len(value) < 24 || len(value) > 128 {
+		return false
 	}
 	hash := sha256.Sum256([]byte(value))
 	return subtle.ConstantTimeCompare(hash[:], s.adminTokenHash[:]) == 1
+}
+
+func (s *Server) localAuth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		parts := strings.Fields(r.Header.Get("Authorization"))
+		if !s.localTokenReady || len(parts) != 2 || parts[0] != "AtlasLocal" || !directLoopbackRequest(r) || !s.verifyLocalToken(parts[1]) {
+			writeError(w, http.StatusUnauthorized, "本机恢复凭据无效", "local_unauthorized", nil)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (s *Server) verifyLocalToken(value string) bool {
+	if len(value) < 24 || len(value) > 128 {
+		return false
+	}
+	hash := sha256.Sum256([]byte(value))
+	return subtle.ConstantTimeCompare(hash[:], s.localTokenHash[:]) == 1
+}
+
+func (s *Server) verifyAdminCredential(value string) bool {
+	if encoded := s.store.AdminPasswordHash(); encoded != "" {
+		return verifyAdminPassword(encoded, value)
+	}
+	return s.verifyAdminAPIToken(value)
 }
 
 type nodeContextKey struct{}
@@ -229,19 +316,18 @@ func (s *Server) nodeAuth(next http.Handler) http.Handler {
 			writeError(w, http.StatusUnauthorized, "节点凭据无效", "node_unauthorized", nil)
 			return
 		}
-		state := s.store.Snapshot()
-		node, ok := state.Nodes[parts[0]]
-		if !ok || node.Status == model.NodeRevoked {
+		secretHash, status, ok := s.store.NodeCredential(parts[0])
+		if !ok || status == model.NodeRevoked {
 			writeError(w, http.StatusUnauthorized, "节点不存在或已撤销", "node_unauthorized", nil)
 			return
 		}
 		hash := sha256.Sum256([]byte(parts[1]))
-		expected, err := decodeHash(node.SecretHash)
+		expected, err := decodeHash(secretHash)
 		if err != nil || subtle.ConstantTimeCompare(hash[:], expected) != 1 {
 			writeError(w, http.StatusUnauthorized, "节点凭据无效", "node_unauthorized", nil)
 			return
 		}
-		ctx := context.WithValue(r.Context(), nodeContextKey{}, node.ID)
+		ctx := context.WithValue(r.Context(), nodeContextKey{}, parts[0])
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
@@ -319,15 +405,40 @@ func (s *Server) handleSession(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"authenticated": true, "product": "Nginx Atlas"})
 }
 
+func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	scheme, value, ok := parseAuthorization(r.Header.Get("Authorization"))
+	if ok && scheme == "Bearer" {
+		hash := sha256.Sum256([]byte(value))
+		s.sessionMu.Lock()
+		delete(s.adminSessions, hash)
+		s.sessionMu.Unlock()
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	var request struct {
 		Password       string `json:"password"`
 		TurnstileToken string `json:"turnstile_token"`
 	}
-	if !decodeJSON(w, r, &request) {
+	if !decodeJSONLimit(w, r, &request, 4<<10) {
 		return
 	}
-	if err := s.verifyTurnstile(r.Context(), s.store.Snapshot(), request.TurnstileToken, s.clientIP(r)); err != nil {
+	clientIP := s.clientIP(r)
+	if allowed, retryAfter := s.reserveLoginAttempt(clientIP); !allowed {
+		writeLoginRateLimit(w, retryAfter)
+		return
+	}
+	select {
+	case s.loginWork <- struct{}{}:
+		defer func() { <-s.loginWork }()
+	default:
+		writeLoginRateLimit(w, time.Second)
+		return
+	}
+	if err := s.verifyTurnstile(r.Context(), s.store.Settings(), request.TurnstileToken, clientIP); err != nil {
 		if errors.Is(err, errTurnstileUnavailable) {
 			writeError(w, http.StatusServiceUnavailable, "安全验证暂时不可用", "turnstile_unavailable", nil)
 		} else {
@@ -335,10 +446,24 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	if s.store.AdminPasswordHash() != "" {
+		if allowed, retryAfter := s.reservePasswordAttempt(); !allowed {
+			writeLoginRateLimit(w, retryAfter)
+			return
+		}
+		select {
+		case s.passwordWork <- struct{}{}:
+			defer func() { <-s.passwordWork }()
+		default:
+			writeLoginRateLimit(w, time.Second)
+			return
+		}
+	}
 	if len(request.Password) > 256 || !s.verifyAdminCredential(request.Password) {
 		writeError(w, http.StatusUnauthorized, "管理员密码无效", "unauthorized", nil)
 		return
 	}
+	s.clearLoginAttempt(clientIP)
 	token, expiresAt, err := s.createAdminSession()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "无法创建管理员会话", "session_error", nil)
@@ -348,7 +473,11 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, target any) bool {
-	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBody)
+	return decodeJSONLimit(w, r, target, maxJSONBody)
+}
+
+func decodeJSONLimit(w http.ResponseWriter, r *http.Request, target any, limit int64) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {
@@ -360,6 +489,38 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, target any) bool {
 		return false
 	}
 	return true
+}
+
+func parseAuthorization(header string) (string, string, bool) {
+	parts := strings.Fields(header)
+	if len(parts) != 2 || parts[1] == "" {
+		return "", "", false
+	}
+	switch {
+	case strings.EqualFold(parts[0], "Bearer"):
+		return "Bearer", parts[1], true
+	case strings.EqualFold(parts[0], "AtlasAdmin"):
+		return "AtlasAdmin", parts[1], true
+	default:
+		return "", "", false
+	}
+}
+
+func loopbackRemote(remote string) bool {
+	host := strings.TrimSpace(remote)
+	if parsedHost, _, err := net.SplitHostPort(host); err == nil {
+		host = parsedHost
+	}
+	return isLoopbackAddress(host)
+}
+
+func directLoopbackRequest(r *http.Request) bool {
+	return loopbackRemote(r.RemoteAddr) &&
+		strings.TrimSpace(r.Header.Get("X-Real-IP")) == "" &&
+		strings.TrimSpace(r.Header.Get("X-Forwarded-For")) == "" &&
+		strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")) == "" &&
+		strings.TrimSpace(r.Header.Get("Forwarded")) == "" &&
+		strings.TrimSpace(r.Header.Get("X-Atlas-Proxy")) == ""
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {

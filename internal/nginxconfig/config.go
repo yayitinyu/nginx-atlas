@@ -17,14 +17,15 @@ var (
 )
 
 type Site struct {
-	Domain         string
-	UpstreamHost   string
-	UpstreamPort   int
-	TLS            bool
-	CertificateDir string
-	NginxWebsocket bool
-	NginxHTTP2     bool
-	NginxGzip      bool
+	Domain             string
+	UpstreamHost       string
+	UpstreamPort       int
+	TLS                bool
+	CertificateDir     string
+	NginxWebsocket     bool
+	NginxHTTP2         bool
+	NginxGzip          bool
+	ProxyHeaderInclude string
 }
 
 func ValidateSite(site Site) error {
@@ -40,6 +41,9 @@ func ValidateSite(site Site) error {
 	}
 	if site.TLS && strings.TrimSpace(site.CertificateDir) == "" {
 		return errors.New("certificate directory is required when TLS is enabled")
+	}
+	if site.ProxyHeaderInclude != "" && site.ProxyHeaderInclude != "/etc/nginx-atlas/proxy-token.conf" {
+		return errors.New("proxy header include path is not trusted")
 	}
 	return nil
 }
@@ -80,7 +84,7 @@ server {
     listen 80;
     listen [::]:80;
     server_name {{ .Domain }};
-    return 308 https://$host$request_uri;
+    return 308 https://{{ .Domain }}$request_uri;
 }
 
 server {
@@ -99,6 +103,7 @@ server {
     ssl_session_timeout 1d;
     ssl_session_cache shared:ATLAS:10m;
     ssl_session_tickets off;
+    add_header Strict-Transport-Security "max-age=15552000" always;
     client_max_body_size 64m;
 
     {{- if .NginxGzip }}
@@ -114,6 +119,9 @@ server {
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
+        {{- if .ProxyHeaderInclude }}
+        include {{ .ProxyHeaderInclude }};
+        {{- end }}
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header X-Forwarded-Host $host;
@@ -146,6 +154,9 @@ server {
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
+        {{- if .ProxyHeaderInclude }}
+        include {{ .ProxyHeaderInclude }};
+        {{- end }}
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header X-Forwarded-Host $host;

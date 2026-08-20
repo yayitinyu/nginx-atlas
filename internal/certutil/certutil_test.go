@@ -52,6 +52,21 @@ func TestCoversHostnameUsesX509WildcardRules(t *testing.T) {
 	}
 }
 
+func TestVerifyTrustedChainRejectsUntrustedCertificate(t *testing.T) {
+	now := time.Now().UTC()
+	certPEM, _ := makeCertificate(t, "api.example.com", now.Add(-time.Hour), now.Add(time.Hour), nil)
+	if err := VerifyTrustedChain(certPEM, "api.example.com", now, x509.NewCertPool()); err == nil {
+		t.Fatal("expected an untrusted self-signed certificate to be rejected")
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(certPEM) {
+		t.Fatal("failed to add test trust anchor")
+	}
+	if err := VerifyTrustedChain(certPEM, "api.example.com", now, pool); err != nil {
+		t.Fatalf("trusted test certificate was rejected: %v", err)
+	}
+}
+
 func makeCertificate(t *testing.T, domain string, notBefore, notAfter time.Time, key *rsa.PrivateKey) ([]byte, []byte) {
 	t.Helper()
 	if key == nil {

@@ -130,7 +130,9 @@ Windows PowerShell：
 /etc/ssl/atlas.example.com/privkey.pem
 ```
 
-安装器检测到这两个文件后，会自动创建 HTTPS 反向代理。若证书由外部负载均衡器或已有反向代理终止，可由它将请求转发到 `127.0.0.1:9090`；节点对远程主控只接受 HTTPS。
+安装器检测到这两个文件后，会自动创建 HTTPS 反向代理。若证书由外部负载均衡器或已有反向代理终止，可由它将请求转发到受保护的本机端口 `127.0.0.1:909`；节点对远程主控只接受 HTTPS。手工创建 systemd 服务时，主控进程需要仅授予绑定该端口所需的 `CAP_NET_BIND_SERVICE`。
+
+同机 Nginx 的代理 `location` 还必须覆盖 `X-Real-IP`，并写入 `include /etc/nginx-atlas/proxy-token.conf;`。其他代理需安全读取 `server.env` 中的 `ATLAS_PROXY_TOKEN`，覆盖 `X-Atlas-Proxy`；启用该令牌后，缺少有效代理凭据的环回管理请求会被主控拒绝，避免访问白名单与登录限流误把所有访客当作本机。
 
 ### 3. 安装主控与本机代理
 
@@ -159,9 +161,9 @@ sudo bash deploy/install.sh server \
 进入“概览”页面，展开“安装节点”，复制命令并在目标 VPS 上执行。命令形如：
 
 ```bash
-curl -fsSL https://atlas.example.com/install.sh | sudo bash -s -- agent \
-  --server https://atlas.example.com \
-  --token '<一次性令牌>'
+( tmp=$(mktemp) && trap 'rm -f -- "$tmp"' EXIT && chmod 600 "$tmp" && \
+  curl -fsSL https://atlas.example.com/install.sh -o "$tmp" && \
+  printf '%s' '<一次性令牌>' | sudo bash "$tmp" agent --server https://atlas.example.com --token-stdin )
 ```
 
 令牌默认 30 分钟过期且只能使用一次。注册完成后，节点保存独立随机密钥；主控只持久化其 SHA-256 哈希。卸载节点与卸载主控的命令也集中在同一区域。

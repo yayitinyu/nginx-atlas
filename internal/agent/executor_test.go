@@ -10,6 +10,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"math/big"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -87,6 +88,32 @@ func TestValidateTakeoverPathRejectsSiblingDirectoriesAndTraversal(t *testing.T)
 		if _, err := validateTakeoverPath(value); err == nil {
 			t.Errorf("validateTakeoverPath(%q) unexpectedly succeeded", value)
 		}
+	}
+}
+
+func TestSelfUpdateRejectsDowngradeAndForeignRepository(t *testing.T) {
+	if err := requireVersionUpgrade("dev", "v0.1.15"); err == nil {
+		t.Fatal("expected unversioned development build update to be rejected")
+	}
+	if err := requireVersionUpgrade("v0.2.0", "v0.1.14"); err == nil {
+		t.Fatal("expected downgrade to be rejected")
+	}
+	if err := requireVersionUpgrade("v0.1.14", "v0.1.15"); err != nil {
+		t.Fatalf("newer version was rejected: %v", err)
+	}
+	trusted, err := url.Parse("https://github.com/yayitinyu/nginx-atlas/releases/download/v0.1.15/nginx-atlas_0.1.15_linux_amd64.tar.gz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := trustedReleaseReference(trusted, "yayitinyu/nginx-atlas", "0.1.15"); err != nil {
+		t.Fatalf("trusted release URL was rejected: %v", err)
+	}
+	foreign, err := url.Parse("https://github.com/attacker/project/releases/download/v0.1.15/nginx-atlas_0.1.15_linux_amd64.tar.gz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := trustedReleaseReference(foreign, "yayitinyu/nginx-atlas", "0.1.15"); err == nil {
+		t.Fatal("foreign repository release URL was accepted")
 	}
 }
 
@@ -172,6 +199,34 @@ func TestApplyDomainUsesSharedWildcardCertificateDir(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(configDir, "atlas-api.example.com.conf")); err != nil {
 		t.Fatalf("expected atlas config: %v", err)
+	}
+}
+
+func TestCertificatePathsRejectTraversalAndSymlinkEscapes(t *testing.T) {
+	root := t.TempDir()
+	sslRoot := filepath.Join(root, "ssl")
+	outside := filepath.Join(root, "outside")
+	if err := os.MkdirAll(sslRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(outside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	executor := NewExecutor(ExecutorConfig{SSLRoot: sslRoot, DataRoot: filepath.Join(root, "data")}, alwaysOKRunner{})
+	cert, key := mustTestCertificatePEM(t, "api.example.com")
+	bundle := protocol.CertificateBundle{FullchainPEM: string(cert), PrivateKeyPEM: string(key)}
+	if err := executor.installCertificate("../outside", bundle); err == nil {
+		t.Fatal("certificate traversal was accepted")
+	}
+	linkedDomain := filepath.Join(sslRoot, "api.example.com")
+	if err := os.Symlink(outside, linkedDomain); err != nil {
+		t.Skipf("symlink creation is unavailable: %v", err)
+	}
+	if err := executor.installCertificate("api.example.com", bundle); err == nil {
+		t.Fatal("symlinked certificate destination was accepted")
+	}
+	if _, err := os.Stat(filepath.Join(outside, "privkey.pem")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("external private key path was modified: %v", err)
 	}
 }
 

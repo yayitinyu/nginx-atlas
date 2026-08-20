@@ -222,3 +222,41 @@
     transform-origin: top center;
   }
 }
+
+/* Stable typography and alignment overrides. Keep data rows readable and let
+   centering remain only on explicit choices, status, and empty states. */
+.cert-identity { justify-content: flex-start; text-align: left; }
+.cert-identity strong { min-width: 0; overflow: hidden; font-size: 15px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
+.expiry-label strong,
+.renewal-state,
+.deployed-count { font-size: 13px; }
+.expiry-label small,
+.certificate-actions button { font-size: 12px; }
+
+.certificate-dialog-form .dialog-field > span,
+.certificate-dialog-form .certificate-node-field > span,
+.certificate-dialog-form .certificate-names-field > span,
+.certificate-dialog-form .account-fields label > span,
+.certificate-dialog-form .node-check-list strong,
+.certificate-dialog-form .node-check-list small,
+.domain-drawer .form-row > label,
+.domain-drawer .source-select > span { text-align: left; }
+
+.certificate-dialog-form .dialog-field .custom-select-trigger > span:nth-child(2),
+.certificate-dialog-form .compact-automation-fields .field-control input,
+.certificate-dialog-form .field-control input,
+.domain-drawer .field-control input { text-align: left; }
+
+.uninstall-section { align-items: stretch; }
+.uninstall-section > div:first-child { gap: 3px; text-align: left; }
+.remove-node-button { min-height: 42px; display: inline-flex; align-items: center; justify-content: center; gap: 7px; padding: 0 13px; border: 1px solid color-mix(in srgb, var(--danger) 32%, var(--line)); border-radius: 10px; color: var(--danger); background: var(--danger-soft); font-size: 13px; font-weight: 700; }
+.remove-node-confirm { justify-content: flex-end; }
+.remove-node-confirm button:last-child { color: #fff; background: var(--danger); }
+.uninstall-command pre { font-size: 12px; line-height: 1.6; }
+
+@media (max-width: 900px) {
+  .mobile-preference-select,
+  .login-preference-select { font-size: 12px; }
+  .cert-identity strong { font-size: 15px; }
+  .certificate-list-row { text-align: left; }
+}

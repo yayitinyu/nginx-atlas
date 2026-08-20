@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/netip"
 	"sort"
 	"strings"
 	"time"
@@ -18,13 +19,28 @@ import (
 	"github.com/yayitinyu/nginx-atlas/internal/protocol"
 )
 
+const (
+	maxNodeReportBody          = 512 << 10
+	maxReportedIPAddresses     = 32
+	maxReportedCertificates    = 256
+	maxReportedNginxSites      = 256
+	maxReportedCertificateSANs = 100
+	minimumNodePollInterval    = 3 * time.Second
+)
+
 func (s *Server) handleAgentEnroll(w http.ResponseWriter, r *http.Request) {
 	var request protocol.EnrollRequest
-	if !decodeJSON(w, r, &request) {
+	if !decodeJSONLimit(w, r, &request, maxNodeReportBody) {
 		return
 	}
 	if len(request.Token) < 24 {
 		writeError(w, http.StatusUnauthorized, "添加令牌无效", "invalid_enrollment", nil)
+		return
+	}
+	tokenHash := sha256.Sum256([]byte(request.Token))
+	now := time.Now().UTC()
+	if !s.store.HasUsableEnrollment(tokenHash[:], now) {
+		writeError(w, http.StatusUnauthorized, "添加令牌不存在、已使用或已过期", "invalid_enrollment", nil)
 		return
 	}
 	nodeID, err := id.New("node")
@@ -38,8 +54,10 @@ func (s *Server) handleAgentEnroll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	secretHash := sha256.Sum256([]byte(secret))
-	tokenHash := sha256.Sum256([]byte(request.Token))
-	now := time.Now().UTC()
+	if err := validateNodeReport(request.Report); err != nil {
+		writeError(w, http.StatusBadRequest, "节点报告超出安全限制", "invalid_node_report", map[string]string{"reason": err.Error()})
+		return
+	}
 	var node model.Node
 	err = s.store.Update(func(state *model.State) error {
 		var enrollment model.Enrollment
@@ -87,9 +105,20 @@ func (s *Server) handleAgentEnroll(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleAgentPoll(w http.ResponseWriter, r *http.Request) {
 	nodeID := nodeIDFromContext(r.Context())
-	var request protocol.PollRequest
-	if !decodeJSON(w, r, &request) {
+	if retryAfter, ok := s.reserveNodePoll(nodeID); !ok {
+		w.Header().Set("Retry-After", fmt.Sprintf("%d", max(1, int(retryAfter.Round(time.Second).Seconds()))))
+		writeError(w, http.StatusTooManyRequests, "节点轮询过于频繁", "node_poll_rate_limited", nil)
 		return
+	}
+	var request protocol.PollRequest
+	if !decodeJSONLimit(w, r, &request, maxNodeReportBody) {
+		return
+	}
+	if request.Report != nil {
+		if err := validateNodeReport(*request.Report); err != nil {
+			writeError(w, http.StatusBadRequest, "节点报告超出安全限制", "invalid_node_report", map[string]string{"reason": err.Error()})
+			return
+		}
 	}
 	var selected *model.Job
 	now := time.Now().UTC()
@@ -183,6 +212,28 @@ func (s *Server) handleAgentPoll(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, response)
 }
 
+func (s *Server) handleAgentUnregister(w http.ResponseWriter, r *http.Request) {
+	nodeID, _ := r.Context().Value(nodeContextKey{}).(string)
+	now := time.Now().UTC()
+	err := s.store.Update(func(state *model.State) error {
+		if _, ok := state.Nodes[nodeID]; !ok {
+			return errNotFound
+		}
+		revokeNodeState(state, nodeID, now)
+		s.addAudit(state, "warning", "node.unregistered", "节点代理已自行注销", nodeID)
+		return nil
+	})
+	if errors.Is(err, errNotFound) {
+		writeError(w, http.StatusNotFound, "节点不存在", "not_found", nil)
+		return
+	}
+	if err != nil {
+		wrapStoreError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (s *Server) handleAgentJobResult(w http.ResponseWriter, r *http.Request) {
 	nodeID := nodeIDFromContext(r.Context())
 	jobID := r.PathValue("id")
@@ -190,15 +241,21 @@ func (s *Server) handleAgentJobResult(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &request) {
 		return
 	}
-	snapshot := s.store.Snapshot()
-	job, ok := snapshot.Jobs[jobID]
-	if !ok || job.NodeID != nodeID || job.Status != model.JobRunning {
+	job, ok := s.store.JobForNode(jobID, nodeID)
+	if !ok || job.Status != model.JobRunning {
 		writeError(w, http.StatusConflict, "任务不存在、节点不匹配或已完成", "job_conflict", nil)
 		return
 	}
 	var prepared *model.Certificate
 	var err error
 	if request.Success {
+		snapshot := s.store.Snapshot()
+		current, currentOK := snapshot.Jobs[jobID]
+		if !currentOK || current.NodeID != nodeID || current.Status != model.JobRunning {
+			writeError(w, http.StatusConflict, "任务状态已经改变", "job_conflict", nil)
+			return
+		}
+		job = current
 		prepared, err = s.prepareCertificateResult(snapshot, job, request.Certificate)
 		if err != nil {
 			request.Success = false
@@ -349,7 +406,6 @@ func (s *Server) buildWireJob(job model.Job, state model.State) (protocol.WireJo
 			Domain: domainName, Domains: spec.DNSNames, Email: acmeAccount.Email, DirectoryURL: acmeAccount.DirectoryURL,
 			DNSProvider: dnsAccount.Provider, Credentials: credentials,
 			EABKID: acmeAccount.EABKID, EABHMAC: hmac,
-			Install: spec.Install, ReloadNginx: spec.ReloadNginx,
 		}
 	case protocol.JobCaptureCertificate:
 		var spec captureCertificateSpec
@@ -438,6 +494,11 @@ func (s *Server) prepareCertificateResult(state model.State, job model.Job, bund
 	info, err := certutil.Validate([]byte(bundle.FullchainPEM), []byte(bundle.PrivateKeyPEM), context.Domain, time.Now())
 	if err != nil {
 		return nil, fmt.Errorf("agent returned an invalid certificate: %w", err)
+	}
+	if context.Source == model.CertificateACME {
+		if err := certutil.VerifyTrustedChain([]byte(bundle.FullchainPEM), context.Domain, time.Now(), s.certificateRoots); err != nil {
+			return nil, fmt.Errorf("agent returned an untrusted ACME certificate: %w", err)
+		}
 	}
 	requestedDNSNames := context.RequestedDNSNames
 	if len(requestedDNSNames) == 0 {
@@ -624,7 +685,11 @@ func (s *Server) completeSuccessfulJob(state *model.State, job model.Job, reques
 			if err := json.Unmarshal(job.Payload, &spec); err != nil {
 				return err
 			}
-			if err := enqueueCertificateSyncJobs(state, prepared.ID, prepared.Domain, spec.SyncNodeIDs); err != nil {
+			targets := append([]string(nil), spec.SyncNodeIDs...)
+			if spec.Install {
+				targets = appendUnique(targets, job.NodeID)
+			}
+			if err := enqueueCertificateSyncJobs(state, prepared.ID, prepared.Domain, targets); err != nil {
 				return err
 			}
 		}
@@ -703,7 +768,10 @@ func restoreFailedDomainDeletion(state *model.State, job model.Job, message stri
 		return
 	}
 	domain.Deleting = false
-	domain.Enabled = true
+	// A removed primary node leaves the domain intentionally disabled until an
+	// administrator assigns a replacement. A failed delete on a live node still
+	// restores the previous enabled state.
+	domain.Enabled = domain.NodeID != ""
 	domain.LastError = truncate(message, 2048)
 	domain.UpdatedAt = now
 	state.Domains[domain.ID] = domain
@@ -735,6 +803,63 @@ func applyNodeReport(node *model.Node, report protocol.NodeReport) {
 	node.Certificates = append([]model.CertificateMeta(nil), report.Certificates...)
 	node.NginxSites = append([]model.NginxSiteMeta(nil), report.NginxSites...)
 	node.LastError = truncate(report.LastError, 2048)
+}
+
+func (s *Server) reserveNodePoll(nodeID string) (time.Duration, bool) {
+	now := s.nodePollNow()
+	s.nodePollMu.Lock()
+	defer s.nodePollMu.Unlock()
+	if next := s.nodeNextPoll[nodeID]; now.Before(next) {
+		return next.Sub(now), false
+	}
+	interval := s.config.PollAfter
+	if interval < minimumNodePollInterval {
+		interval = minimumNodePollInterval
+	}
+	if interval > 30*time.Second {
+		interval = 30 * time.Second
+	}
+	s.nodeNextPoll[nodeID] = now.Add(interval)
+	return 0, true
+}
+
+func validateNodeReport(report protocol.NodeReport) error {
+	if len(report.IPAddresses) > maxReportedIPAddresses {
+		return fmt.Errorf("too many IP addresses")
+	}
+	for _, address := range report.IPAddresses {
+		if len(address) > 64 {
+			return fmt.Errorf("IP address is too long")
+		}
+		if _, err := netip.ParseAddr(strings.TrimSpace(address)); err != nil {
+			return fmt.Errorf("invalid IP address")
+		}
+	}
+	if len(report.Certificates) > maxReportedCertificates {
+		return fmt.Errorf("too many certificates")
+	}
+	for _, certificate := range report.Certificates {
+		if len(certificate.Domain) > 253 || len(certificate.Path) > 1024 || len(certificate.Issuer) > 512 || len(certificate.Error) > 2048 {
+			return fmt.Errorf("certificate metadata is too large")
+		}
+		if len(certificate.DNSNames) > maxReportedCertificateSANs {
+			return fmt.Errorf("certificate contains too many names")
+		}
+		for _, name := range certificate.DNSNames {
+			if len(name) > 253 {
+				return fmt.Errorf("certificate name is too long")
+			}
+		}
+	}
+	if len(report.NginxSites) > maxReportedNginxSites {
+		return fmt.Errorf("too many nginx sites")
+	}
+	for _, site := range report.NginxSites {
+		if len(site.Domain) > 253 || len(site.ConfigPath) > 1024 || len(site.UpstreamHost) > 253 || len(site.CertificatePath) > 1024 {
+			return fmt.Errorf("nginx site metadata is too large")
+		}
+	}
+	return nil
 }
 
 func appendUnique(values []string, value string) []string {

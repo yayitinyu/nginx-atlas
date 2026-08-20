@@ -42,11 +42,25 @@ type Client struct {
 	logger       *slog.Logger
 	state        clientState
 	nextReportAt time.Time
+	startedAt    time.Time
 }
 
 type clientState struct {
 	NodeID string `json:"node_id"`
 	Secret string `json:"secret"`
+}
+
+type apiResponseError struct {
+	Status  int
+	Code    string
+	Message string
+}
+
+func (err *apiResponseError) Error() string {
+	if err.Message != "" {
+		return fmt.Sprintf("server returned %d: %s", err.Status, err.Message)
+	}
+	return fmt.Sprintf("server returned %d", err.Status)
 }
 
 func NewClient(config ClientConfig, executor *Executor, runner CommandRunner, logger *slog.Logger) (*Client, error) {
@@ -95,7 +109,7 @@ func NewClient(config ClientConfig, executor *Executor, runner CommandRunner, lo
 	}
 	client := &Client{
 		config: config, executor: executor, runner: runner, logger: logger,
-		http: &http.Client{Timeout: 45 * time.Second, Transport: transport},
+		http: &http.Client{Timeout: 45 * time.Second, Transport: transport}, startedAt: time.Now(),
 	}
 	if err := client.loadState(); err != nil {
 		return nil, err
@@ -113,6 +127,10 @@ func (c *Client) Run(ctx context.Context) error {
 	for {
 		pollAfter, err := c.pollOnce(ctx)
 		if err != nil {
+			var responseErr *apiResponseError
+			if errors.As(err, &responseErr) && responseErr.Status == http.StatusUnauthorized && responseErr.Code == "node_unauthorized" {
+				return c.decommissionRevokedAgent(responseErr)
+			}
 			c.logger.Error("agent poll failed", "error", err)
 			pollAfter = c.config.PollInterval
 		}
@@ -127,6 +145,18 @@ func (c *Client) Run(ctx context.Context) error {
 		case <-timer.C:
 		}
 	}
+}
+
+// Unregister revokes this agent's controller credential before local files are
+// removed. The controller retains a hidden tombstone for audit references.
+func (c *Client) Unregister(ctx context.Context) error {
+	if c.state.NodeID == "" || c.state.Secret == "" {
+		return errors.New("agent is not enrolled")
+	}
+	if err := c.doJSON(ctx, http.MethodDelete, "/api/v1/agent/self", struct{}{}, nil, true); err != nil {
+		return fmt.Errorf("unregister agent: %w", err)
+	}
+	return nil
 }
 
 func (c *Client) enroll(ctx context.Context) error {
@@ -158,6 +188,9 @@ func (c *Client) pollOnce(ctx context.Context) (time.Duration, error) {
 	if err := c.doJSON(ctx, http.MethodPost, "/api/v1/agent/poll", request, &response, true); err != nil {
 		return c.config.PollInterval, err
 	}
+	if err := c.confirmPendingUpdate(ctx); err != nil {
+		c.logger.Warn("updated service health confirmation is pending", "error", err)
+	}
 	reportAfter := time.Duration(response.ReportAfter) * time.Second
 	if reportAfter < 3*time.Second || reportAfter > 5*time.Minute {
 		reportAfter = time.Duration(response.PollAfter) * time.Second
@@ -180,9 +213,37 @@ func (c *Client) pollOnce(ctx context.Context) (time.Duration, error) {
 	jobCtx, cancel := context.WithTimeout(ctx, jobTimeout)
 	result := c.executor.Execute(jobCtx, *response.Job)
 	cancel()
+	rollbackScheduled := false
+	if result.Success && result.UpdateMarker != "" {
+		scheduleCtx, scheduleCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		err := scheduleUpdateRollback(scheduleCtx, c.runner, c.executor.config.SystemdRun, c.executor.config.Systemctl, result)
+		scheduleCancel()
+		if err != nil {
+			rollbackErr := rollbackUpdatedBinary(result)
+			if rollbackErr == nil {
+				_ = os.Remove(result.UpdateMarker)
+				_ = os.Remove(result.RollbackHelper)
+			}
+			result.Success = false
+			result.Error = errors.Join(err, rollbackErr).Error()
+			result.Message = "更新未激活，旧版本已恢复"
+			result.RestartServices = nil
+		} else {
+			rollbackScheduled = true
+		}
+	}
 	var acknowledgement map[string]any
 	path := "/api/v1/agent/jobs/" + url.PathEscape(response.Job.ID) + "/result"
 	if err := c.doJSON(ctx, http.MethodPost, path, result, &acknowledgement, true); err != nil {
+		if result.UpdateMarker != "" {
+			if rollbackErr := rollbackUpdatedBinary(result); rollbackErr == nil {
+				_ = os.Remove(result.UpdateMarker)
+				_ = os.Remove(result.RollbackHelper)
+				if rollbackScheduled {
+					cancelUpdateRollback(context.Background(), c.runner, c.executor.config.Systemctl, result.RollbackUnit)
+				}
+			}
+		}
 		return c.config.PollInterval, fmt.Errorf("report job result: %w", err)
 	}
 	c.logger.Info("job completed", "job_id", response.Job.ID, "success", result.Success)
@@ -190,11 +251,38 @@ func (c *Client) pollOnce(ctx context.Context) (time.Duration, error) {
 		restartCtx, restartCancel := context.WithTimeout(context.Background(), 15*time.Second)
 		args := append([]string{"restart", "--no-block"}, result.RestartServices...)
 		if _, err := c.runner.Run(restartCtx, c.executor.config.Systemctl, args, nil); err != nil {
-			c.logger.Error("updated binary installed but service restart failed", "error", err)
+			c.logger.Error("updated binary restart failed; restoring previous binary", "error", err)
+			if rollbackErr := rollbackUpdatedBinary(result); rollbackErr != nil {
+				c.logger.Error("restore previous binary failed", "error", rollbackErr)
+			} else if _, rollbackRestartErr := c.runner.Run(restartCtx, c.executor.config.Systemctl, args, nil); rollbackRestartErr != nil {
+				c.logger.Error("previous binary restored but service restart failed", "error", rollbackRestartErr)
+			} else {
+				_ = os.Remove(result.UpdateMarker)
+				_ = os.Remove(result.RollbackHelper)
+				cancelUpdateRollback(restartCtx, c.runner, c.executor.config.Systemctl, result.RollbackUnit)
+			}
 		}
 		restartCancel()
 	}
 	return time.Second, nil
+}
+
+func rollbackUpdatedBinary(result protocol.JobResultRequest) error {
+	if strings.TrimSpace(result.RollbackBinary) == "" || strings.TrimSpace(result.InstalledBinary) == "" {
+		return errors.New("update rollback paths are unavailable")
+	}
+	backup, err := filepath.EvalSymlinks(result.RollbackBinary)
+	if err != nil {
+		return fmt.Errorf("resolve update backup: %w", err)
+	}
+	installed, err := filepath.EvalSymlinks(result.InstalledBinary)
+	if err != nil {
+		installed = result.InstalledBinary
+	}
+	if err := replaceRegularFile(backup, installed, 0o755); err != nil {
+		return fmt.Errorf("restore update backup: %w", err)
+	}
+	return nil
 }
 
 func (c *Client) report(ctx context.Context) protocol.NodeReport {
@@ -208,11 +296,17 @@ func (c *Client) report(ctx context.Context) protocol.NodeReport {
 	if output, err := c.runner.Run(ctx, c.executor.config.NginxBinary, []string{"-v"}, nil); err == nil {
 		report.NginxVersion = strings.TrimSpace(string(output))
 	}
+	if _, err := c.runner.Run(ctx, c.executor.config.NginxBinary, []string{"-t"}, nil); err != nil {
+		report.LastError = "nginx configuration test failed"
+		return report
+	}
+	report.NginxHealthy = true
 	if output, err := c.runner.Run(ctx, c.executor.config.NginxBinary, []string{"-T"}, nil); err == nil {
-		report.NginxHealthy = true
 		report.NginxSites = ParseNginxSites(output)
 	} else {
-		report.LastError = limitOutput(output)
+		// nginx -T includes the complete configuration in its combined output.
+		// Never report that output because directives may contain credentials.
+		report.LastError = "nginx inventory is temporarily unavailable"
 	}
 	return report
 }
@@ -289,9 +383,9 @@ func (c *Client) doJSON(ctx context.Context, method, path string, requestBody, r
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		var apiError protocol.APIError
 		if json.Unmarshal(body, &apiError) == nil && apiError.Error != "" {
-			return fmt.Errorf("server returned %d: %s", resp.StatusCode, apiError.Error)
+			return &apiResponseError{Status: resp.StatusCode, Code: apiError.Code, Message: apiError.Error}
 		}
-		return fmt.Errorf("server returned %d", resp.StatusCode)
+		return &apiResponseError{Status: resp.StatusCode}
 	}
 	if responseBody != nil && len(body) > 0 {
 		if err := json.Unmarshal(body, responseBody); err != nil {
@@ -302,6 +396,11 @@ func (c *Client) doJSON(ctx context.Context, method, path string, requestBody, r
 }
 
 func (c *Client) loadState() error {
+	if _, err := os.Stat(c.config.StatePath + ".revoked"); err == nil {
+		return errors.New("agent credential was revoked; reinstall with a new enrollment token")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("inspect revoked agent marker: %w", err)
+	}
 	data, err := os.ReadFile(c.config.StatePath)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -316,6 +415,23 @@ func (c *Client) loadState() error {
 		return errors.New("agent state is incomplete")
 	}
 	return nil
+}
+
+func (c *Client) decommissionRevokedAgent(cause error) error {
+	nodeID := c.state.NodeID
+	c.state = clientState{}
+	if err := os.Remove(c.config.StatePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove revoked agent credential: %w", err)
+	}
+	marker := []byte("revoked_at=" + time.Now().UTC().Format(time.RFC3339) + "\nnode_id=" + nodeID + "\n")
+	if err := writeAtomic(c.config.StatePath+".revoked", marker, 0o600); err != nil {
+		return fmt.Errorf("write revoked agent marker: %w", err)
+	}
+	commandCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, _ = c.runner.Run(commandCtx, c.executor.config.Systemctl, []string{"disable", "nginx-atlas-agent.service"}, nil)
+	_, _ = c.runner.Run(commandCtx, c.executor.config.Systemctl, []string{"stop", "--no-block", "nginx-atlas-agent.service"}, nil)
+	return fmt.Errorf("controller revoked this agent; local credential removed: %w", cause)
 }
 
 func (c *Client) saveState() error {

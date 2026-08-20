@@ -1,12 +1,16 @@
 package store
 
 import (
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sync"
+	"time"
 
 	"github.com/yayitinyu/nginx-atlas/internal/model"
 )
@@ -14,9 +18,12 @@ import (
 const maxAuditEvents = 500
 
 type Store struct {
-	mu    sync.RWMutex
-	path  string
-	state model.State
+	mu               sync.RWMutex
+	path             string
+	state            model.State
+	revision         uint64
+	nextSubscriberID uint64
+	subscribers      map[uint64]chan uint64
 }
 
 func Open(path string) (*Store, error) {
@@ -53,20 +60,117 @@ func (s *Store) Snapshot() model.State {
 	return clone(s.state)
 }
 
+func (s *Store) AdminPasswordHash() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.state.AdminPasswordHash
+}
+
+// Settings returns only controller settings, avoiding an O(total state) clone
+// on public middleware and login endpoints.
+func (s *Store) Settings() model.ControllerSettings {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	settings := s.state.Settings
+	settings.PanelAllowedCIDRs = append([]string(nil), settings.PanelAllowedCIDRs...)
+	return settings
+}
+
+// NodeCredential returns the narrow credential record needed by node auth.
+// Reported inventory and unrelated encrypted state are intentionally omitted.
+func (s *Store) NodeCredential(nodeID string) (secretHash string, status model.NodeStatus, ok bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	node, ok := s.state.Nodes[nodeID]
+	if !ok {
+		return "", "", false
+	}
+	return node.SecretHash, node.Status, true
+}
+
+func (s *Store) JobForNode(jobID, nodeID string) (model.Job, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	job, ok := s.state.Jobs[jobID]
+	if !ok || job.NodeID != nodeID {
+		return model.Job{}, false
+	}
+	job.Payload = append([]byte(nil), job.Payload...)
+	return job, true
+}
+
+// HasUsableEnrollment performs the cheap read-only part of enrollment before
+// Update clones and persists the state. The transaction still rechecks it to
+// preserve one-time-token semantics under races.
+func (s *Store) HasUsableEnrollment(tokenHash []byte, now time.Time) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, enrollment := range s.state.Enrollments {
+		expected, err := decodeHexHash(enrollment.TokenHash)
+		if err == nil && subtle.ConstantTimeCompare(tokenHash, expected) == 1 {
+			return enrollment.UsedAt == nil && now.Before(enrollment.ExpiresAt)
+		}
+	}
+	return false
+}
+
 func (s *Store) Update(fn func(*model.State) error) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	next := clone(s.state)
 	if err := fn(&next); err != nil {
+		s.mu.Unlock()
 		return err
 	}
 	normalize(&next)
+	if reflect.DeepEqual(next, s.state) {
+		s.mu.Unlock()
+		return nil
+	}
 	if err := s.persist(next); err != nil {
+		s.mu.Unlock()
 		return err
 	}
 	s.state = next
+	s.revision++
+	revision := s.revision
+	subscribers := make([]chan uint64, 0, len(s.subscribers))
+	for _, subscriber := range s.subscribers {
+		subscribers = append(subscribers, subscriber)
+	}
+	s.mu.Unlock()
+
+	for _, subscriber := range subscribers {
+		select {
+		case subscriber <- revision:
+		default:
+		}
+	}
 	return nil
+}
+
+// Subscribe reports committed state revisions. Notifications are coalesced for
+// slow consumers; callers should always read a fresh snapshot after a signal.
+func (s *Store) Subscribe() (uint64, <-chan uint64, func()) {
+	s.mu.Lock()
+	if s.subscribers == nil {
+		s.subscribers = make(map[uint64]chan uint64)
+	}
+	s.nextSubscriberID++
+	id := s.nextSubscriberID
+	changes := make(chan uint64, 1)
+	s.subscribers[id] = changes
+	revision := s.revision
+	s.mu.Unlock()
+
+	var once sync.Once
+	cancel := func() {
+		once.Do(func() {
+			s.mu.Lock()
+			delete(s.subscribers, id)
+			s.mu.Unlock()
+		})
+	}
+	return revision, changes, cancel
 }
 
 func AppendAudit(state *model.State, event model.AuditEvent) {
@@ -158,3 +262,13 @@ func normalize(state *model.State) {
 		state.Audit = make([]model.AuditEvent, 0)
 	}
 }
+
+func decodeHexHash(value string) ([]byte, error) {
+	decoded, err := hex.DecodeString(value)
+	if err != nil || len(decoded) != sha256HashSize {
+		return nil, errors.New("invalid hash")
+	}
+	return decoded, nil
+}
+
+const sha256HashSize = 32

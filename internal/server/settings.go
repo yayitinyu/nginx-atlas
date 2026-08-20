@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -50,7 +51,11 @@ type settingsUpdateRequest struct {
 }
 
 func (s *Server) effectiveSettings(state model.State) settingsView {
-	seconds := state.Settings.NodePollSeconds
+	return s.effectiveControllerSettings(state.Settings)
+}
+
+func (s *Server) effectiveControllerSettings(settings model.ControllerSettings) settingsView {
+	seconds := settings.NodePollSeconds
 	if seconds < minNodePollSeconds || seconds > maxNodePollSeconds {
 		seconds = int(s.config.PollAfter.Seconds())
 	}
@@ -59,10 +64,10 @@ func (s *Server) effectiveSettings(state model.State) settingsView {
 	}
 	return settingsView{
 		NodePollSeconds:           seconds,
-		TurnstileEnabled:          state.Settings.TurnstileEnabled,
-		TurnstileSiteKey:          state.Settings.TurnstileSiteKey,
-		TurnstileSecretConfigured: state.Settings.TurnstileSecretCiphertext != "",
-		PanelAllowedCIDRs:         append([]string{}, state.Settings.PanelAllowedCIDRs...),
+		TurnstileEnabled:          settings.TurnstileEnabled,
+		TurnstileSiteKey:          settings.TurnstileSiteKey,
+		TurnstileSecretConfigured: settings.TurnstileSecretCiphertext != "",
+		PanelAllowedCIDRs:         append([]string{}, settings.PanelAllowedCIDRs...),
 	}
 }
 
@@ -79,11 +84,11 @@ func (s *Server) nodeOfflineAfter(state model.State) time.Duration {
 }
 
 func (s *Server) handleLoginConfig(w http.ResponseWriter, _ *http.Request) {
-	state := s.store.Snapshot()
-	enabled := state.Settings.TurnstileEnabled && state.Settings.TurnstileSiteKey != "" && state.Settings.TurnstileSecretCiphertext != ""
+	settings := s.store.Settings()
+	enabled := settings.TurnstileEnabled && settings.TurnstileSiteKey != "" && settings.TurnstileSecretCiphertext != ""
 	siteKey := ""
 	if enabled {
-		siteKey = state.Settings.TurnstileSiteKey
+		siteKey = settings.TurnstileSiteKey
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -189,7 +194,16 @@ func (s *Server) panelAccess(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		allowed := s.store.Snapshot().Settings.PanelAllowedCIDRs
+		if s.proxyCredentialRequired(r) {
+			w.Header().Set("Cache-Control", "no-store")
+			if strings.HasPrefix(r.URL.Path, "/api/") {
+				writeError(w, http.StatusForbidden, "反向代理未通过主控认证", "proxy_auth_required", nil)
+				return
+			}
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
+		allowed := s.store.Settings().PanelAllowedCIDRs
 		if len(allowed) == 0 || ipAllowed(s.clientIP(r), allowed) {
 			next.ServeHTTP(w, r)
 			return
@@ -204,25 +218,42 @@ func (s *Server) panelAccess(next http.Handler) http.Handler {
 }
 
 func panelAccessExempt(path string) bool {
-	return path == "/healthz" || path == "/install.sh" || strings.HasPrefix(path, "/api/v1/agent/")
+	return path == "/healthz" || path == "/install.sh" || strings.HasPrefix(path, "/api/v1/agent/") || strings.HasPrefix(path, "/api/v1/local/")
 }
 
 func (s *Server) clientIP(r *http.Request) string {
+	peer, ok := requestPeer(r)
+	if !ok {
+		return ""
+	}
+	if peer.IsLoopback() && s.trustedProxyRequest(r) {
+		if realIP, err := netip.ParseAddr(strings.TrimSpace(r.Header.Get("X-Real-IP"))); err == nil {
+			return realIP.Unmap().String()
+		}
+	}
+	return peer.String()
+}
+
+func requestPeer(r *http.Request) (netip.Addr, bool) {
 	remote := strings.TrimSpace(r.RemoteAddr)
 	if host, _, err := net.SplitHostPort(remote); err == nil {
 		remote = host
 	}
 	peer, err := netip.ParseAddr(strings.Trim(remote, "[]"))
 	if err != nil {
-		return ""
+		return netip.Addr{}, false
 	}
-	peer = peer.Unmap()
-	if peer.IsLoopback() {
-		if realIP, err := netip.ParseAddr(strings.TrimSpace(r.Header.Get("X-Real-IP"))); err == nil {
-			return realIP.Unmap().String()
-		}
-	}
-	return peer.String()
+	return peer.Unmap(), true
+}
+
+func (s *Server) trustedProxyRequest(r *http.Request) bool {
+	proxyToken := strings.TrimSpace(r.Header.Get("X-Atlas-Proxy"))
+	return len(s.proxyToken) >= 24 && len(proxyToken) == len(s.proxyToken) && subtle.ConstantTimeCompare([]byte(proxyToken), []byte(s.proxyToken)) == 1
+}
+
+func (s *Server) proxyCredentialRequired(r *http.Request) bool {
+	peer, ok := requestPeer(r)
+	return ok && peer.IsLoopback() && len(s.proxyToken) >= 24 && !s.trustedProxyRequest(r)
 }
 
 func normalizePanelCIDRs(values []string) ([]string, error) {
@@ -276,18 +307,18 @@ func ipAllowed(value string, prefixes []string) bool {
 	return false
 }
 
-func (s *Server) verifyTurnstile(ctx context.Context, state model.State, token, remoteIP string) error {
-	if !state.Settings.TurnstileEnabled {
+func (s *Server) verifyTurnstile(ctx context.Context, settings model.ControllerSettings, token, remoteIP string) error {
+	if !settings.TurnstileEnabled {
 		return nil
 	}
 	token = strings.TrimSpace(token)
 	if token == "" || len(token) > 4096 {
 		return errTurnstileRejected
 	}
-	if state.Settings.TurnstileSiteKey == "" || state.Settings.TurnstileSecretCiphertext == "" {
+	if settings.TurnstileSiteKey == "" || settings.TurnstileSecretCiphertext == "" {
 		return fmt.Errorf("%w: incomplete settings", errTurnstileUnavailable)
 	}
-	secret, err := s.box.Open("controller-settings:turnstile-secret", state.Settings.TurnstileSecretCiphertext)
+	secret, err := s.box.Open("controller-settings:turnstile-secret", settings.TurnstileSecretCiphertext)
 	if err != nil {
 		return fmt.Errorf("%w: decrypt secret", errTurnstileUnavailable)
 	}

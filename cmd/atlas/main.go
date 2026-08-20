@@ -39,6 +39,8 @@ func run() error {
 		return runServer(os.Args[2:])
 	case "agent":
 		return runAgent(os.Args[2:])
+	case "unregister-agent":
+		return runAgentUnregister(os.Args[2:])
 	case "generate-secrets":
 		return generateSecrets()
 	case "version", "--version", "-version":
@@ -54,16 +56,14 @@ func run() error {
 
 func runServer(args []string) error {
 	flags := flag.NewFlagSet("server", flag.ContinueOnError)
-	address := flags.String("addr", envOr("ATLAS_ADDR", "127.0.0.1:9090"), "HTTP listen address")
+	address := flags.String("addr", envOr("ATLAS_ADDR", "127.0.0.1:909"), "HTTP listen address")
 	publicURL := flags.String("public-url", os.Getenv("ATLAS_PUBLIC_URL"), "public HTTPS URL")
 	statePath := flags.String("state", envOr("ATLAS_STATE_PATH", "/var/lib/nginx-atlas/state.json"), "state file path")
-	masterKeyValue := flags.String("master-key", os.Getenv("ATLAS_MASTER_KEY"), "32-byte encoded encryption key")
-	adminToken := flags.String("admin-token", os.Getenv("ATLAS_ADMIN_TOKEN"), "administrator bearer token")
 	demo := flags.Bool("demo", envBool("ATLAS_DEMO"), "seed safe demonstration data when state is empty")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	key, err := securebox.ParseKey(*masterKeyValue)
+	key, err := securebox.ParseKey(os.Getenv("ATLAS_MASTER_KEY"))
 	if err != nil {
 		return fmt.Errorf("ATLAS_MASTER_KEY: %w", err)
 	}
@@ -76,7 +76,8 @@ func runServer(args []string) error {
 		return err
 	}
 	controller, err := server.New(server.Config{
-		Address: *address, PublicURL: *publicURL, AdminToken: *adminToken, Demo: *demo,
+		Address: *address, PublicURL: *publicURL, AdminToken: os.Getenv("ATLAS_ADMIN_TOKEN"), Demo: *demo,
+		LocalToken: os.Getenv("ATLAS_LOCAL_TOKEN"), ProxyToken: os.Getenv("ATLAS_PROXY_TOKEN"),
 		Version: version, Repository: envOr("ATLAS_REPOSITORY", "yayitinyu/nginx-atlas"),
 	}, stateStore, box, slog.Default())
 	if err != nil {
@@ -91,7 +92,6 @@ func runAgent(args []string) error {
 	flags := flag.NewFlagSet("agent", flag.ContinueOnError)
 	serverURL := flags.String("server", os.Getenv("ATLAS_SERVER_URL"), "controller HTTPS URL")
 	nodeName := flags.String("name", os.Getenv("ATLAS_NODE_NAME"), "node display name")
-	token := flags.String("token", os.Getenv("ATLAS_ENROLLMENT_TOKEN"), "single-use enrollment token")
 	statePath := flags.String("state", envOr("ATLAS_AGENT_STATE_PATH", "/var/lib/nginx-atlas/agent.json"), "agent credential state")
 	caCert := flags.String("ca-cert", os.Getenv("ATLAS_CA_CERT"), "optional private CA certificate")
 	pollInterval := flags.Duration("poll", envDuration("ATLAS_POLL_INTERVAL", 10*time.Second), "poll interval")
@@ -108,9 +108,12 @@ func runAgent(args []string) error {
 	executor := agent.NewExecutor(agent.ExecutorConfig{
 		NginxBinary: *nginxBinary, Systemctl: *systemctlBinary, LegoBinary: *legoBinary,
 		NginxConfigDir: *nginxConfigDir, SSLRoot: *sslRoot, DataRoot: *dataRoot,
+		Repository:         envOr("ATLAS_REPOSITORY", "yayitinyu/nginx-atlas"),
+		CurrentVersion:     version,
+		ProxyHeaderInclude: os.Getenv("ATLAS_PROXY_HEADER_INCLUDE"),
 	}, runner)
 	client, err := agent.NewClient(agent.ClientConfig{
-		ServerURL: *serverURL, NodeName: *nodeName, EnrollmentToken: *token,
+		ServerURL: *serverURL, NodeName: *nodeName, EnrollmentToken: os.Getenv("ATLAS_ENROLLMENT_TOKEN"),
 		StatePath: *statePath, CACertPath: *caCert, PollInterval: *pollInterval, Version: version,
 	}, executor, runner, slog.Default())
 	if err != nil {
@@ -119,6 +122,26 @@ func runAgent(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	return client.Run(ctx)
+}
+
+func runAgentUnregister(args []string) error {
+	flags := flag.NewFlagSet("unregister-agent", flag.ContinueOnError)
+	serverURL := flags.String("server", os.Getenv("ATLAS_SERVER_URL"), "controller HTTPS URL")
+	statePath := flags.String("state", envOr("ATLAS_AGENT_STATE_PATH", "/var/lib/nginx-atlas/agent.json"), "agent credential state")
+	caCert := flags.String("ca-cert", os.Getenv("ATLAS_CA_CERT"), "optional private CA certificate")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	runner := agent.OSCommandRunner{}
+	client, err := agent.NewClient(agent.ClientConfig{
+		ServerURL: *serverURL, StatePath: *statePath, CACertPath: *caCert, Version: version,
+	}, agent.NewExecutor(agent.ExecutorConfig{}, runner), runner, slog.Default())
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	return client.Unregister(ctx)
 }
 
 func generateSecrets() error {
@@ -130,8 +153,18 @@ func generateSecrets() error {
 	if _, err := rand.Read(adminRaw); err != nil {
 		return err
 	}
+	localRaw := make([]byte, 32)
+	if _, err := rand.Read(localRaw); err != nil {
+		return err
+	}
+	proxyRaw := make([]byte, 32)
+	if _, err := rand.Read(proxyRaw); err != nil {
+		return err
+	}
 	fmt.Printf("ATLAS_MASTER_KEY=%s\n", masterKey)
 	fmt.Printf("ATLAS_ADMIN_TOKEN=%s\n", base64.RawURLEncoding.EncodeToString(adminRaw))
+	fmt.Printf("ATLAS_LOCAL_TOKEN=%s\n", base64.RawURLEncoding.EncodeToString(localRaw))
+	fmt.Printf("ATLAS_PROXY_TOKEN=%s\n", base64.RawURLEncoding.EncodeToString(proxyRaw))
 	return nil
 }
 
@@ -165,5 +198,5 @@ func usageError() error {
 }
 
 func printUsage() {
-	fmt.Fprintln(os.Stderr, "Usage: atlas <server|agent|generate-secrets|version> [options]")
+	fmt.Fprintln(os.Stderr, "Usage: atlas <server|agent|unregister-agent|generate-secrets|version> [options]")
 }

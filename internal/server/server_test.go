@@ -38,7 +38,7 @@ func TestEnrollmentExchangesOneTimeTokenWithoutPersistingSecrets(t *testing.T) {
 		t.Fatal(err)
 	}
 	adminToken := strings.Repeat("a", 32)
-	controller, err := New(Config{AdminToken: adminToken, PublicURL: "https://atlas.example.com"}, stateStore, box, nil)
+	controller, err := New(Config{AdminToken: adminToken, PublicURL: "https://atlas.example.com", ProxyToken: testProxyToken}, stateStore, box, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +93,7 @@ func TestEnrollmentUsesReportedHostnameWhenNameIsOmitted(t *testing.T) {
 		t.Fatal(err)
 	}
 	adminToken := strings.Repeat("h", 32)
-	controller, err := New(Config{AdminToken: adminToken, PublicURL: "https://atlas.example.com"}, stateStore, box, nil)
+	controller, err := New(Config{AdminToken: adminToken, PublicURL: "https://atlas.example.com", ProxyToken: testProxyToken}, stateStore, box, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,7 +137,7 @@ func TestNodePollSettingSeparatesTaskAndReportIntervals(t *testing.T) {
 		t.Fatal(err)
 	}
 	adminToken := strings.Repeat("p", 32)
-	controller, err := New(Config{AdminToken: adminToken, PublicURL: "https://atlas.example.com"}, stateStore, box, nil)
+	controller, err := New(Config{AdminToken: adminToken, PublicURL: "https://atlas.example.com", ProxyToken: testProxyToken}, stateStore, box, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -225,6 +225,8 @@ func TestAgentPollRedispatchesUnacknowledgedRunningJob(t *testing.T) {
 		t.Fatalf("first poll did not dispatch queued job: %+v", firstResponse.Job)
 	}
 	firstStartedAt := stateStore.Snapshot().Jobs[queued.ID].StartedAt
+	now := time.Now()
+	controller.nodePollNow = func() time.Time { return now.Add(controller.config.PollAfter) }
 	second := performJSON(t, controller.Handler(), http.MethodPost, "/api/v1/agent/poll", protocol.PollRequest{}, "AtlasNode "+credentials.NodeID+"."+credentials.NodeSecret)
 	var secondResponse protocol.PollResponse
 	decodeRecorder(t, second, &secondResponse)
@@ -959,6 +961,10 @@ func TestRenewalReusesCertificateRecord(t *testing.T) {
 		DeployedNodeIDs: []string{"node_primary", "node_backup"},
 	}
 	certPEM, keyPEM := makeServerTestCertificate(t, "api.example.com", now)
+	controller.certificateRoots = x509.NewCertPool()
+	if !controller.certificateRoots.AppendCertsFromPEM(certPEM) {
+		t.Fatal("failed to trust test certificate")
+	}
 	prepared, err := controller.prepareCertificateResult(state, model.Job{
 		ID: "job_renew", NodeID: "node_primary", DomainID: "dom_api", Type: protocol.JobIssueCertificate,
 	}, &protocol.CertificateBundle{FullchainPEM: string(certPEM), PrivateKeyPEM: string(keyPEM)})
@@ -1387,7 +1393,7 @@ func TestPanelIPWhitelistPreventsLockoutAndExemptsHealth(t *testing.T) {
 		t.Fatal(err)
 	}
 	adminToken := strings.Repeat("i", 32)
-	controller, err := New(Config{AdminToken: adminToken}, stateStore, box, nil)
+	controller, err := New(Config{AdminToken: adminToken, ProxyToken: testProxyToken}, stateStore, box, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1419,6 +1425,59 @@ func TestPanelIPWhitelistPreventsLockoutAndExemptsHealth(t *testing.T) {
 	health := performJSONFromIP(t, controller.Handler(), http.MethodGet, "/healthz", nil, "", "198.51.100.7")
 	if health.Code != http.StatusOK {
 		t.Fatalf("health endpoint was blocked: %d", health.Code)
+	}
+}
+
+func TestClientIPRequiresAuthenticatedLoopbackProxy(t *testing.T) {
+	stateStore, err := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	box, _ := securebox.New(bytes.Repeat([]byte{0x76}, 32))
+	controller, err := New(Config{AdminToken: strings.Repeat("x", 32), ProxyToken: testProxyToken}, stateStore, box, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	request.RemoteAddr = "127.0.0.1:12345"
+	request.Header.Set("X-Real-IP", "203.0.113.9")
+	if got := controller.clientIP(request); got != "127.0.0.1" {
+		t.Fatalf("unauthenticated loopback peer spoofed client IP: %q", got)
+	}
+	request.Header.Set("X-Atlas-Proxy", testProxyToken)
+	if got := controller.clientIP(request); got != "203.0.113.9" {
+		t.Fatalf("authenticated proxy client IP = %q", got)
+	}
+}
+
+func TestPanelRejectsPublicProxyWithoutProxyCredential(t *testing.T) {
+	stateStore, err := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	box, _ := securebox.New(bytes.Repeat([]byte{0x77}, 32))
+	controller, err := New(Config{
+		AdminToken: strings.Repeat("y", 32), PublicURL: "https://atlas.example.com", ProxyToken: testProxyToken,
+	}, stateStore, box, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:909/", nil)
+	request.RemoteAddr = "127.0.0.1:12345"
+	recorder := httptest.NewRecorder()
+	controller.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("uncredentialed loopback proxy returned %d", recorder.Code)
+	}
+	request = httptest.NewRequest(http.MethodGet, "https://atlas.example.com/", nil)
+	request.RemoteAddr = "127.0.0.1:12345"
+	request.Host = "atlas.example.com"
+	request.Header.Set("X-Real-IP", "203.0.113.9")
+	request.Header.Set("X-Atlas-Proxy", testProxyToken)
+	recorder = httptest.NewRecorder()
+	controller.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("credentialed public proxy returned %d", recorder.Code)
 	}
 }
 
@@ -1513,6 +1572,7 @@ func performJSON(t *testing.T, handler http.Handler, method, path string, body a
 		t.Fatal(err)
 	}
 	request := httptest.NewRequest(method, path, bytes.NewReader(payload))
+	request.Header.Set("X-Atlas-Proxy", testProxyToken)
 	request.Header.Set("Content-Type", "application/json")
 	if authorization != "" {
 		request.Header.Set("Authorization", authorization)
@@ -1531,6 +1591,7 @@ func performJSONFromIP(t *testing.T, handler http.Handler, method, path string, 
 	request := httptest.NewRequest(method, path, bytes.NewReader(payload))
 	request.RemoteAddr = "127.0.0.1:12345"
 	request.Header.Set("X-Real-IP", realIP)
+	request.Header.Set("X-Atlas-Proxy", testProxyToken)
 	request.Header.Set("Content-Type", "application/json")
 	if authorization != "" {
 		request.Header.Set("Authorization", authorization)
@@ -1539,6 +1600,8 @@ func performJSONFromIP(t *testing.T, handler http.Handler, method, path string, 
 	handler.ServeHTTP(recorder, request)
 	return recorder
 }
+
+const testProxyToken = "test-proxy-token-0123456789abcdef"
 
 func decodeRecorder(t *testing.T, recorder *httptest.ResponseRecorder, target any) {
 	t.Helper()

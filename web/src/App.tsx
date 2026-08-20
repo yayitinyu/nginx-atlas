@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { APIError, api, clearToken, getToken, setToken } from './api'
 import type { ACMEAccount, CertificateRecord, ControllerSettingsInput, DashboardData, DNSAccount, DomainRecord, JobRecord, NginxSiteMeta, NodeRecord, ReleaseInfo } from './types'
 import { usePreferences, type LanguageMode, type ThemeMode } from './preferences'
@@ -43,6 +43,8 @@ export default function App() {
   const [updatingNode, setUpdatingNode] = useState<NodeRecord>()
   const [busy, setBusy] = useState('')
   const [toasts, setToasts] = useState<ToastMessage[]>([])
+  const [liveConnected, setLiveConnected] = useState(false)
+  const refreshingRef = useRef(false)
 
   const toast = useCallback((tone: ToastMessage['tone'], message: string) => {
     const id = Date.now() + Math.round(Math.random() * 1000)
@@ -50,17 +52,24 @@ export default function App() {
     window.setTimeout(() => setToasts((items) => items.filter((item) => item.id !== id)), 5200)
   }, [])
 
-  const logout = useCallback(() => {
+  const resetSession = useCallback(() => {
     clearToken(); setAuth('anonymous'); setData(emptyDashboard); setMobileMenu(false)
   }, [])
 
+  const logout = useCallback(async () => {
+    try { await api.logout() } catch { /* Local cleanup still completes if the session already expired. */ }
+    resetSession()
+  }, [resetSession])
+
   const handleError = useCallback((error: unknown, fallback: string) => {
-    if (error instanceof APIError && error.status === 401) { logout(); return }
+    if (error instanceof APIError && error.status === 401) { resetSession(); return }
     const message = error instanceof Error && effectiveLanguage === 'zh' ? error.message : fallback
     toast('error', message)
-  }, [effectiveLanguage, logout, toast])
+  }, [effectiveLanguage, resetSession, toast])
 
   const refresh = useCallback(async (silent = false) => {
+    if (refreshingRef.current) return
+    refreshingRef.current = true
     if (!silent) setLoading(true)
     try {
       const [dashboard, dns, acme] = await Promise.all([api.dashboard(), api.dnsAccounts(), api.acmeAccounts()])
@@ -72,14 +81,14 @@ export default function App() {
       })
       setDNSAccounts(dns)
       setACMEAccounts(acme)
-    } catch (error) { handleError(error, t('error.dashboard')) } finally { if (!silent) setLoading(false) }
+    } catch (error) { handleError(error, t('error.dashboard')) } finally { refreshingRef.current = false; if (!silent) setLoading(false) }
   }, [handleError, t])
 
   const verify = useCallback(async () => { await api.verifySession(); setAuth('authenticated') }, [])
   const login = useCallback(async (password: string, turnstileToken: string) => { const session = await api.login(password, turnstileToken); setToken(session.token); setAuth('authenticated') }, [])
   const hasActiveJobs = data.jobs.some((job) => job.status === 'queued' || job.status === 'running')
 
-  useEffect(() => { if (auth === 'checking') verify().catch(() => logout()) }, [auth, verify, logout])
+  useEffect(() => { if (auth === 'checking') verify().catch(() => resetSession()) }, [auth, verify, resetSession])
   useEffect(() => {
     if (auth !== 'authenticated') return
     void refresh()
@@ -88,12 +97,78 @@ export default function App() {
   useEffect(() => {
     if (auth !== 'authenticated') return
     const pollSeconds = data.settings?.node_poll_seconds ?? 30
-    const delay = page === 'update' || hasActiveJobs ? 2_000 : Math.max(10, pollSeconds) * 1000
+    const delay = liveConnected ? 60_000 : page === 'update' || hasActiveJobs ? 2_000 : Math.max(10, pollSeconds) * 1000
     const interval = window.setInterval(() => {
       if (document.visibilityState === 'visible') void refresh(true)
     }, delay)
     return () => window.clearInterval(interval)
-  }, [auth, page, refresh, hasActiveJobs, data.settings?.node_poll_seconds])
+  }, [auth, page, refresh, hasActiveJobs, liveConnected, data.settings?.node_poll_seconds])
+
+  useEffect(() => {
+    if (auth !== 'authenticated') {
+      setLiveConnected(false)
+      return
+    }
+    let disposed = false
+    let socket: WebSocket | undefined
+    let reconnectTimer = 0
+    let refreshTimer = 0
+    let attempt = 0
+
+    const scheduleRefresh = () => {
+      window.clearTimeout(refreshTimer)
+      refreshTimer = window.setTimeout(() => { if (!disposed && document.visibilityState === 'visible') void refresh(true) }, 180)
+    }
+    const connect = async () => {
+      try {
+        const { ticket } = await api.eventTicket()
+        if (disposed) return
+        const endpoint = new URL('/api/v1/events', window.location.href)
+        endpoint.protocol = endpoint.protocol === 'https:' ? 'wss:' : 'ws:'
+        socket = new WebSocket(endpoint)
+        socket.addEventListener('open', () => socket?.send(JSON.stringify({ ticket })))
+        socket.addEventListener('message', (event) => {
+          try {
+            const payload = JSON.parse(String(event.data)) as { type?: string }
+            if (payload.type === 'state.changed') {
+              attempt = 0
+              setLiveConnected(true)
+              scheduleRefresh()
+            }
+          } catch { /* Ignore unknown event frames. */ }
+        })
+        socket.addEventListener('close', () => {
+          if (disposed) return
+          setLiveConnected(false)
+          const delay = Math.min(30_000, 1_000 * (2 ** Math.min(attempt++, 5)))
+          reconnectTimer = window.setTimeout(() => void connect(), delay)
+        })
+        socket.addEventListener('error', () => socket?.close())
+      } catch (error) {
+        if (disposed) return
+        if (error instanceof APIError && error.status === 401) {
+          resetSession()
+          return
+        }
+        setLiveConnected(false)
+        const delay = Math.min(30_000, 1_000 * (2 ** Math.min(attempt++, 5)))
+        reconnectTimer = window.setTimeout(() => void connect(), delay)
+      }
+    }
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') scheduleRefresh()
+    }
+    document.addEventListener('visibilitychange', onVisibility)
+    void connect()
+    return () => {
+      disposed = true
+      setLiveConnected(false)
+      document.removeEventListener('visibilitychange', onVisibility)
+      window.clearTimeout(reconnectTimer)
+      window.clearTimeout(refreshTimer)
+      socket?.close()
+    }
+  }, [auth, refresh, resetSession])
 
   useEffect(() => {
     window.scrollTo(0, 0)
@@ -260,6 +335,21 @@ export default function App() {
     catch (error) { handleError(error, t('error.systemUpdate')) } finally { setBusy('') }
   }
 
+  async function removeManagedNodeAndUninstall(): Promise<string> {
+    if (!managedNode) return ''
+    setBusy('remove-node')
+    try {
+      const { command } = await api.nodeUninstallCommand(managedNode.id)
+      await api.revokeNode(managedNode.id)
+      toast('success', t('toast.nodeRevoked'))
+      await refresh(true)
+      return command
+    } catch (error) {
+      handleError(error, t('error.revokeNode'))
+      return ''
+    } finally { setBusy('') }
+  }
+
   async function setCertificateAutoRenew(certificate: CertificateRecord, enabled: boolean) {
     setBusy(`auto-renew-${certificate.id}`)
     try {
@@ -335,7 +425,7 @@ export default function App() {
       <DomainDrawer key={editingDomain?.id ?? 'create-domain'} open={domainDrawer} nodes={data.nodes} certificates={data.certificates} dnsAccounts={dnsAccounts} acmeAccounts={acmeAccounts} busy={busy === 'domain'} editingDomain={editingDomain} onClose={() => { if (!busy) { setDomainDrawer(false); setEditingDomain(undefined) } }} onSubmit={createDomain} onUpdate={updateDomain} />
       <CertificateDialog open={certificateDialog} nodes={data.nodes} dnsAccounts={dnsAccounts} acmeAccounts={acmeAccounts} busy={busy === 'certificate'} onClose={() => !busy && setCertificateDialog(false)} onSubmit={submitCertificate} />
       <CertificateAutomationDialog open={Boolean(automationCertificate)} certificate={automationCertificate} nodes={data.nodes} dnsAccounts={dnsAccounts} acmeAccounts={acmeAccounts} busy={busy === 'certificate-automation'} onClose={() => !busy && setAutomationCertificate(undefined)} onSave={saveCertificateAutomation} />
-      <NodeManageDialog open={Boolean(managedNode)} node={managedNode} release={releaseInfo} busy={busy} onClose={() => !busy && setManagedNode(undefined)} onRename={renameManagedNode} onCheckRelease={checkRelease} onUpdateAtlas={updateManagedNodeAtlas} onUpdateSystem={updateManagedNodeSystem} />
+      <NodeManageDialog open={Boolean(managedNode)} node={managedNode} release={releaseInfo} busy={busy} onClose={() => !busy && setManagedNode(undefined)} onRename={renameManagedNode} onCheckRelease={checkRelease} onUpdateAtlas={updateManagedNodeAtlas} onUpdateSystem={updateManagedNodeSystem} onRemoveAndUninstall={removeManagedNodeAndUninstall} />
       <DNSAccountDialog open={dnsDialog} account={editingDNS} busy={busy === 'dns'} onClose={() => { setDNSDialog(false); setEditingDNS(undefined) }} onSave={saveDNS} />
       <ACMEAccountDialog open={acmeDialog} account={editingACME} busy={busy === 'acme'} onClose={() => { setACMEDialog(false); setEditingACME(undefined) }} onSave={saveACME} />
       <PasswordDialog open={passwordDialog} busy={busy === 'password'} onClose={() => setPasswordDialog(false)} onSave={changePassword} />

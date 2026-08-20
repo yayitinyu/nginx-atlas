@@ -39,7 +39,7 @@ function DialogShell({ open, title, description, onClose, children, wide = false
   )
 }
 
-export function NodeManageDialog({ open, node, release, busy, onClose, onRename, onCheckRelease, onUpdateAtlas, onUpdateSystem }: {
+export function NodeManageDialog({ open, node, release, busy, onClose, onRename, onCheckRelease, onUpdateAtlas, onUpdateSystem, onRemoveAndUninstall }: {
   open: boolean
   node?: NodeRecord
   release?: ReleaseInfo
@@ -49,14 +49,19 @@ export function NodeManageDialog({ open, node, release, busy, onClose, onRename,
   onCheckRelease: () => Promise<void>
   onUpdateAtlas: () => Promise<void>
   onUpdateSystem: () => Promise<void>
+  onRemoveAndUninstall: () => Promise<string>
 }) {
   const { t, locale } = usePreferences()
   const [name, setName] = useState('')
-  const [confirm, setConfirm] = useState<'atlas' | 'system'>()
+  const [confirm, setConfirm] = useState<'atlas' | 'system' | 'remove'>()
+  const [uninstallCommand, setUninstallCommand] = useState('')
+  const [copied, setCopied] = useState(false)
   useEffect(() => {
     if (!open || !node) return
     setName(node.name)
     setConfirm(undefined)
+    setUninstallCommand('')
+    setCopied(false)
   }, [open, node?.id, node?.name])
   if (!node) return null
   const nodeNeedsUpdate = Boolean(release && node.agent_version && (node.agent_version === 'dev' || isVersionNewer(release.latest_version, node.agent_version)))
@@ -67,6 +72,10 @@ export function NodeManageDialog({ open, node, release, busy, onClose, onRename,
         <form className="rename-node-form" onSubmit={(event) => { event.preventDefault(); void onRename(name.trim()) }}><label><span>{t('nodes.rename')}</span><div className="field-control"><Icon name="edit" size={17} /><input value={name} onChange={(event) => setName(event.target.value)} /></div></label><button type="submit" disabled={busy === 'rename' || name.trim().length < 2 || name.trim() === node.name}>{busy === 'rename' ? t('common.saving') : t('common.save')}</button></form>
         <section className="node-action-section"><div className="node-action-heading"><span><strong>{t(node.controller_installed ? 'nodes.controllerRelease' : 'nodes.atlasRelease')}</strong><small>{t('nodes.versionPair', { current: node.agent_version || '—', latest: release?.latest_version || '—' })}</small></span><button type="button" onClick={() => void onCheckRelease()} disabled={busy === 'release'}><Icon name="refresh" size={16} />{t('nodes.checkUpdate')}</button></div>{release && <div className={nodeNeedsUpdate ? 'release-card release-available' : 'release-card'}><span><Icon name={nodeNeedsUpdate ? 'download' : 'check'} size={20} /></span><div><strong>{nodeNeedsUpdate ? t('nodes.updateAvailable', { version: release.latest_version }) : t('nodes.upToDate')}</strong><small>{release.published_at ? new Intl.DateTimeFormat(locale, { year: 'numeric', month: 'short', day: '2-digit' }).format(new Date(release.published_at)) : release.repository}</small></div>{nodeNeedsUpdate && (confirm === 'atlas' ? <div className="inline-confirm"><button type="button" onClick={() => setConfirm(undefined)}>{t('common.cancel')}</button><button type="button" onClick={() => void onUpdateAtlas()} disabled={busy === 'atlas'}>{busy === 'atlas' ? t('common.queueing') : t('nodes.confirmUpdate')}</button></div> : <button type="button" className="node-primary-action" onClick={() => setConfirm('atlas')}><Icon name="download" size={16} />{t('nodes.updateAtlas')}</button>)}</div>}</section>
         <section className="node-action-section"><div className="system-update-card"><span className="node-action-icon"><Icon name="package" size={21} /></span><span><strong>{t('nodes.systemUpdate')}</strong><small>{node.package_manager === 'apt' ? t('nodes.systemUpdateHint') : t('nodes.systemUpdateUnsupported')}</small></span>{confirm === 'system' ? <div className="inline-confirm danger-confirm"><button type="button" onClick={() => setConfirm(undefined)}>{t('common.cancel')}</button><button type="button" onClick={() => void onUpdateSystem()} disabled={busy === 'system'}>{busy === 'system' ? t('common.queueing') : t('nodes.confirmSystemUpdate')}</button></div> : <button type="button" onClick={() => setConfirm('system')} disabled={node.package_manager !== 'apt'}><Icon name="refresh" size={16} />{t('nodes.updatePackages')}</button>}</div></section>
+        <section className="node-action-section uninstall-section">
+          <div><strong>{t('nodes.removeAndUninstall')}</strong><small>{t('nodes.removeAndUninstallHint')}</small></div>
+          {uninstallCommand ? <div className="uninstall-command"><pre>{uninstallCommand}</pre><button type="button" onClick={() => { void navigator.clipboard.writeText(uninstallCommand); setCopied(true) }}><Icon name={copied ? 'check' : 'copy'} size={16} />{t(copied ? 'common.copied' : 'nodes.copyUninstall')}</button></div> : confirm === 'remove' ? <div className="inline-confirm remove-node-confirm"><button type="button" onClick={() => setConfirm(undefined)}>{t('common.cancel')}</button><button type="button" disabled={busy === 'remove-node'} onClick={() => void onRemoveAndUninstall().then((command) => { if (command) setUninstallCommand(command); setConfirm(undefined) })}>{busy === 'remove-node' ? t('common.removing') : t('nodes.confirmRemove')}</button></div> : <button type="button" className="remove-node-button" onClick={() => setConfirm('remove')}><Icon name="trash" size={16} />{t('nodes.removeAndUninstall')}</button>}
+        </section>
       </div>
     </DialogShell>
   )

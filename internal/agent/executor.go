@@ -2,6 +2,7 @@ package agent
 
 import (
 	"archive/tar"
+	"bufio"
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
@@ -19,6 +20,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -38,12 +40,16 @@ var (
 )
 
 type ExecutorConfig struct {
-	NginxBinary    string
-	Systemctl      string
-	LegoBinary     string
-	NginxConfigDir string
-	SSLRoot        string
-	DataRoot       string
+	NginxBinary        string
+	Systemctl          string
+	SystemdRun         string
+	LegoBinary         string
+	NginxConfigDir     string
+	SSLRoot            string
+	DataRoot           string
+	Repository         string
+	CurrentVersion     string
+	ProxyHeaderInclude string
 }
 
 type Executor struct {
@@ -59,6 +65,9 @@ func NewExecutor(config ExecutorConfig, runner CommandRunner) *Executor {
 	if config.Systemctl == "" {
 		config.Systemctl = "systemctl"
 	}
+	if config.SystemdRun == "" {
+		config.SystemdRun = "systemd-run"
+	}
 	if config.LegoBinary == "" {
 		config.LegoBinary = "lego"
 	}
@@ -70,6 +79,12 @@ func NewExecutor(config ExecutorConfig, runner CommandRunner) *Executor {
 	}
 	if config.DataRoot == "" {
 		config.DataRoot = "/var/lib/nginx-atlas"
+	}
+	if strings.TrimSpace(config.Repository) == "" {
+		config.Repository = "yayitinyu/nginx-atlas"
+	}
+	if strings.TrimSpace(config.CurrentVersion) == "" {
+		config.CurrentVersion = "dev"
 	}
 	if runner == nil {
 		runner = OSCommandRunner{}
@@ -142,11 +157,15 @@ func (e *Executor) Execute(ctx context.Context, job protocol.WireJob) protocol.J
 
 func (e *Executor) applyDomain(ctx context.Context, payload protocol.ApplyDomainPayload) (protocol.JobResultRequest, error) {
 	domain := strings.ToLower(strings.TrimSpace(payload.Domain))
-	certDir := filepath.Join(e.config.SSLRoot, domain)
+	certDir, err := e.certificateDir(domain)
+	if err != nil {
+		return protocol.JobResultRequest{}, err
+	}
 	config, err := nginxconfig.Render(nginxconfig.Site{
 		Domain: domain, UpstreamHost: payload.UpstreamHost, UpstreamPort: payload.UpstreamPort,
 		TLS: payload.TLS, CertificateDir: certDir,
 		NginxWebsocket: payload.NginxWebsocket, NginxHTTP2: payload.NginxHTTP2, NginxGzip: payload.NginxGzip,
+		ProxyHeaderInclude: e.localProxyHeaderInclude(payload.UpstreamHost, payload.UpstreamPort),
 	})
 	if err != nil {
 		return protocol.JobResultRequest{}, err
@@ -221,6 +240,13 @@ func (e *Executor) applyDomain(ctx context.Context, payload protocol.ApplyDomain
 	return result, nil
 }
 
+func (e *Executor) localProxyHeaderInclude(upstreamHost string, upstreamPort int) string {
+	if upstreamPort == 909 && isLoopbackHost(strings.TrimSpace(upstreamHost)) && e.config.ProxyHeaderInclude == "/etc/nginx-atlas/proxy-token.conf" {
+		return e.config.ProxyHeaderInclude
+	}
+	return ""
+}
+
 func (e *Executor) deleteDomain(ctx context.Context, payload protocol.DeleteDomainPayload) (protocol.JobResultRequest, error) {
 	domain := strings.ToLower(strings.TrimSpace(payload.Domain))
 	filename, err := nginxconfig.ConfigFileName(domain)
@@ -268,7 +294,11 @@ func (e *Executor) deleteDomain(ctx context.Context, payload protocol.DeleteDoma
 
 func (e *Executor) syncCertificate(ctx context.Context, payload protocol.SyncCertificatePayload) (protocol.JobResultRequest, error) {
 	domain := strings.ToLower(strings.TrimSpace(payload.Domain))
-	paths := []string{filepath.Join(e.config.SSLRoot, domain, "fullchain.pem"), filepath.Join(e.config.SSLRoot, domain, "privkey.pem")}
+	dir, err := e.certificateDir(domain)
+	if err != nil {
+		return protocol.JobResultRequest{}, fmt.Errorf("invalid certificate domain: %w", err)
+	}
+	paths := []string{filepath.Join(dir, "fullchain.pem"), filepath.Join(dir, "privkey.pem")}
 	backup, err := captureFiles(paths)
 	if err != nil {
 		return protocol.JobResultRequest{}, err
@@ -333,7 +363,11 @@ func (e *Executor) issueCertificate(ctx context.Context, payload protocol.IssueC
 		if payload.EABKID == "" || payload.EABHMAC == "" {
 			return protocol.JobResultRequest{}, errors.New("both EAB KID and HMAC are required")
 		}
-		args = append(args, "--eab", "--eab.kid", payload.EABKID, "--eab.hmac", payload.EABHMAC)
+		// lego supports these flags through environment variables. Keeping the
+		// HMAC out of argv prevents disclosure through /proc/*/cmdline and ps.
+		env["LEGO_EAB_KID"] = payload.EABKID
+		env["LEGO_EAB_HMAC"] = payload.EABHMAC
+		args = append(args, "--eab")
 	}
 	output, err := e.runner.Run(ctx, e.config.LegoBinary, args, env)
 	if err != nil {
@@ -359,18 +393,6 @@ func (e *Executor) issueCertificate(ctx context.Context, payload protocol.IssueC
 		return protocol.JobResultRequest{}, fmt.Errorf("validate issued certificate names: %w", err)
 	}
 	bundle := protocol.CertificateBundle{FullchainPEM: string(fullchain), PrivateKeyPEM: string(privateKey)}
-	if payload.Install {
-		installed, err := e.syncCertificate(ctx, protocol.SyncCertificatePayload{
-			Domain: domain, Certificate: bundle, ReloadNginx: payload.ReloadNginx,
-		})
-		installed.Certificate = &bundle
-		installed.NginxOutput = limitOutput(append(append(output, '\n'), []byte(installed.NginxOutput)...))
-		if err != nil {
-			return installed, fmt.Errorf("install issued certificate: %w", err)
-		}
-		installed.Message = "Let's Encrypt DNS-01 证书已签发并安全写入节点"
-		return installed, nil
-	}
 	return protocol.JobResultRequest{
 		Message:     "Let's Encrypt DNS-01 证书签发成功",
 		Certificate: &bundle,
@@ -404,12 +426,15 @@ func (e *Executor) validateAndReload(ctx context.Context) (protocol.JobResultReq
 }
 
 func (e *Executor) installCertificate(domain string, bundle protocol.CertificateBundle) error {
+	dir, err := e.certificateDir(domain)
+	if err != nil {
+		return fmt.Errorf("invalid certificate domain: %w", err)
+	}
 	fullchain := []byte(bundle.FullchainPEM)
 	privateKey := []byte(bundle.PrivateKeyPEM)
 	if _, err := certutil.Validate(fullchain, privateKey, domain, e.now()); err != nil {
 		return fmt.Errorf("validate certificate bundle: %w", err)
 	}
-	dir := filepath.Join(e.config.SSLRoot, domain)
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return fmt.Errorf("create certificate directory: %w", err)
 	}
@@ -423,7 +448,11 @@ func (e *Executor) installCertificate(domain string, bundle protocol.Certificate
 }
 
 func (e *Executor) readAndValidateCertificate(domain string) (protocol.CertificateBundle, error) {
-	return e.readAndValidateCertificateFrom(filepath.Join(e.config.SSLRoot, domain), domain)
+	dir, err := e.certificateDir(domain)
+	if err != nil {
+		return protocol.CertificateBundle{}, err
+	}
+	return e.readAndValidateCertificateFrom(dir, domain)
 }
 
 func (e *Executor) InventoryCertificates() []model.CertificateMeta {
@@ -470,12 +499,19 @@ func (e *Executor) updateAtlas(ctx context.Context, payload protocol.UpdateAtlas
 	if !regexp.MustCompile(`^[a-fA-F0-9]{64}$`).MatchString(payload.SHA256) {
 		return protocol.JobResultRequest{}, errors.New("release checksum is invalid")
 	}
-	downloadURL, err := url.Parse(strings.TrimSpace(payload.DownloadURL))
-	if err != nil || !isTrustedReleaseURL(downloadURL) {
-		return protocol.JobResultRequest{}, errors.New("release URL is not a trusted HTTPS GitHub URL")
-	}
 	if strings.TrimSpace(payload.ExpectedVersion) == "" || len(payload.ExpectedVersion) > 64 {
 		return protocol.JobResultRequest{}, errors.New("expected release version is invalid")
+	}
+	if err := requireVersionUpgrade(e.config.CurrentVersion, payload.ExpectedVersion); err != nil {
+		return protocol.JobResultRequest{}, err
+	}
+	downloadURL, err := url.Parse(strings.TrimSpace(payload.DownloadURL))
+	if err != nil {
+		return protocol.JobResultRequest{}, errors.New("release URL is invalid")
+	}
+	reference, err := trustedReleaseReference(downloadURL, e.config.Repository, payload.ExpectedVersion)
+	if err != nil {
+		return protocol.JobResultRequest{}, err
 	}
 	if err := os.MkdirAll(filepath.Join(e.config.DataRoot, "updates"), 0o700); err != nil {
 		return protocol.JobResultRequest{}, fmt.Errorf("create update directory: %w", err)
@@ -494,6 +530,15 @@ func (e *Executor) updateAtlas(ctx context.Context, payload protocol.UpdateAtlas
 			}
 			return nil
 		},
+	}
+	manifestSHA, err := fetchTrustedReleaseChecksum(ctx, client, reference.ChecksumURL, reference.AssetName)
+	if err != nil {
+		_ = archive.Close()
+		return protocol.JobResultRequest{}, err
+	}
+	if !strings.EqualFold(manifestSHA, payload.SHA256) {
+		_ = archive.Close()
+		return protocol.JobResultRequest{}, errors.New("controller checksum does not match the trusted release manifest")
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, downloadURL.String(), nil)
 	if err != nil {
@@ -521,7 +566,7 @@ func (e *Executor) updateAtlas(ctx context.Context, payload protocol.UpdateAtlas
 	if written > maxAtlasReleaseSize {
 		return protocol.JobResultRequest{}, errors.New("release archive is too large")
 	}
-	if !strings.EqualFold(hex.EncodeToString(hash.Sum(nil)), payload.SHA256) {
+	if !strings.EqualFold(hex.EncodeToString(hash.Sum(nil)), manifestSHA) {
 		return protocol.JobResultRequest{}, errors.New("release SHA-256 verification failed")
 	}
 	executable, err := os.Executable()
@@ -561,16 +606,40 @@ func (e *Executor) updateAtlas(ctx context.Context, payload protocol.UpdateAtlas
 	if err := copyRegularFile(executable, backupPath, 0o700); err != nil {
 		return protocol.JobResultRequest{}, fmt.Errorf("back up current binary: %w", err)
 	}
-	if err := os.Rename(stagedPath, executable); err != nil {
-		return protocol.JobResultRequest{}, fmt.Errorf("install updated binary: %w", err)
-	}
 	services := []string{"nginx-atlas-agent.service"}
 	if _, err := os.Stat("/etc/systemd/system/nginx-atlas-server.service"); err == nil {
 		services = append([]string{"nginx-atlas-server.service"}, services...)
 	}
+	markerPath := filepath.Join(e.config.DataRoot, "updates", "pending-update.json")
+	marker := pendingUpdate{
+		ExpectedVersion: actualVersion,
+		InstalledBinary: executable,
+		RollbackBinary:  backupPath,
+		RestartServices: services,
+		RollbackUnit:    "nginx-atlas-update-rollback-" + e.now().UTC().Format("20060102T150405Z"),
+	}
+	marker.RollbackHelper = filepath.Join(e.config.DataRoot, "updates", marker.RollbackUnit+".sh")
+	if err := writeRollbackHelper(marker.RollbackHelper); err != nil {
+		return protocol.JobResultRequest{}, err
+	}
+	if err := writePendingUpdate(markerPath, marker); err != nil {
+		_ = os.Remove(marker.RollbackHelper)
+		return protocol.JobResultRequest{}, err
+	}
+	if err := os.Rename(stagedPath, executable); err != nil {
+		_ = os.Remove(markerPath)
+		_ = os.Remove(marker.RollbackHelper)
+		return protocol.JobResultRequest{}, fmt.Errorf("install updated binary: %w", err)
+	}
 	return protocol.JobResultRequest{
 		Message:         "Nginx Atlas 已更新至 " + actualVersion + "，服务将在结果确认后重启",
 		RestartServices: services,
+		InstalledBinary: executable,
+		RollbackBinary:  backupPath,
+		UpdateMarker:    markerPath,
+		ExpectedVersion: actualVersion,
+		RollbackUnit:    marker.RollbackUnit,
+		RollbackHelper:  marker.RollbackHelper,
 	}, nil
 }
 
@@ -630,6 +699,9 @@ func (e *Executor) disableTakeoverConfig(sourcePath, managedPath, domain string)
 	if sourceErr != nil {
 		return false, fmt.Errorf("inspect original config: %w", sourceErr)
 	}
+	if err := validateTakeoverFileOnDisk(sourcePath); err != nil {
+		return false, err
+	}
 	if backupErr == nil {
 		// A previous partial/surgical takeover left a backup. Re-apply the
 		// domain removal against the current file without clobbering the
@@ -656,16 +728,8 @@ func (e *Executor) disableTakeoverConfig(sourcePath, managedPath, domain string)
 		return false, err
 	}
 	if removed == 0 {
-		// Domain not found as an isolated server block (unusual). Fall back to
-		// whole-file disable so takeover still progresses safely for single-
-		// site files that use unusual formatting.
-		if err := os.Remove(backupPath); err != nil {
-			return false, err
-		}
-		if err := movePath(sourcePath, backupPath); err != nil {
-			return false, err
-		}
-		return true, nil
+		_ = os.Remove(backupPath)
+		return false, fmt.Errorf("domain %q was not found in the selected nginx config", domain)
 	}
 	if onlyNginxWhitespace(modified) {
 		if err := os.Remove(sourcePath); err != nil {
@@ -718,6 +782,9 @@ func (e *Executor) restoreTakeoverConfig(sourcePath string) (bool, error) {
 		return false, fmt.Errorf("read takeover backup: %w", err)
 	}
 	if sourceErr == nil {
+		if err := validateTakeoverFileOnDisk(sourcePath); err != nil {
+			return false, err
+		}
 		// Surgical takeovers leave the path occupied with a modified file.
 		// Whole-file takeovers leave it missing. Always prefer the pristine
 		// backup when present.
@@ -780,11 +847,17 @@ func (e *Executor) reapplyTakeoverRemoval(sourcePath, domain string) (bool, erro
 // with wildcard certs), files are linked or copied into the domain directory.
 func (e *Executor) ensureLocalCertificate(domain, sourceDir string) error {
 	domain = strings.ToLower(strings.TrimSpace(domain))
+	targetDir, err := e.certificateDir(domain)
+	if err != nil {
+		return fmt.Errorf("invalid certificate domain: %w", err)
+	}
 	sourceDir = filepath.Clean(strings.TrimSpace(sourceDir))
 	if sourceDir == "" || sourceDir == "." || sourceDir == string(filepath.Separator) {
 		return errors.New("local certificate directory is invalid")
 	}
-	targetDir := filepath.Join(e.config.SSLRoot, domain)
+	if err := requirePathWithinRoot(e.config.SSLRoot, sourceDir); err != nil {
+		return fmt.Errorf("local certificate directory must stay inside SSL root: %w", err)
+	}
 	if _, err := e.readAndValidateCertificateFrom(sourceDir, domain); err != nil {
 		return err
 	}
@@ -795,9 +868,20 @@ func (e *Executor) ensureLocalCertificate(domain, sourceDir string) error {
 		return fmt.Errorf("create certificate directory: %w", err)
 	}
 	for _, name := range []string{"fullchain.pem", "privkey.pem"} {
-		src := filepath.Join(sourceDir, name)
+		src, err := resolvePathWithinRoot(e.config.SSLRoot, filepath.Join(sourceDir, name))
+		if err != nil {
+			return fmt.Errorf("resolve %s: %w", name, err)
+		}
+		info, err := os.Stat(src)
+		if err != nil || !info.Mode().IsRegular() {
+			return fmt.Errorf("%s must be a regular file inside SSL root", name)
+		}
 		dst := filepath.Join(targetDir, name)
-		if err := linkOrCopyFile(src, dst); err != nil {
+		mode := fs.FileMode(0o644)
+		if name == "privkey.pem" {
+			mode = 0o600
+		}
+		if err := copyRegularFile(src, dst, mode); err != nil {
 			return fmt.Errorf("materialize %s: %w", name, err)
 		}
 	}
@@ -807,12 +891,88 @@ func (e *Executor) ensureLocalCertificate(domain, sourceDir string) error {
 	return nil
 }
 
+func (e *Executor) certificateDir(domain string) (string, error) {
+	domain = strings.ToLower(strings.TrimSpace(domain))
+	if _, err := nginxconfig.ConfigFileName(domain); err != nil {
+		return "", err
+	}
+	root, err := filepath.Abs(filepath.Clean(e.config.SSLRoot))
+	if err != nil {
+		return "", err
+	}
+	if resolvedRoot, resolveErr := filepath.EvalSymlinks(root); resolveErr == nil {
+		root = resolvedRoot
+	} else if !errors.Is(resolveErr, os.ErrNotExist) {
+		return "", fmt.Errorf("resolve SSL root: %w", resolveErr)
+	}
+	target := filepath.Join(root, domain)
+	info, err := os.Lstat(target)
+	if errors.Is(err, os.ErrNotExist) {
+		return target, nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("inspect certificate directory: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return "", errors.New("certificate directory must be a real directory inside SSL root")
+	}
+	resolvedTarget, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		return "", fmt.Errorf("resolve certificate directory: %w", err)
+	}
+	relative, err := filepath.Rel(root, resolvedTarget)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || filepath.IsAbs(relative) {
+		return "", errors.New("certificate directory resolves outside SSL root")
+	}
+	return resolvedTarget, nil
+}
+
+func requirePathWithinRoot(root, candidate string) error {
+	_, err := resolvePathWithinRoot(root, candidate)
+	return err
+}
+
+func resolvePathWithinRoot(root, candidate string) (string, error) {
+	rootPath, err := filepath.Abs(filepath.Clean(root))
+	if err != nil {
+		return "", err
+	}
+	candidatePath, err := filepath.Abs(filepath.Clean(candidate))
+	if err != nil {
+		return "", err
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(rootPath)
+	if err != nil {
+		return "", fmt.Errorf("resolve SSL root: %w", err)
+	}
+	resolvedCandidate, err := filepath.EvalSymlinks(candidatePath)
+	if err != nil {
+		return "", fmt.Errorf("resolve certificate path: %w", err)
+	}
+	relative, err := filepath.Rel(resolvedRoot, resolvedCandidate)
+	if err != nil {
+		return "", err
+	}
+	if relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || filepath.IsAbs(relative) {
+		return "", errors.New("path escapes SSL root")
+	}
+	return resolvedCandidate, nil
+}
+
 func (e *Executor) readAndValidateCertificateFrom(dir, domain string) (protocol.CertificateBundle, error) {
-	fullchain, err := os.ReadFile(filepath.Join(dir, "fullchain.pem"))
+	fullchainPath, err := e.confinedCertificateFile(dir, "fullchain.pem")
+	if err != nil {
+		return protocol.CertificateBundle{}, err
+	}
+	privateKeyPath, err := e.confinedCertificateFile(dir, "privkey.pem")
+	if err != nil {
+		return protocol.CertificateBundle{}, err
+	}
+	fullchain, err := os.ReadFile(fullchainPath)
 	if err != nil {
 		return protocol.CertificateBundle{}, fmt.Errorf("read fullchain.pem: %w", err)
 	}
-	privateKey, err := os.ReadFile(filepath.Join(dir, "privkey.pem"))
+	privateKey, err := os.ReadFile(privateKeyPath)
 	if err != nil {
 		return protocol.CertificateBundle{}, fmt.Errorf("read privkey.pem: %w", err)
 	}
@@ -820,6 +980,21 @@ func (e *Executor) readAndValidateCertificateFrom(dir, domain string) (protocol.
 		return protocol.CertificateBundle{}, err
 	}
 	return protocol.CertificateBundle{FullchainPEM: string(fullchain), PrivateKeyPEM: string(privateKey)}, nil
+}
+
+func (e *Executor) confinedCertificateFile(dir, name string) (string, error) {
+	resolved, err := resolvePathWithinRoot(e.config.SSLRoot, filepath.Join(dir, name))
+	if err != nil {
+		return "", fmt.Errorf("resolve %s: %w", name, err)
+	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return "", fmt.Errorf("inspect %s: %w", name, err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("%s must be a regular file inside SSL root", name)
+	}
+	return resolved, nil
 }
 
 func linkOrCopyFile(source, destination string) error {
@@ -949,6 +1124,33 @@ func validateTakeoverPath(value string) (string, error) {
 	return cleaned, nil
 }
 
+func validateTakeoverFileOnDisk(sourcePath string) error {
+	info, err := os.Lstat(sourcePath)
+	if err != nil {
+		return fmt.Errorf("inspect takeover source: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return errors.New("takeover source must be a regular file, not a symlink")
+	}
+	allowedRoot := "/etc/nginx/conf.d"
+	if strings.HasPrefix(filepath.Clean(sourcePath), filepath.Clean("/etc/nginx/sites-enabled")+string(filepath.Separator)) {
+		allowedRoot = "/etc/nginx/sites-enabled"
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(allowedRoot)
+	if err != nil {
+		return fmt.Errorf("resolve takeover root: %w", err)
+	}
+	resolvedParent, err := filepath.EvalSymlinks(filepath.Dir(sourcePath))
+	if err != nil {
+		return fmt.Errorf("resolve takeover parent: %w", err)
+	}
+	relative, err := filepath.Rel(resolvedRoot, resolvedParent)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || filepath.IsAbs(relative) {
+		return errors.New("takeover source resolves outside the allowed nginx directory")
+	}
+	return nil
+}
+
 func movePath(source, destination string) error {
 	if err := os.MkdirAll(filepath.Dir(destination), 0o700); err != nil {
 		return err
@@ -1064,6 +1266,101 @@ func isTrustedReleaseURL(value *url.URL) bool {
 	}
 	host := strings.ToLower(value.Hostname())
 	return host == "github.com" || host == "objects.githubusercontent.com" || strings.HasSuffix(host, ".githubusercontent.com")
+}
+
+type trustedRelease struct {
+	AssetName   string
+	ChecksumURL string
+}
+
+func trustedReleaseReference(downloadURL *url.URL, repository, expectedVersion string) (trustedRelease, error) {
+	if downloadURL == nil || downloadURL.Scheme != "https" || !strings.EqualFold(downloadURL.Hostname(), "github.com") || downloadURL.RawQuery != "" || downloadURL.Fragment != "" {
+		return trustedRelease{}, errors.New("release URL must be an HTTPS asset from the locally trusted GitHub repository")
+	}
+	parts := strings.Split(strings.Trim(downloadURL.EscapedPath(), "/"), "/")
+	trustedParts := strings.Split(strings.TrimSpace(repository), "/")
+	if len(parts) != 6 || len(trustedParts) != 2 || !strings.EqualFold(parts[0], url.PathEscape(trustedParts[0])) || !strings.EqualFold(parts[1], url.PathEscape(trustedParts[1])) || parts[2] != "releases" || parts[3] != "download" {
+		return trustedRelease{}, errors.New("release URL does not belong to the locally trusted repository")
+	}
+	tag, err := url.PathUnescape(parts[4])
+	if err != nil || strings.TrimPrefix(tag, "v") != strings.TrimPrefix(strings.TrimSpace(expectedVersion), "v") {
+		return trustedRelease{}, errors.New("release tag does not match the expected version")
+	}
+	assetName, err := url.PathUnescape(parts[5])
+	if err != nil || assetName == "" || assetName == "checksums.txt" || filepath.Base(assetName) != assetName {
+		return trustedRelease{}, errors.New("release asset name is invalid")
+	}
+	checksumURL := "https://github.com/" + trustedParts[0] + "/" + trustedParts[1] + "/releases/download/" + url.PathEscape(tag) + "/checksums.txt"
+	return trustedRelease{AssetName: assetName, ChecksumURL: checksumURL}, nil
+}
+
+func fetchTrustedReleaseChecksum(ctx context.Context, client *http.Client, checksumURL, assetName string) (string, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, checksumURL, nil)
+	if err != nil {
+		return "", err
+	}
+	request.Header.Set("User-Agent", "nginx-atlas-agent")
+	response, err := client.Do(request)
+	if err != nil {
+		return "", fmt.Errorf("download trusted release manifest: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return "", fmt.Errorf("trusted release manifest returned HTTP %d", response.StatusCode)
+	}
+	scanner := bufio.NewScanner(io.LimitReader(response.Body, 2<<20))
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) == 2 && strings.TrimPrefix(fields[1], "*") == assetName && regexp.MustCompile(`^[a-fA-F0-9]{64}$`).MatchString(fields[0]) {
+			return strings.ToLower(fields[0]), nil
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return "", fmt.Errorf("read trusted release manifest: %w", err)
+	}
+	return "", errors.New("trusted release manifest does not contain the requested asset")
+}
+
+func requireVersionUpgrade(current, target string) error {
+	if strings.EqualFold(strings.TrimSpace(current), "dev") {
+		return errors.New("remote self-update is disabled for unversioned development builds")
+	}
+	currentParts, currentPrerelease, currentOK := parseAgentVersion(current)
+	targetParts, targetPrerelease, targetOK := parseAgentVersion(target)
+	if !currentOK || !targetOK {
+		return errors.New("self-update requires valid semantic versions")
+	}
+	for index := range currentParts {
+		if targetParts[index] > currentParts[index] {
+			return nil
+		}
+		if targetParts[index] < currentParts[index] {
+			return errors.New("self-update downgrade is not allowed")
+		}
+	}
+	if currentPrerelease != "" && targetPrerelease == "" {
+		return nil
+	}
+	return errors.New("self-update target must be newer than the running version")
+}
+
+func parseAgentVersion(value string) ([3]int, string, bool) {
+	var result [3]int
+	value = strings.TrimPrefix(strings.TrimSpace(value), "v")
+	value, _, _ = strings.Cut(value, "+")
+	core, prerelease, _ := strings.Cut(value, "-")
+	parts := strings.Split(core, ".")
+	if len(parts) == 0 || len(parts) > len(result) {
+		return result, "", false
+	}
+	for index, part := range parts {
+		number, err := strconv.Atoi(part)
+		if err != nil || number < 0 || part == "" {
+			return result, "", false
+		}
+		result[index] = number
+	}
+	return result, prerelease, true
 }
 
 func normalizeRequestedDomains(primary string, requested []string) []string {

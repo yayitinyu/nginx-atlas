@@ -18,11 +18,27 @@ func TestRenderTLSSite(t *testing.T) {
 		"server_name api.example.com;",
 		"proxy_pass http://127.0.0.1:8080;",
 		"ssl_certificate /etc/ssl/api.example.com/fullchain.pem;",
-		"return 308 https://$host$request_uri;",
+		"return 308 https://api.example.com$request_uri;",
 	} {
 		if !strings.Contains(text, wanted) {
 			t.Fatalf("config missing %q:\n%s", wanted, text)
 		}
+	}
+}
+
+func TestRenderTrustedLocalProxyHeaderInclude(t *testing.T) {
+	config, err := Render(Site{
+		Domain: "atlas.example.com", UpstreamHost: "127.0.0.1", UpstreamPort: 909,
+		ProxyHeaderInclude: "/etc/nginx-atlas/proxy-token.conf",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(config), "include /etc/nginx-atlas/proxy-token.conf;") {
+		t.Fatalf("trusted proxy include missing:\n%s", config)
+	}
+	if _, err := Render(Site{Domain: "atlas.example.com", UpstreamHost: "127.0.0.1", UpstreamPort: 909, ProxyHeaderInclude: "/tmp/injected.conf"}); err == nil {
+		t.Fatal("untrusted proxy include was accepted")
 	}
 }
 

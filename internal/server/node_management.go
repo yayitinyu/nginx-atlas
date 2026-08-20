@@ -5,10 +5,13 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/yayitinyu/nginx-atlas/internal/model"
 	"github.com/yayitinyu/nginx-atlas/internal/protocol"
 )
+
+const nodeRemovedJobError = "node was removed before the task completed"
 
 func (s *Server) handleRenameNode(w http.ResponseWriter, r *http.Request) {
 	var request struct {
@@ -55,7 +58,9 @@ func (s *Server) handleNodeUninstallCommand(w http.ResponseWriter, r *http.Reque
 	}
 	baseURL := s.publicURL(r)
 	installerURL := strings.TrimRight(baseURL, "/") + "/install.sh"
-	command := fmt.Sprintf("curl -fsSL %s | sudo bash -s -- uninstall-agent", shellQuote(installerURL))
+	// The controller credential is revoked before this command is shown by the
+	// remove-and-uninstall flow, so local cleanup must not require a second API call.
+	command := fmt.Sprintf("curl -fsSL %s | sudo bash -s -- uninstall-agent --force-local", shellQuote(installerURL))
 	writeJSON(w, http.StatusOK, map[string]any{
 		"command":              command,
 		"preserves_nginx":      true,
@@ -174,4 +179,61 @@ func hasActiveNodeJob(state *model.State, nodeID, jobType string) bool {
 		}
 	}
 	return false
+}
+
+func revokeNodeState(state *model.State, nodeID string, now time.Time) {
+	node := state.Nodes[nodeID]
+	node.Status = model.NodeRevoked
+	node.RevokedAt = &now
+	node.SecretHash = ""
+	node.RunningJobID = ""
+	appendNodeStatusSample(&node, model.NodeRevoked, now)
+	state.Nodes[nodeID] = node
+
+	for domainID, domain := range state.Domains {
+		domain.SyncNodeIDs = removeString(domain.SyncNodeIDs, nodeID)
+		if domain.NodeID == nodeID {
+			domain.NodeID = ""
+			domain.Enabled = false
+			domain.Deleting = false
+			domain.AutoRenew = false
+			domain.LastError = nodeRemovedJobError
+			domain.UpdatedAt = now
+		}
+		state.Domains[domainID] = domain
+	}
+	for certificateID, certificate := range state.Certificates {
+		certificate.DeployedNodeIDs = removeString(certificate.DeployedNodeIDs, nodeID)
+		if certificate.IssuerNodeID == nodeID {
+			certificate.IssuerNodeID = ""
+			certificate.AutoRenew = false
+		}
+		state.Certificates[certificateID] = certificate
+	}
+
+	for jobID, job := range state.Jobs {
+		if job.NodeID != nodeID || (job.Status != model.JobQueued && job.Status != model.JobRunning) {
+			continue
+		}
+		job.Status = model.JobFailed
+		job.Error = nodeRemovedJobError
+		job.FinishedAt = &now
+		state.Jobs[jobID] = job
+		restoreFailedDomainDeletion(state, job, job.Error, now)
+		if domain, ok := state.Domains[job.DomainID]; ok {
+			domain.LastError = job.Error
+			domain.UpdatedAt = now
+			state.Domains[domain.ID] = domain
+		}
+	}
+}
+
+func removeString(values []string, target string) []string {
+	result := values[:0]
+	for _, value := range values {
+		if value != target {
+			result = append(result, value)
+		}
+	}
+	return append([]string(nil), result...)
 }

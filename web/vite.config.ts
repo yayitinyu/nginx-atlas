@@ -14,9 +14,9 @@ export default defineConfig({
     host: '127.0.0.1',
     port: 5173,
     proxy: {
-      '/api': 'http://127.0.0.1:9090',
-      '/healthz': 'http://127.0.0.1:9090',
-      '/install.sh': 'http://127.0.0.1:9090',
+      '/api': 'http://127.0.0.1:909',
+      '/healthz': 'http://127.0.0.1:909',
+      '/install.sh': 'http://127.0.0.1:909',
     },
   },
 })

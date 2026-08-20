@@ -66,6 +66,60 @@ func Validate(fullchainPEM, privateKeyPEM []byte, domain string, now time.Time) 
 	}, nil
 }
 
+// VerifyTrustedChain verifies that a certificate returned from an ACME job is
+// anchored in the controller's trust store. Local/imported certificates keep
+// their explicit private-CA workflow and are validated separately by Validate.
+func VerifyTrustedChain(fullchainPEM []byte, domain string, now time.Time, roots *x509.CertPool) error {
+	certificates, err := parseCertificates(fullchainPEM)
+	if err != nil {
+		return err
+	}
+	if roots == nil {
+		roots, err = x509.SystemCertPool()
+		if err != nil {
+			return fmt.Errorf("load system certificate roots: %w", err)
+		}
+	}
+	intermediates := x509.NewCertPool()
+	for _, certificate := range certificates[1:] {
+		intermediates.AddCert(certificate)
+	}
+	_, err = certificates[0].Verify(x509.VerifyOptions{
+		DNSName:       strings.TrimSpace(strings.ToLower(domain)),
+		CurrentTime:   now,
+		Roots:         roots,
+		Intermediates: intermediates,
+		KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	})
+	if err != nil {
+		return fmt.Errorf("certificate chain is not trusted: %w", err)
+	}
+	return nil
+}
+
+func parseCertificates(data []byte) ([]*x509.Certificate, error) {
+	var certificates []*x509.Certificate
+	for len(data) > 0 {
+		block, rest := pem.Decode(data)
+		data = rest
+		if block == nil {
+			break
+		}
+		if block.Type != "CERTIFICATE" {
+			continue
+		}
+		certificate, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			return nil, fmt.Errorf("parse certificate chain: %w", err)
+		}
+		certificates = append(certificates, certificate)
+	}
+	if len(certificates) == 0 {
+		return nil, errors.New("certificate file does not contain an X.509 certificate")
+	}
+	return certificates, nil
+}
+
 func parseLeaf(data []byte) (*x509.Certificate, error) {
 	for len(data) > 0 {
 		block, rest := pem.Decode(data)

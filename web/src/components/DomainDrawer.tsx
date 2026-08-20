@@ -169,11 +169,13 @@ export function DomainDrawer({ open, nodes, certificates, dnsAccounts, acmeAccou
     setDomainBase(value)
     if (value === manualDomainEntry) {
       setDomainLabel('')
-      setDomain('')
       return
     }
     const option = certificateDomainBases.find((item) => item.value === value)
-    const nextLabel = option ? suggestedDomainLabel(option) : '@'
+    const currentDomain = domain.trim().toLowerCase()
+    const currentSuffix = `.${value}`
+    const existingLabel = currentDomain === value ? '' : currentDomain.endsWith(currentSuffix) ? currentDomain.slice(0, -currentSuffix.length) : undefined
+    const nextLabel = existingLabel ?? (option ? suggestedDomainLabel(option) : '')
     setDomainLabel(nextLabel)
     setDomain(composeDomain(nextLabel, value))
   }
@@ -184,9 +186,10 @@ export function DomainDrawer({ open, nodes, certificates, dnsAccounts, acmeAccou
   }
 
   function selectNode(value: string) {
+    const previousAddress = preferredAddress(selectedNode)
     setNodeID(value)
     const node = availableNodes.find((item) => item.id === value)
-    setRecordContent(preferredAddress(node))
+    setRecordContent((current) => !current.trim() || current.trim() === previousAddress ? preferredAddress(node) : current)
   }
 
   async function submit(event: FormEvent) {
@@ -246,7 +249,7 @@ export function DomainDrawer({ open, nodes, certificates, dnsAccounts, acmeAccou
           <section className="form-section">
             <div className="form-section-heading"><span>01</span><div><strong>{t('domain.stepRoute')}</strong><small>{t('domain.routeHint')}</small></div></div>
             {!editingDomain && certificateDomainBases.length > 0 && <div className="form-row"><label>{t('domain.certificateDomain')}</label><SelectField ariaLabel={t('domain.certificateDomain')} value={domainBase} onChange={selectDomainBase} placeholder={t('common.select')} icon="shield" options={[...certificateDomainBases.map((option) => ({ value: option.value, label: option.value })), { value: manualDomainEntry, label: t('domain.fullDomain') }]} /></div>}
-            <div className="form-row"><label htmlFor="domain-name">{usesCertificateDomain ? t('domain.hostLabel') : t('certificate.domain')}</label><div className={`field-control ${usesCertificateDomain ? 'composed-domain-field' : ''}`}><Icon name="globe" size={18} /><input id="domain-name" value={usesCertificateDomain ? domainLabel : domain} disabled={Boolean(editingDomain)} onChange={(event) => usesCertificateDomain ? updateDomainLabel(event.target.value) : setDomain(event.target.value)} placeholder={usesCertificateDomain ? '@ / www' : 'api.example.com'} autoComplete="off" />{usesCertificateDomain && <span className="domain-base-chip">{domainBase}</span>}<span className="field-state">{normalizedDomain.includes('.') && <Icon name="check" size={18} />}</span></div></div>
+            <div className="form-row"><label htmlFor="domain-name">{usesCertificateDomain ? t('domain.hostLabel') : t('domain.name')}</label><div className={`field-control ${usesCertificateDomain ? 'composed-domain-field' : ''}`}><Icon name="globe" size={18} /><input id="domain-name" value={usesCertificateDomain ? domainLabel : domain} disabled={Boolean(editingDomain)} onChange={(event) => usesCertificateDomain ? updateDomainLabel(event.target.value) : setDomain(event.target.value)} placeholder={usesCertificateDomain ? 'www' : 'api.example.com'} autoComplete="off" />{usesCertificateDomain && <span className="domain-base-chip">{domainBase}</span>}<span className="field-state">{normalizedDomain.includes('.') && <Icon name="check" size={18} />}</span></div></div>
             <div className="form-row"><label>{t('domain.targetNode')}</label><SelectField ariaLabel={t('domain.targetNode')} value={nodeID} onChange={selectNode} placeholder={t('common.select')} icon="server" options={availableNodes.map((node) => ({ value: node.id, label: node.name, description: node.os_name || (node.status === 'online' ? t('common.online') : t('common.offline')) }))} /></div>
             <div className="form-row form-row-split"><label htmlFor="upstream-host">{t('domain.upstreamHost')}</label><div className="split-fields"><div className="field-control"><input id="upstream-host" value={upstreamHost} onChange={(event) => setUpstreamHost(event.target.value)} placeholder="127.0.0.1" /></div><div className="port-field"><span>{t('domain.projectPort')}</span><div className="field-control"><input aria-label={t('domain.projectPort')} inputMode="numeric" value={port} onChange={(event) => setPort(event.target.value.replace(/\D/g, '').slice(0, 5))} placeholder="8080" /></div></div></div></div>
           </section>
@@ -318,7 +321,7 @@ function collectCertificateDomainBases(certificates: CertificateRecord[]): Certi
 }
 
 function suggestedDomainLabel(option: CertificateDomainBase): string {
-  return option.coversRoot ? '@' : option.coversSubdomain ? 'www' : '@'
+  return option.coversRoot ? '' : option.coversSubdomain ? 'www' : ''
 }
 
 function composeDomain(label: string, base: string): string {

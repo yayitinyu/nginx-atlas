@@ -107,8 +107,6 @@ type IssueCertificatePayload struct {
 	Credentials  map[string]string `json:"credentials"`
 	EABKID       string            `json:"eab_kid,omitempty"`
 	EABHMAC      string            `json:"eab_hmac,omitempty"`
-	Install      bool              `json:"install"`
-	ReloadNginx  bool              `json:"reload_nginx"`
 }
 
 type UpdateAtlasPayload struct {
@@ -132,6 +130,12 @@ type JobResultRequest struct {
 	Certificate     *CertificateBundle `json:"certificate,omitempty"`
 	NginxOutput     string             `json:"nginx_output,omitempty"`
 	RestartServices []string           `json:"-"`
+	InstalledBinary string             `json:"-"`
+	RollbackBinary  string             `json:"-"`
+	UpdateMarker    string             `json:"-"`
+	ExpectedVersion string             `json:"-"`
+	RollbackUnit    string             `json:"-"`
+	RollbackHelper  string             `json:"-"`
 }
 
 type APIError struct {

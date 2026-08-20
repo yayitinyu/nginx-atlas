@@ -320,8 +320,8 @@ func (s *Server) handleCreateEnrollment(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	baseURL := s.publicURL(r)
-	command := fmt.Sprintf("curl -fsSL %s/install.sh | sudo bash -s -- agent --server %s --token %s",
-		shellQuote(baseURL), shellQuote(baseURL), shellQuote(token))
+	command := fmt.Sprintf("( tmp=$(mktemp) && trap 'rm -f -- \"$tmp\"' EXIT && chmod 600 \"$tmp\" && curl -fsSL %s -o \"$tmp\" && printf '%%s' %s | sudo bash \"$tmp\" agent --server %s --token-stdin )",
+		shellQuote(strings.TrimRight(baseURL, "/")+"/install.sh"), shellQuote(token), shellQuote(baseURL))
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"id": enrollmentID, "name": request.Name, "token": token, "expires_at": expiresAt, "command": command,
 	})
@@ -332,13 +332,10 @@ func (s *Server) handleRevokeNode(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().UTC()
 	err := s.store.Update(func(state *model.State) error {
 		node, ok := state.Nodes[nodeID]
-		if !ok {
+		if !ok || node.Status == model.NodeRevoked {
 			return errNotFound
 		}
-		node.Status = model.NodeRevoked
-		node.RevokedAt = &now
-		node.SecretHash = ""
-		state.Nodes[nodeID] = node
+		revokeNodeState(state, nodeID, now)
 		s.addAudit(state, "warning", "node.revoked", "节点访问凭据已撤销", nodeID)
 		return nil
 	})
@@ -804,6 +801,13 @@ func (s *Server) handleDeleteDomain(w http.ResponseWriter, r *http.Request) {
 			queued = false
 			delete(state.Domains, domain.ID)
 			s.addAudit(state, "info", "domain.observation.removed", "已停止管理节点现有域名；原 Nginx 配置未修改", domain.NodeID, domain.ID)
+			return nil
+		}
+		node, nodeExists := state.Nodes[domain.NodeID]
+		if domain.NodeID == "" || !nodeExists || node.Status == model.NodeRevoked {
+			queued = false
+			delete(state.Domains, domain.ID)
+			s.addAudit(state, "warning", "domain.orphan.removed", "已移除失联节点的域名记录；未修改节点上的 Nginx 配置", domain.NodeID, domain.ID)
 			return nil
 		}
 		if domainIsDeleting(*state, domain) {
@@ -2139,6 +2143,9 @@ func (s *Server) handleChangeAdminPassword(w http.ResponseWriter, r *http.Reques
 func safeNodes(state model.State) []model.Node {
 	result := make([]model.Node, 0, len(state.Nodes))
 	for _, node := range state.Nodes {
+		if node.Status == model.NodeRevoked {
+			continue
+		}
 		node.SecretHash = ""
 		result = append(result, node)
 	}

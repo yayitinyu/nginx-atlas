@@ -72,6 +72,8 @@ export const api = {
     method: 'POST', body: JSON.stringify({ password, turnstile_token: turnstileToken }),
   }),
   verifySession: () => request<{ authenticated: boolean }>('/api/v1/session'),
+  logout: () => request<void>('/api/v1/session', { method: 'DELETE' }),
+  eventTicket: () => request<{ ticket: string; expires_at: string }>('/api/v1/events/ticket', { method: 'POST', body: '{}' }),
   dashboard: () => request<DashboardData>('/api/v1/dashboard'),
   nodes: () => request<NodeRecord[]>('/api/v1/nodes'),
   domains: () => request<DomainRecord[]>('/api/v1/domains'),
