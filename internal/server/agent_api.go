@@ -137,6 +137,15 @@ func (s *Server) handleAgentPoll(w http.ResponseWriter, r *http.Request) {
 			appendNodeStatusSample(&node, model.NodeOnline, now)
 		}
 
+		// Accepted updates must not be dispatched again while the node restarts.
+		// Scan jobs as well as RunningJobID to recover persisted orphaned state.
+		for _, job := range state.Jobs {
+			if job.NodeID == nodeID && awaitingUpdateConfirmation(job) {
+				s.observeUpdate(state, &node, job, request.Report, now)
+				state.Nodes[nodeID] = node
+				return nil
+			}
+		}
 		if node.RunningJobID != "" {
 			if job, ok := state.Jobs[node.RunningJobID]; ok && job.Status == model.JobRunning {
 				if job.Attempts < job.MaxAttempts {
@@ -199,6 +208,12 @@ func (s *Server) handleAgentPoll(w http.ResponseWriter, r *http.Request) {
 	snapshot := s.store.Snapshot()
 	response := protocol.PollResponse{
 		PollAfter: int(s.config.PollAfter.Seconds()), ReportAfter: int(s.nodePollAfter(snapshot).Seconds()), ServerNow: now,
+	}
+	for _, job := range snapshot.Jobs {
+		if job.NodeID == nodeID && awaitingUpdateConfirmation(job) {
+			response.ReportAfter = 10
+			break
+		}
 	}
 	if selected != nil {
 		wireJob, err := s.buildWireJob(*selected, snapshot)
@@ -269,6 +284,24 @@ func (s *Server) handleAgentJobResult(w http.ResponseWriter, r *http.Request) {
 			return errConflict
 		}
 		node := state.Nodes[nodeID]
+		if awaitingUpdateConfirmation(current) {
+			// A retried result POST must not reset the confirmation deadline.
+			return nil
+		}
+		if request.Success && current.Type == protocol.JobUpdateAtlas {
+			var payload protocol.UpdateAtlasPayload
+			if err := json.Unmarshal(current.Payload, &payload); err != nil || strings.TrimSpace(payload.ExpectedVersion) == "" {
+				return errors.New("update job has no expected version")
+			}
+			current.UpdateAcceptedAt = &now
+			current.Error = ""
+			node.RunningJobID = current.ID
+			node.LastSeenAt = &now
+			state.Jobs[current.ID] = current
+			state.Nodes[nodeID] = node
+			s.addAudit(state, "info", "job.update.pending", "更新文件已就绪，等待节点版本稳定确认", nodeID, current.DomainID, current.ID)
+			return nil
+		}
 		node.RunningJobID = ""
 		node.LastSeenAt = &now
 		if request.Success {

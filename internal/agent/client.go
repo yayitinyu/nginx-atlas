@@ -249,20 +249,13 @@ func (c *Client) pollOnce(ctx context.Context) (time.Duration, error) {
 	c.logger.Info("job completed", "job_id", response.Job.ID, "success", result.Success)
 	if result.Success && len(result.RestartServices) > 0 {
 		restartCtx, restartCancel := context.WithTimeout(context.Background(), 15*time.Second)
-		args := append([]string{"restart", "--no-block"}, result.RestartServices...)
-		if _, err := c.runner.Run(restartCtx, c.executor.config.Systemctl, args, nil); err != nil {
-			c.logger.Error("updated binary restart failed; restoring previous binary", "error", err)
-			if rollbackErr := rollbackUpdatedBinary(result); rollbackErr != nil {
-				c.logger.Error("restore previous binary failed", "error", rollbackErr)
-			} else if _, rollbackRestartErr := c.runner.Run(restartCtx, c.executor.config.Systemctl, args, nil); rollbackRestartErr != nil {
-				c.logger.Error("previous binary restored but service restart failed", "error", rollbackRestartErr)
-			} else {
-				_ = os.Remove(result.UpdateMarker)
-				_ = os.Remove(result.RollbackHelper)
-				cancelUpdateRollback(restartCtx, c.runner, c.executor.config.Systemctl, result.RollbackUnit)
-			}
-		}
+		err := scheduleUpdateRestart(restartCtx, c.runner, c.executor.config.SystemdRun, c.executor.config.Systemctl, result)
 		restartCancel()
+		if err != nil {
+			// The independent watchdog owns recovery, including ambiguous scheduling
+			// failures. Never restart or restore files from a dying agent process.
+			return c.config.PollInterval, err
+		}
 	}
 	return time.Second, nil
 }

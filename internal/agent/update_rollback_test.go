@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
@@ -12,6 +13,48 @@ import (
 
 	"github.com/yayitinyu/nginx-atlas/internal/protocol"
 )
+
+type restartCommandRunner struct {
+	calls []recordedCommand
+	err   error
+}
+
+func (r *restartCommandRunner) Run(_ context.Context, name string, args []string, _ map[string]string) ([]byte, error) {
+	r.calls = append(r.calls, recordedCommand{name: name, args: append([]string(nil), args...)})
+	if name == "systemctl" {
+		return nil, errors.New("signal: terminated")
+	}
+	return nil, r.err
+}
+
+func TestUpdateRestartRunsOutsideAgentControlGroup(t *testing.T) {
+	runner := &restartCommandRunner{}
+	result := protocol.JobResultRequest{
+		UpdateMarker:    "/data/updates/pending-update.json",
+		RollbackUnit:    "nginx-atlas-update-rollback-test",
+		RestartServices: []string{"nginx-atlas-server.service", "nginx-atlas-agent.service"},
+	}
+	if err := scheduleUpdateRestart(context.Background(), runner, "systemd-run", "systemctl", result); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.calls) != 1 || runner.calls[0].name != "systemd-run" {
+		t.Fatalf("restart must not execute systemctl inside agent cgroup: %+v", runner.calls)
+	}
+	args := strings.Join(runner.calls[0].args, " ")
+	if !strings.Contains(args, "--on-active=2s") || !strings.HasSuffix(args, "systemctl restart nginx-atlas-server.service nginx-atlas-agent.service") {
+		t.Fatalf("unexpected independent restart: %s", args)
+	}
+	// An ambiguous scheduling failure must not cancel the armed watchdog or
+	// retry a direct self-restart from the agent's cgroup.
+	runner.calls = nil
+	runner.err = context.DeadlineExceeded
+	if err := scheduleUpdateRestart(context.Background(), runner, "systemd-run", "systemctl", result); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("scheduling error lost: %v", err)
+	}
+	if len(runner.calls) != 1 {
+		t.Fatalf("scheduling failure changed rollback protection: %+v", runner.calls)
+	}
+}
 
 type recordedCommand struct {
 	name string

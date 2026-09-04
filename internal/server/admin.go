@@ -313,6 +313,9 @@ func (s *Server) handleRetryJob(w http.ResponseWriter, r *http.Request) {
 		retried.QueuedAt = &now
 		retried.StartedAt = nil
 		retried.FinishedAt = nil
+		retried.UpdateAcceptedAt = nil
+		retried.UpdateVersionSeenAt = nil
+		retried.UpdateLastReportAt = nil
 		retried.RetryOfID = failed.ID
 		retried.RetryJobID = ""
 		if _, err := s.buildWireJob(retried, *state); err != nil {

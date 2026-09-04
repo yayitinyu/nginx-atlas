@@ -50,6 +50,16 @@ func (s *Server) runMaintenance() {
 			}
 		}
 		for id, job := range state.Jobs {
+			if awaitingUpdateConfirmation(job) {
+				if now.Sub(*job.UpdateAcceptedAt) >= updateConfirmationTimeout {
+					node, exists := state.Nodes[job.NodeID]
+					s.finishUpdateConfirmation(state, &node, job, false, now)
+					if exists {
+						state.Nodes[job.NodeID] = node
+					}
+				}
+				continue
+			}
 			if job.Status == model.JobQueued && now.Sub(jobQueueTime(job)) > queuedJobTimeout {
 				node, nodeExists := state.Nodes[job.NodeID]
 				if !nodeExists || node.Status == model.NodeRevoked || !runningByNode[job.NodeID] {

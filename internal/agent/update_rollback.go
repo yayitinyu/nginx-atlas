@@ -105,6 +105,7 @@ func scheduleUpdateRollback(ctx context.Context, runner CommandRunner, systemdRu
 	args := []string{
 		"--unit=" + result.RollbackUnit,
 		"--on-active=90s",
+		"--timer-property=AccuracySec=1s",
 		"--property=Type=oneshot",
 		"/bin/sh",
 		result.RollbackHelper,
@@ -126,6 +127,26 @@ func cancelUpdateRollback(ctx context.Context, runner CommandRunner, systemctl, 
 		return
 	}
 	_, _ = runner.Run(ctx, systemctl, []string{"stop", unit + ".timer", unit + ".service"}, nil)
+}
+
+func scheduleUpdateRestart(ctx context.Context, runner CommandRunner, systemdRun, systemctl string, result protocol.JobResultRequest) error {
+	if result.RollbackUnit == "" || result.UpdateMarker == "" || len(result.RestartServices) == 0 {
+		return errors.New("update restart metadata is incomplete")
+	}
+	// systemctl must run outside the agent's cgroup: KillMode=control-group
+	// terminates the agent's children during self-restart, even with --no-block.
+	args := []string{
+		"--unit=" + result.RollbackUnit + "-restart",
+		"--on-active=2s",
+		"--timer-property=AccuracySec=1s",
+		"--property=Type=oneshot",
+		systemctl, "restart",
+	}
+	args = append(args, result.RestartServices...)
+	if _, err := runner.Run(ctx, systemdRun, args, nil); err != nil {
+		return fmt.Errorf("schedule independent update restart (rollback watchdog remains armed): %w", err)
+	}
+	return nil
 }
 
 func (c *Client) confirmPendingUpdate(ctx context.Context) error {

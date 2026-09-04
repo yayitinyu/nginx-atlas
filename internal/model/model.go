@@ -182,21 +182,24 @@ type ACMEAccount struct {
 }
 
 type Job struct {
-	ID          string          `json:"id"`
-	NodeID      string          `json:"node_id"`
-	DomainID    string          `json:"domain_id,omitempty"`
-	Type        string          `json:"type"`
-	Status      JobStatus       `json:"status"`
-	Payload     json.RawMessage `json:"payload"`
-	Attempts    int             `json:"attempts"`
-	MaxAttempts int             `json:"max_attempts"`
-	Error       string          `json:"error,omitempty"`
-	CreatedAt   time.Time       `json:"created_at"`
-	QueuedAt    *time.Time      `json:"queued_at,omitempty"`
-	StartedAt   *time.Time      `json:"started_at,omitempty"`
-	FinishedAt  *time.Time      `json:"finished_at,omitempty"`
-	RetryOfID   string          `json:"retry_of_id,omitempty"`
-	RetryJobID  string          `json:"retry_job_id,omitempty"`
+	ID                  string          `json:"id"`
+	NodeID              string          `json:"node_id"`
+	DomainID            string          `json:"domain_id,omitempty"`
+	Type                string          `json:"type"`
+	Status              JobStatus       `json:"status"`
+	Payload             json.RawMessage `json:"payload"`
+	Attempts            int             `json:"attempts"`
+	MaxAttempts         int             `json:"max_attempts"`
+	Error               string          `json:"error,omitempty"`
+	CreatedAt           time.Time       `json:"created_at"`
+	QueuedAt            *time.Time      `json:"queued_at,omitempty"`
+	StartedAt           *time.Time      `json:"started_at,omitempty"`
+	FinishedAt          *time.Time      `json:"finished_at,omitempty"`
+	RetryOfID           string          `json:"retry_of_id,omitempty"`
+	RetryJobID          string          `json:"retry_job_id,omitempty"`
+	UpdateAcceptedAt    *time.Time      `json:"update_accepted_at,omitempty"`
+	UpdateVersionSeenAt *time.Time      `json:"update_version_seen_at,omitempty"`
+	UpdateLastReportAt  *time.Time      `json:"update_last_report_at,omitempty"`
 }
 
 type AuditEvent struct {
