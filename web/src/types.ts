@@ -151,6 +151,8 @@ export interface ControllerSettings {
   turnstile_site_key: string
   turnstile_secret_configured: boolean
   panel_allowed_cidrs: string[]
+  security_entrance_enabled: boolean
+  security_entrance_status: number
   request_ip?: string
 }
 
@@ -160,6 +162,9 @@ export interface ControllerSettingsInput {
   turnstile_site_key?: string
   turnstile_secret?: string
   panel_allowed_cidrs?: string[]
+  security_entrance_enabled?: boolean
+  security_entrance?: string
+  security_entrance_status?: number
 }
 
 export interface LoginConfig {

@@ -110,6 +110,8 @@ type ControllerSettings struct {
 	TurnstileSiteKey          string   `json:"turnstile_site_key,omitempty"`
 	TurnstileSecretCiphertext string   `json:"turnstile_secret_ciphertext,omitempty"`
 	PanelAllowedCIDRs         []string `json:"panel_allowed_cidrs,omitempty"`
+	SecurityEntranceHash      string   `json:"security_entrance_hash,omitempty"`
+	SecurityEntranceStatus    int      `json:"security_entrance_status,omitempty"`
 }
 
 type Certificate struct {

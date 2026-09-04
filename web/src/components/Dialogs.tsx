@@ -12,6 +12,23 @@ export type CertificateSubmission =
   | { mode: 'upload'; input: CertificateAutomationInput; certificate: File; privateKey: File }
   | { mode: 'issue' | 'import'; input: CertificateAutomationInput }
 
+const securityEntranceStatuses = [400, 401, 403, 404, 408, 416, 444, 500] as const
+const securityEntranceAlphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789'
+
+function generateSecurityEntrance(length = 14): string {
+  const result: string[] = []
+  const limit = Math.floor(256 / securityEntranceAlphabet.length) * securityEntranceAlphabet.length
+  while (result.length < length) {
+    const random = new Uint8Array(length - result.length)
+    window.crypto.getRandomValues(random)
+    for (const value of random) {
+      if (value >= limit) continue
+      result.push(securityEntranceAlphabet.charAt(value % securityEntranceAlphabet.length))
+    }
+  }
+  return result.join('')
+}
+
 function DialogShell({ open, title, description, onClose, children, wide = false }: {
   open: boolean
   title: string
@@ -198,6 +215,9 @@ export function AccessSettingsDialog({ open, settings, busy, onClose, onSave }: 
   const [siteKey, setSiteKey] = useState('')
   const [secret, setSecret] = useState('')
   const [allowlist, setAllowlist] = useState('')
+  const [securityEntranceEnabled, setSecurityEntranceEnabled] = useState(false)
+  const [securityEntrance, setSecurityEntrance] = useState('')
+  const [securityEntranceStatus, setSecurityEntranceStatus] = useState('404')
   const [error, setError] = useState('')
 
   useEffect(() => {
@@ -206,6 +226,9 @@ export function AccessSettingsDialog({ open, settings, busy, onClose, onSave }: 
     setSiteKey(settings.turnstile_site_key)
     setSecret('')
     setAllowlist(settings.panel_allowed_cidrs.join('\n'))
+    setSecurityEntranceEnabled(settings.security_entrance_enabled)
+    setSecurityEntrance('')
+    setSecurityEntranceStatus(String(settings.security_entrance_status || 404))
     setError('')
   // Background polling must not replace credentials or rules while this form is open.
   }, [open])
@@ -216,18 +239,50 @@ export function AccessSettingsDialog({ open, settings, busy, onClose, onSave }: 
       setError(t('settings.turnstileCredentialsRequired'))
       return
     }
+    const normalizedEntrance = securityEntrance.trim().replace(/^\/+|\/+$/g, '')
+    if (securityEntranceEnabled && !settings.security_entrance_enabled && !normalizedEntrance) {
+      setError(t('settings.securityEntranceRequired'))
+      return
+    }
+    if (normalizedEntrance && !/^[A-Za-z0-9_-]{8,64}$/.test(normalizedEntrance)) {
+      setError(t('settings.securityEntranceInvalid'))
+      return
+    }
     const panelAllowedCIDRs = allowlist.split(/[\n,]+/).map((value) => value.trim()).filter(Boolean)
     void onSave({
       turnstile_enabled: turnstileEnabled,
       turnstile_site_key: siteKey.trim(),
       turnstile_secret: secret.trim(),
       panel_allowed_cidrs: panelAllowedCIDRs,
+      security_entrance_enabled: securityEntranceEnabled,
+      security_entrance_status: Number(securityEntranceStatus),
+      ...(securityEntranceEnabled && normalizedEntrance ? { security_entrance: normalizedEntrance } : {}),
     })
   }
 
   return (
     <DialogShell open={open} title={t('settings.accessProtection')} description="" onClose={onClose} wide>
       <form className="dialog-form access-settings-form" onSubmit={submit}>
+        <section className="security-entrance-section">
+          <label className="switch-row security-entrance-header">
+            <button type="button" role="switch" aria-checked={securityEntranceEnabled} className={securityEntranceEnabled ? 'switch-on' : ''} onClick={() => { setSecurityEntranceEnabled((value) => !value); setError('') }}><i /></button>
+            <span><strong>{t('settings.securityEntrance')}</strong></span>
+          </label>
+          {securityEntranceEnabled && <div className="security-entrance-config">
+            <label className="security-entrance-field">
+              <span>{t('settings.securityEntrancePath')}</span>
+              <div className="security-entrance-control">
+                <div className="field-control"><Icon name="lock" size={17} /><span className="security-entrance-prefix">/</span><input value={securityEntrance} maxLength={64} autoComplete="off" spellCheck={false} onChange={(event) => { setSecurityEntrance(event.target.value); setError('') }} placeholder={settings.security_entrance_enabled ? t('settings.securityEntranceKeep') : t('settings.securityEntrancePlaceholder')} /></div>
+                <button type="button" onClick={() => { setSecurityEntrance(generateSecurityEntrance()); setError('') }}><Icon name="refresh" size={16} />{t('settings.randomGenerate')}</button>
+              </div>
+              <small><Icon name="info" size={14} />{t('settings.securityEntranceRecord')}</small>
+            </label>
+            <label className="security-response-field">
+              <span>{t('settings.unauthenticatedResponse')}</span>
+              <SelectField ariaLabel={t('settings.unauthenticatedResponse')} value={securityEntranceStatus} onChange={setSecurityEntranceStatus} icon="shield" options={securityEntranceStatuses.map((status) => ({ value: String(status), label: `${status} · ${t(`settings.status${status}`)}` }))} />
+            </label>
+          </div>}
+        </section>
         <label className="switch-row access-turnstile-row">
           <button type="button" role="switch" aria-checked={turnstileEnabled} className={turnstileEnabled ? 'switch-on' : ''} onClick={() => setTurnstileEnabled((value) => !value)}><i /></button>
           <span><strong>Cloudflare Turnstile</strong></span>
@@ -243,6 +298,42 @@ export function AccessSettingsDialog({ open, settings, busy, onClose, onSave }: 
         </label>
         {error && <div className="form-error" role="alert"><Icon name="warning" size={16} />{error}</div>}
         <ActionButton wide plain disabled={busy}>{busy ? t('common.saving') : t('common.save')}</ActionButton>
+      </form>
+    </DialogShell>
+  )
+}
+
+export function CertificateDownloadDialog({ open, certificate, busy, onClose, onDownload }: {
+  open: boolean
+  certificate?: CertificateRecord
+  busy: boolean
+  onClose: () => void
+  onDownload: (currentPassword: string) => Promise<string>
+}) {
+  const { t } = usePreferences()
+  const [currentPassword, setCurrentPassword] = useState('')
+  const [error, setError] = useState('')
+  useEffect(() => {
+    if (!open) return
+    setCurrentPassword('')
+    setError('')
+  }, [open, certificate?.id])
+  if (!certificate) return null
+
+  async function submit(event: FormEvent) {
+    event.preventDefault()
+    setError('')
+    const message = await onDownload(currentPassword)
+    if (message) setError(message)
+  }
+
+  return (
+    <DialogShell open={open} title={t('certificate.downloadTitle', { domain: certificate.domain })} description="" onClose={onClose}>
+      <form className="dialog-form certificate-download-form" onSubmit={(event) => void submit(event)}>
+        <div className="certificate-download-warning"><Icon name="warning" size={18} /><span>{t('certificate.downloadWarning')}</span></div>
+        <label><span>{t('dialog.currentPassword')}</span><div className="field-control"><Icon name="key" size={17} /><input type="password" autoComplete="current-password" maxLength={256} value={currentPassword} onChange={(event) => { setCurrentPassword(event.target.value); setError('') }} autoFocus /></div></label>
+        {error && <div className="form-error" role="alert"><Icon name="warning" size={16} />{error}</div>}
+        <ActionButton type="submit" wide plain leadingIcon="download" disabled={busy || !currentPassword}>{busy ? t('common.loading') : t('certificate.downloadAction')}</ActionButton>
       </form>
     </DialogShell>
   )

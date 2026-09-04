@@ -217,6 +217,7 @@ func (s *Server) routes() http.Handler {
 	mux.Handle("POST /api/v1/certificates/upload", s.adminAuth(http.HandlerFunc(s.handleUploadCertificate)))
 	mux.Handle("POST /api/v1/certificates/issue", s.adminAuth(http.HandlerFunc(s.handleIssueCertificate)))
 	mux.Handle("POST /api/v1/certificates/import", s.adminAuth(http.HandlerFunc(s.handleImportCertificate)))
+	mux.Handle("POST /api/v1/certificates/{id}/download", s.adminAuth(http.HandlerFunc(s.handleDownloadCertificate)))
 	mux.Handle("PUT /api/v1/certificates/{id}/auto-renew", s.adminAuth(http.HandlerFunc(s.handleSetCertificateAutoRenew)))
 	mux.Handle("PUT /api/v1/certificates/{id}/automation", s.adminAuth(http.HandlerFunc(s.handleUpdateCertificateAutomation)))
 	mux.Handle("POST /api/v1/certificates/{id}/renew", s.adminAuth(http.HandlerFunc(s.handleRenewCertificate)))
@@ -233,7 +234,7 @@ func (s *Server) routes() http.Handler {
 	mux.Handle("DELETE /api/v1/jobs", s.adminAuth(http.HandlerFunc(s.handleClearPendingJobs)))
 	mux.Handle("POST /api/v1/jobs/{id}/retry", s.adminAuth(http.HandlerFunc(s.handleRetryJob)))
 	mux.Handle("/", s.frontendHandler())
-	return s.securityHeaders(s.requestLog(s.panelAccess(mux)))
+	return s.securityHeaders(s.requestLog(s.panelAccess(s.securityEntrance(mux))))
 }
 
 func (s *Server) adminAuth(next http.Handler) http.Handler {
@@ -352,7 +353,13 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; frame-ancestors 'none'; base-uri 'self'; form-action 'self'")
+		w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
+		w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
+		w.Header().Set("X-Permitted-Cross-Domain-Policies", "none")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' https://challenges.cloudflare.com; script-src-attr 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'")
+		if s.secureRequest(r) {
+			w.Header().Set("Strict-Transport-Security", "max-age=31536000")
+		}
 		next.ServeHTTP(w, r)
 	})
 }

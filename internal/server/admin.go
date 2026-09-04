@@ -1,12 +1,15 @@
 package server
 
 import (
+	"archive/zip"
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/mail"
 	"net/url"
@@ -130,6 +133,123 @@ func (s *Server) handleDomains(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) handleCertificates(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, certificateViews(s.store.Snapshot()))
+}
+
+func (s *Server) handleDownloadCertificate(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	var request struct {
+		CurrentPassword string `json:"current_password"`
+	}
+	if !decodeJSONLimit(w, r, &request, 4<<10) {
+		return
+	}
+	clientIP := s.clientIP(r)
+	if allowed, retryAfter := s.reserveLoginAttempt(clientIP); !allowed {
+		writeLoginRateLimit(w, retryAfter)
+		return
+	}
+	if s.store.AdminPasswordHash() != "" {
+		if allowed, retryAfter := s.reservePasswordAttempt(); !allowed {
+			writeLoginRateLimit(w, retryAfter)
+			return
+		}
+		select {
+		case s.passwordWork <- struct{}{}:
+			defer func() { <-s.passwordWork }()
+		default:
+			writeLoginRateLimit(w, time.Second)
+			return
+		}
+	}
+	if len(request.CurrentPassword) > 256 || !s.verifyAdminCredential(request.CurrentPassword) {
+		writeError(w, http.StatusUnauthorized, "当前管理员密码不正确", "current_password_invalid", nil)
+		return
+	}
+	s.clearLoginAttempt(clientIP)
+
+	certificateID := strings.TrimSpace(r.PathValue("id"))
+	state := s.store.Snapshot()
+	certificate, ok := state.Certificates[certificateID]
+	if !ok {
+		writeError(w, http.StatusNotFound, "证书不存在", "not_found", nil)
+		return
+	}
+	fullchain, err := s.box.Open("certificate:"+certificate.ID+":fullchain", certificate.FullchainCiphertext)
+	if err != nil {
+		s.logger.Error("decrypt certificate for download", "certificate_id", certificate.ID, "error", err)
+		writeError(w, http.StatusInternalServerError, "暂时无法准备证书包", "certificate_download_unavailable", nil)
+		return
+	}
+	defer clear(fullchain)
+	privateKey, err := s.box.Open("certificate:"+certificate.ID+":private-key", certificate.PrivateKeyCiphertext)
+	if err != nil {
+		s.logger.Error("decrypt private key for download", "certificate_id", certificate.ID, "error", err)
+		writeError(w, http.StatusInternalServerError, "暂时无法准备证书包", "certificate_download_unavailable", nil)
+		return
+	}
+	defer clear(privateKey)
+
+	bundle, err := buildCertificateBundle(fullchain, privateKey, certificate.UpdatedAt)
+	if err != nil {
+		s.logger.Error("build certificate download", "certificate_id", certificate.ID, "error", err)
+		writeError(w, http.StatusInternalServerError, "暂时无法准备证书包", "certificate_download_unavailable", nil)
+		return
+	}
+	defer clear(bundle)
+	if err := s.store.Update(func(current *model.State) error {
+		if _, exists := current.Certificates[certificate.ID]; !exists {
+			return errNotFound
+		}
+		s.addAudit(current, "warning", "certificate.downloaded", fmt.Sprintf("已下载 %s 证书包，内含私钥", certificate.Domain))
+		return nil
+	}); err != nil {
+		if errors.Is(err, errNotFound) {
+			writeError(w, http.StatusNotFound, "证书不存在", "not_found", nil)
+		} else {
+			wrapStoreError(w, err)
+		}
+		return
+	}
+
+	filename := certificate.Domain + "-certificate.zip"
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
+	w.Header().Set("Content-Length", strconv.Itoa(len(bundle)))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(bundle)
+}
+
+func buildCertificateBundle(fullchain, privateKey []byte, modifiedAt time.Time) ([]byte, error) {
+	var buffer bytes.Buffer
+	archive := zip.NewWriter(&buffer)
+	entries := []struct {
+		name string
+		mode fs.FileMode
+		data []byte
+	}{
+		{name: "fullchain.pem", mode: 0o644, data: fullchain},
+		{name: "privkey.pem", mode: 0o600, data: privateKey},
+	}
+	for _, entry := range entries {
+		header := &zip.FileHeader{Name: entry.name, Method: zip.Deflate}
+		header.SetMode(entry.mode)
+		if !modifiedAt.IsZero() {
+			header.SetModTime(modifiedAt)
+		}
+		writer, err := archive.CreateHeader(header)
+		if err != nil {
+			_ = archive.Close()
+			return nil, fmt.Errorf("create %s: %w", entry.name, err)
+		}
+		if _, err := writer.Write(entry.data); err != nil {
+			_ = archive.Close()
+			return nil, fmt.Errorf("write %s: %w", entry.name, err)
+		}
+	}
+	if err := archive.Close(); err != nil {
+		return nil, fmt.Errorf("close certificate archive: %w", err)
+	}
+	return buffer.Bytes(), nil
 }
 
 func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {

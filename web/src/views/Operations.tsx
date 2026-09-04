@@ -78,13 +78,14 @@ export function DomainsPage({ domains, nodes, onAdd, onEdit, onDelete }: {
   )
 }
 
-export function CertificatesPage({ certificates, nodes, onAdd, onRenew, onToggleAutoRenew, onSync, onEdit, onDeleteSelected, busy }: {
+export function CertificatesPage({ certificates, nodes, onAdd, onRenew, onToggleAutoRenew, onSync, onDownload, onEdit, onDeleteSelected, busy }: {
   certificates: CertificateRecord[]
   nodes: NodeRecord[]
   onAdd: () => void
   onRenew: (certificate: CertificateRecord) => void
   onToggleAutoRenew: (certificate: CertificateRecord, enabled: boolean) => void
   onSync: (certificate: CertificateRecord) => void
+  onDownload: (certificate: CertificateRecord) => void
   onEdit: (certificate: CertificateRecord) => void
   onDeleteSelected: (ids: string[]) => void
   busy: string
@@ -217,6 +218,9 @@ export function CertificatesPage({ certificates, nodes, onAdd, onRenew, onToggle
               <span className="certificate-actions">
                 <button type="button" className="certificate-action-edit" onClick={() => onEdit(certificate)} title={t('common.edit')}>
                   <Icon name="edit" size={15} /><span>{t('common.edit')}</span>
+                </button>
+                <button type="button" className="certificate-action-download" disabled={Boolean(busy)} onClick={() => onDownload(certificate)} title={t('certificate.download')}>
+                  <Icon name="download" size={15} /><span>{t('certificate.download')}</span>
                 </button>
                 <button type="button" className="certificate-action-apply" disabled={renewing || !automationReady} onClick={() => onRenew(certificate)} title={t('certificate.renew')}>
                   <Icon name="refresh" size={15} /><span>{t('certificate.renew')}</span>
@@ -469,6 +473,7 @@ export function SettingsPage({
             <span className="access-protection-copy">
               <span><i className={settings.turnstile_enabled ? 'access-active' : ''} aria-hidden="true" />Turnstile</span>
               <span><i className={settings.panel_allowed_cidrs.length ? 'access-active' : ''} aria-hidden="true" />{t('settings.ipShort')}</span>
+              <span><i className={settings.security_entrance_enabled ? 'access-active' : ''} aria-hidden="true" />{t('settings.securityEntranceShort')}</span>
             </span>
             <Icon name="chevron" size={17} />
           </button>

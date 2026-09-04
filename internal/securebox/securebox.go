@@ -3,7 +3,10 @@ package securebox
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hkdf"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
@@ -15,7 +18,8 @@ import (
 const prefix = "v1:"
 
 type Box struct {
-	aead cipher.AEAD
+	aead      cipher.AEAD
+	digestKey [sha256.Size]byte
 }
 
 func New(key []byte) (*Box, error) {
@@ -30,7 +34,14 @@ func New(key []byte) (*Box, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create AES-GCM: %w", err)
 	}
-	return &Box{aead: aead}, nil
+	digestKey, err := hkdf.Key(sha256.New, key, nil, "nginx-atlas:securebox:keyed-digest:v1", sha256.Size)
+	if err != nil {
+		return nil, fmt.Errorf("derive keyed digest key: %w", err)
+	}
+	box := &Box{aead: aead}
+	copy(box.digestKey[:], digestKey)
+	clear(digestKey)
+	return box, nil
 }
 
 func ParseKey(value string) ([]byte, error) {
@@ -90,4 +101,12 @@ func (b *Box) Open(purpose, value string) ([]byte, error) {
 		return nil, errors.New("decrypt secret: authentication failed")
 	}
 	return plaintext, nil
+}
+
+func (b *Box) KeyedDigest(purpose string, value []byte) []byte {
+	mac := hmac.New(sha256.New, b.digestKey[:])
+	_, _ = mac.Write([]byte(purpose))
+	_, _ = mac.Write([]byte{0})
+	_, _ = mac.Write(value)
+	return mac.Sum(nil)
 }

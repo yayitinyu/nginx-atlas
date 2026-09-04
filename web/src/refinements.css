@@ -432,3 +432,75 @@ button.selection-toggle:hover { background: var(--surface-hover); }
   .node-selection-toolbar .select-all-button,
   .node-selection-toolbar .bulk-delete-button { flex: 1 1 0; }
 }
+
+/* Security entrance and private-key export additions. */
+.access-protection-copy { flex-wrap: wrap; }
+
+.security-entrance-section {
+  display: grid;
+  gap: 13px;
+  padding: 13px;
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--line));
+  border-radius: 13px;
+  background: color-mix(in srgb, var(--accent-soft) 34%, var(--surface-soft));
+}
+
+.security-entrance-header { min-height: 32px; padding: 0; }
+.security-entrance-config { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(220px, .7fr); align-items: start; gap: 11px; }
+.security-entrance-field,
+.security-response-field { min-width: 0; display: grid; gap: 7px; color: var(--muted); font-size: 12px; font-weight: 700; }
+.security-entrance-control { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
+.security-entrance-control .field-control { min-width: 0; grid-template-columns: auto auto minmax(0, 1fr); gap: 7px; }
+.security-entrance-prefix { color: var(--faint); font-family: var(--font-mono); font-size: 14px; }
+.security-entrance-control > button {
+  min-height: 46px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 0 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 11px;
+  color: var(--text-soft);
+  background: var(--surface-strong);
+  font-size: 12px;
+  font-weight: 700;
+}
+.security-entrance-control > button:hover { color: var(--accent-text); border-color: color-mix(in srgb, var(--accent) 48%, var(--line)); background: var(--accent-soft); }
+.security-entrance-field > small { display: flex; align-items: flex-start; gap: 6px; color: var(--muted); font-size: 11px; font-weight: 500; line-height: 1.45; }
+.security-entrance-field > small svg { flex: 0 0 auto; margin-top: 1px; }
+
+.certificate-download-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 11px 12px;
+  border: 1px solid color-mix(in srgb, var(--warning) 30%, var(--line));
+  border-radius: 11px;
+  color: var(--text-soft);
+  background: color-mix(in srgb, var(--warning-soft) 74%, transparent);
+  font-size: 12px;
+  line-height: 1.55;
+}
+.certificate-download-warning svg { flex: 0 0 auto; color: var(--warning); margin-top: 1px; }
+.certificate-actions .certificate-action-download { color: var(--text-soft); background: color-mix(in srgb, var(--surface-soft) 62%, var(--surface-strong)); }
+
+@media (min-width: 1101px) {
+  .certificate-list-head,
+  .certificate-list-row { grid-template-columns: 38px minmax(210px, 1.35fr) minmax(120px, .72fr) minmax(145px, .78fr) 76px minmax(320px, auto); }
+}
+
+@media (max-width: 1100px) and (min-width: 901px) {
+  .certificate-list-head,
+  .certificate-list-row { grid-template-columns: 38px minmax(190px, 1.2fr) 116px 125px minmax(290px, auto); }
+}
+
+@media (max-width: 900px) {
+  .security-entrance-config { grid-template-columns: 1fr; }
+  .certificate-actions { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
+}
+
+@media (max-width: 560px) {
+  .security-entrance-control { grid-template-columns: 1fr; }
+  .security-entrance-control > button { width: 100%; }
+}

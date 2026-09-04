@@ -56,16 +56,36 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 
   const response = await fetch(path, { ...init, headers })
   if (!response.ok) {
-    let payload: { error?: string; code?: string; details?: Record<string, string> } = {}
-    try {
-      payload = await response.json()
-    } catch {
-      // The HTTP status remains the authoritative fallback.
-    }
-    throw new APIError(payload.error ?? `请求失败（${response.status}）`, response.status, payload.code, payload.details)
+    await throwResponseError(response)
   }
   if (response.status === 204) return undefined as T
   return response.json() as Promise<T>
+}
+
+async function throwResponseError(response: Response): Promise<never> {
+  let payload: { error?: string; code?: string; details?: Record<string, string> } = {}
+  try {
+    payload = await response.json()
+  } catch {
+    // The HTTP status remains the authoritative fallback.
+  }
+  throw new APIError(payload.error ?? `请求失败（${response.status}）`, response.status, payload.code, payload.details)
+}
+
+async function requestCertificateBundle(id: string, currentPassword: string): Promise<Blob> {
+  const headers = new Headers({
+    Accept: 'application/zip',
+    'Content-Type': 'application/json',
+  })
+  const token = getToken()
+  if (token) headers.set('Authorization', `Bearer ${token}`)
+  const response = await fetch(`/api/v1/certificates/${encodeURIComponent(id)}/download`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ current_password: currentPassword }),
+  })
+  if (!response.ok) await throwResponseError(response)
+  return response.blob()
 }
 
 export const api = {
@@ -143,6 +163,7 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ node_ids: nodeIds }),
     }),
+  downloadCertificate: requestCertificateBundle,
   deleteCertificates: (ids: string[]) => request<{ deleted: number }>('/api/v1/certificates', { method: 'DELETE', body: JSON.stringify({ ids }) }),
   retryJob: (id: string) => request<JobRecord>(`/api/v1/jobs/${encodeURIComponent(id)}/retry`, {
     method: 'POST', body: '{}',

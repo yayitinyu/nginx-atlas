@@ -2,7 +2,11 @@ package server
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,17 +22,22 @@ import (
 )
 
 const (
-	minNodePollSeconds = 10
-	maxNodePollSeconds = 300
-	maxStatusSamples   = 16
-	maxPanelCIDRs      = 64
-	turnstileAction    = "turnstile-spin-v1"
+	minNodePollSeconds       = 10
+	maxNodePollSeconds       = 300
+	maxStatusSamples         = 16
+	maxPanelCIDRs            = 64
+	minSecurityEntranceBytes = 8
+	maxSecurityEntranceBytes = 64
+	defaultEntranceStatus    = http.StatusNotFound
+	securityEntranceCookie   = "nginx_atlas_entrance"
+	turnstileAction          = "turnstile-spin-v1"
 )
 
 var (
-	errTurnstileRejected    = errors.New("turnstile rejected")
-	errTurnstileUnavailable = errors.New("turnstile unavailable")
-	errTurnstileIncomplete  = errors.New("turnstile credentials required")
+	errTurnstileRejected        = errors.New("turnstile rejected")
+	errTurnstileUnavailable     = errors.New("turnstile unavailable")
+	errTurnstileIncomplete      = errors.New("turnstile credentials required")
+	errSecurityEntranceRequired = errors.New("security entrance required")
 )
 
 type settingsView struct {
@@ -37,6 +46,8 @@ type settingsView struct {
 	TurnstileSiteKey          string   `json:"turnstile_site_key"`
 	TurnstileSecretConfigured bool     `json:"turnstile_secret_configured"`
 	PanelAllowedCIDRs         []string `json:"panel_allowed_cidrs"`
+	SecurityEntranceEnabled   bool     `json:"security_entrance_enabled"`
+	SecurityEntranceStatus    int      `json:"security_entrance_status"`
 	RequestIP                 string   `json:"request_ip,omitempty"`
 }
 
@@ -47,6 +58,9 @@ type settingsUpdateRequest struct {
 	TurnstileSecret           *string   `json:"turnstile_secret"`
 	TurnstileSecretConfigured bool      `json:"turnstile_secret_configured"`
 	PanelAllowedCIDRs         *[]string `json:"panel_allowed_cidrs"`
+	SecurityEntranceEnabled   *bool     `json:"security_entrance_enabled"`
+	SecurityEntrance          *string   `json:"security_entrance"`
+	SecurityEntranceStatus    *int      `json:"security_entrance_status"`
 	RequestIP                 string    `json:"request_ip"`
 }
 
@@ -68,6 +82,8 @@ func (s *Server) effectiveControllerSettings(settings model.ControllerSettings) 
 		TurnstileSiteKey:          settings.TurnstileSiteKey,
 		TurnstileSecretConfigured: settings.TurnstileSecretCiphertext != "",
 		PanelAllowedCIDRs:         append([]string{}, settings.PanelAllowedCIDRs...),
+		SecurityEntranceEnabled:   validSecurityEntranceHash(settings.SecurityEntranceHash),
+		SecurityEntranceStatus:    effectiveSecurityEntranceStatus(settings.SecurityEntranceStatus),
 	}
 }
 
@@ -153,6 +169,24 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		allowedCIDRs = allowed
 	}
+	var entranceHash string
+	entranceProvided := request.SecurityEntrance != nil
+	if entranceProvided {
+		entrance, err := normalizeSecurityEntrance(*request.SecurityEntrance)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "安全入口需为 8-64 位字母、数字、连字符或下划线", "invalid_security_entrance", nil)
+			return
+		}
+		entranceHash = s.hashSecurityEntrance(entrance)
+		if request.SecurityEntranceEnabled != nil && !*request.SecurityEntranceEnabled {
+			writeError(w, http.StatusBadRequest, "关闭安全入口时不能同时设置新路径", "invalid_security_entrance", nil)
+			return
+		}
+	}
+	if request.SecurityEntranceStatus != nil && *request.SecurityEntranceStatus != 0 && !allowedSecurityEntranceStatus(*request.SecurityEntranceStatus) {
+		writeError(w, http.StatusBadRequest, "未认证响应状态无效", "invalid_security_entrance_status", nil)
+		return
+	}
 
 	if err := s.store.Update(func(state *model.State) error {
 		if request.NodePollSeconds != nil {
@@ -170,6 +204,20 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		if request.PanelAllowedCIDRs != nil {
 			state.Settings.PanelAllowedCIDRs = append([]string{}, allowedCIDRs...)
 		}
+		if request.SecurityEntranceEnabled != nil {
+			if !*request.SecurityEntranceEnabled {
+				state.Settings.SecurityEntranceHash = ""
+			} else if entranceProvided {
+				state.Settings.SecurityEntranceHash = entranceHash
+			} else if !validSecurityEntranceHash(state.Settings.SecurityEntranceHash) {
+				return errSecurityEntranceRequired
+			}
+		} else if entranceProvided {
+			state.Settings.SecurityEntranceHash = entranceHash
+		}
+		if request.SecurityEntranceStatus != nil && *request.SecurityEntranceStatus != 0 {
+			state.Settings.SecurityEntranceStatus = *request.SecurityEntranceStatus
+		}
 		if state.Settings.TurnstileEnabled && (state.Settings.TurnstileSiteKey == "" || state.Settings.TurnstileSecretCiphertext == "") {
 			return errTurnstileIncomplete
 		}
@@ -180,12 +228,174 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "启用 Turnstile 前请填写 Site Key 与 Secret Key", "turnstile_credentials_required", nil)
 			return
 		}
+		if errors.Is(err, errSecurityEntranceRequired) {
+			writeError(w, http.StatusBadRequest, "启用安全入口前请设置访问路径", "security_entrance_required", nil)
+			return
+		}
 		wrapStoreError(w, err)
 		return
 	}
-	view := s.effectiveSettings(s.store.Snapshot())
+	state := s.store.Snapshot()
+	if request.SecurityEntranceEnabled != nil || entranceProvided {
+		if validSecurityEntranceHash(state.Settings.SecurityEntranceHash) {
+			s.setSecurityEntranceCookie(w, r, state.Settings.SecurityEntranceHash)
+		} else {
+			s.clearSecurityEntranceCookie(w, r)
+		}
+	}
+	view := s.effectiveSettings(state)
 	view.RequestIP = s.clientIP(r)
 	writeJSON(w, http.StatusOK, view)
+}
+
+func (s *Server) securityEntrance(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if securityEntranceExempt(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		settings := s.store.Settings()
+		if settings.SecurityEntranceHash == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		status := effectiveSecurityEntranceStatus(settings.SecurityEntranceStatus)
+		if !validSecurityEntranceHash(settings.SecurityEntranceHash) {
+			writeSecurityEntranceError(w, r, status)
+			return
+		}
+		if s.securityEntranceCookieValid(r, settings.SecurityEntranceHash) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if (r.Method == http.MethodGet || r.Method == http.MethodHead) && s.securityEntrancePathMatches(r.URL.Path, settings.SecurityEntranceHash) {
+			s.setSecurityEntranceCookie(w, r, settings.SecurityEntranceHash)
+			w.Header().Set("Cache-Control", "no-store")
+			http.Redirect(w, r, "/login", http.StatusSeeOther)
+			return
+		}
+		writeSecurityEntranceError(w, r, status)
+	})
+}
+
+func securityEntranceExempt(r *http.Request) bool {
+	if panelAccessExempt(r.URL.Path) {
+		return true
+	}
+	if !strings.HasPrefix(r.URL.Path, "/api/") {
+		return false
+	}
+	return r.URL.Path != "/api/v1/login-config" && !(r.URL.Path == "/api/v1/session" && r.Method == http.MethodPost)
+}
+
+func normalizeSecurityEntrance(value string) (string, error) {
+	value = strings.Trim(strings.TrimSpace(value), "/")
+	if len(value) < minSecurityEntranceBytes || len(value) > maxSecurityEntranceBytes {
+		return "", errors.New("invalid length")
+	}
+	for index := 0; index < len(value); index++ {
+		character := value[index]
+		if (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') ||
+			(character >= '0' && character <= '9') || character == '-' || character == '_' {
+			continue
+		}
+		return "", errors.New("invalid character")
+	}
+	switch strings.ToLower(value) {
+	case "api", "assets", "favicon.ico", "healthz", "install.sh", "login":
+		return "", errors.New("reserved path")
+	}
+	return value, nil
+}
+
+func (s *Server) securityEntranceDigest(value string) []byte {
+	return s.box.KeyedDigest("controller-settings:security-entrance-path:v1", []byte(value))
+}
+
+func (s *Server) hashSecurityEntrance(value string) string {
+	return hex.EncodeToString(s.securityEntranceDigest(value))
+}
+
+func validSecurityEntranceHash(value string) bool {
+	digest, err := hex.DecodeString(value)
+	return err == nil && len(digest) == sha256.Size
+}
+
+func (s *Server) securityEntrancePathMatches(requestPath, encodedHash string) bool {
+	if !strings.HasPrefix(requestPath, "/") || strings.Count(requestPath, "/") != 1 {
+		return false
+	}
+	candidate := strings.TrimPrefix(requestPath, "/")
+	expected, err := hex.DecodeString(encodedHash)
+	return err == nil && len(expected) == sha256.Size && hmac.Equal(s.securityEntranceDigest(candidate), expected)
+}
+
+func allowedSecurityEntranceStatus(status int) bool {
+	switch status {
+	case http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound,
+		http.StatusRequestTimeout, http.StatusRequestedRangeNotSatisfiable, 444, http.StatusInternalServerError:
+		return true
+	default:
+		return false
+	}
+}
+
+func effectiveSecurityEntranceStatus(status int) int {
+	if allowedSecurityEntranceStatus(status) {
+		return status
+	}
+	return defaultEntranceStatus
+}
+
+func (s *Server) securityEntranceCookieValue(entranceHash string) string {
+	mac := hmac.New(sha256.New, s.adminTokenHash[:])
+	_, _ = mac.Write([]byte("nginx-atlas:security-entrance:"))
+	_, _ = mac.Write([]byte(entranceHash))
+	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+}
+
+func (s *Server) securityEntranceCookieValid(r *http.Request, entranceHash string) bool {
+	cookie, err := r.Cookie(securityEntranceCookie)
+	if err != nil {
+		return false
+	}
+	expected := s.securityEntranceCookieValue(entranceHash)
+	return len(cookie.Value) == len(expected) && subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(expected)) == 1
+}
+
+func (s *Server) setSecurityEntranceCookie(w http.ResponseWriter, r *http.Request, entranceHash string) {
+	http.SetCookie(w, &http.Cookie{
+		Name: securityEntranceCookie, Value: s.securityEntranceCookieValue(entranceHash), Path: "/",
+		HttpOnly: true, Secure: s.secureRequest(r), SameSite: http.SameSiteStrictMode,
+	})
+}
+
+func (s *Server) clearSecurityEntranceCookie(w http.ResponseWriter, r *http.Request) {
+	http.SetCookie(w, &http.Cookie{
+		Name: securityEntranceCookie, Value: "", Path: "/", MaxAge: -1, Expires: time.Unix(1, 0),
+		HttpOnly: true, Secure: s.secureRequest(r), SameSite: http.SameSiteStrictMode,
+	})
+}
+
+func (s *Server) secureRequest(r *http.Request) bool {
+	return r.TLS != nil || (s.trustedProxyRequest(r) && strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")), "https"))
+}
+
+func writeSecurityEntranceError(w http.ResponseWriter, r *http.Request, status int) {
+	status = effectiveSecurityEntranceStatus(status)
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Robots-Tag", "noindex, nofollow")
+	if status == 444 {
+		w.WriteHeader(status)
+		return
+	}
+	title := http.StatusText(status)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(status)
+	if r.Method == http.MethodHead {
+		return
+	}
+	_, _ = fmt.Fprintf(w, "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width\"><title>%d %s</title><style>html{color-scheme:light}body{margin:0;padding:40px 20px;font:16px Arial,sans-serif;text-align:center;color:#111}h1{margin:0 0 34px;font-size:clamp(32px,5vw,60px)}hr{border:0;border-top:1px solid #aaa}p{font-size:28px}</style></head><body><h1>%s</h1><hr><p>nginx</p></body></html>", status, title, title)
 }
 
 func (s *Server) panelAccess(next http.Handler) http.Handler {
