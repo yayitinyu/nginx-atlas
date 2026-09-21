@@ -115,6 +115,21 @@ func TestRenderOnlyUpgradesWebsocketConnectionsWhenRequested(t *testing.T) {
 	}
 }
 
+func TestRenderAllowsLargerUpstreamResponseHeaders(t *testing.T) {
+	for _, tlsEnabled := range []bool{false, true} {
+		config, err := Render(Site{
+			Domain: "proxy.example.com", UpstreamHost: "127.0.0.1", UpstreamPort: 8080,
+			TLS: tlsEnabled, CertificateDir: "/etc/ssl/proxy.example.com",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if count := strings.Count(string(config), "proxy_buffer_size 8k;"); count != 1 {
+			t.Fatalf("TLS=%t: proxy_buffer_size count = %d, want 1:\n%s", tlsEnabled, count, config)
+		}
+	}
+}
+
 func TestRenderTrustedLocalProxyHeaderInclude(t *testing.T) {
 	config, err := Render(Site{
 		Domain: "atlas.example.com", UpstreamHost: "127.0.0.1", UpstreamPort: 909,

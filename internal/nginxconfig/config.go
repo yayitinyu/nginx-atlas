@@ -137,6 +137,7 @@ server {
     location / {
         proxy_pass {{ upstream . }};
         proxy_http_version 1.1;
+        proxy_buffer_size 8k;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         {{- if .ProxyHeaderInclude }}
@@ -172,6 +173,7 @@ server {
     location / {
         proxy_pass {{ upstream . }};
         proxy_http_version 1.1;
+        proxy_buffer_size 8k;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         {{- if .ProxyHeaderInclude }}
