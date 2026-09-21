@@ -55,6 +55,7 @@ export function DomainDrawer({ open, nodes, certificates, dnsAccounts, acmeAccou
   const [cloudflareProxied, setCloudflareProxied] = useState(true)
   const [recordContent, setRecordContent] = useState('')
   const [nginxWebsocket, setNginxWebsocket] = useState(false)
+  const [nginxS3Compatible, setNginxS3Compatible] = useState(false)
   const [nginxHttp2, setNginxHttp2] = useState(true)
   const [nginxGzip, setNginxGzip] = useState(true)
   const [error, setError] = useState('')
@@ -81,6 +82,7 @@ export function DomainDrawer({ open, nodes, certificates, dnsAccounts, acmeAccou
       setCloudflareProxied(editingDomain.cloudflare_proxied)
       setRecordContent(editingDomain.cloudflare_record_content ?? '')
       setNginxWebsocket(editingDomain.nginx_websocket)
+      setNginxS3Compatible(editingDomain.nginx_s3_compatible ?? false)
       setNginxHttp2(editingDomain.nginx_http2)
       setNginxGzip(editingDomain.nginx_gzip)
     } else {
@@ -101,6 +103,7 @@ export function DomainDrawer({ open, nodes, certificates, dnsAccounts, acmeAccou
       setCloudflareProxied(true)
       setRecordContent(preferredAddress(firstNode))
       setNginxWebsocket(false)
+      setNginxS3Compatible(false)
       setNginxHttp2(true)
       setNginxGzip(true)
     }
@@ -229,6 +232,7 @@ export function DomainDrawer({ open, nodes, certificates, dnsAccounts, acmeAccou
       cloudflare_proxied: cloudflareEnabled && cloudflareProxied,
       cloudflare_record_content: cloudflareEnabled ? recordContent.trim() : undefined,
       nginx_websocket: nginxWebsocket,
+      nginx_s3_compatible: nginxS3Compatible,
       nginx_http2: nginxHttp2,
       nginx_gzip: nginxGzip,
     }
@@ -275,7 +279,8 @@ export function DomainDrawer({ open, nodes, certificates, dnsAccounts, acmeAccou
           <section className="form-section nginx-section">
             <div className="form-section-heading"><span>03</span><div><strong>{t('domain.nginxSettings')}</strong><small>{t('domain.nginxSettingsHint')}</small></div></div>
             <div className="nginx-options">
-              <label className="switch-row"><button type="button" role="switch" aria-checked={nginxWebsocket} className={nginxWebsocket ? 'switch-on' : ''} onClick={() => setNginxWebsocket((value) => !value)}><i /></button><span><strong>{t('domain.nginxWebsocket')}</strong><small>{t('domain.nginxWebsocketHint')}</small></span></label>
+              <label className="switch-row"><button type="button" role="switch" aria-checked={nginxWebsocket} className={nginxWebsocket ? 'switch-on' : ''} onClick={() => setNginxWebsocket((value) => { const next = !value; if (next) setNginxS3Compatible(false); return next })}><i /></button><span><strong>{t('domain.nginxWebsocket')}</strong><small>{t('domain.nginxWebsocketHint')}</small></span></label>
+              <label className="switch-row"><button type="button" role="switch" aria-checked={nginxS3Compatible} className={nginxS3Compatible ? 'switch-on' : ''} onClick={() => setNginxS3Compatible((value) => { const next = !value; if (next) setNginxWebsocket(false); return next })}><i /></button><span><strong>{t('domain.nginxS3Compatible')}</strong><small>{t('domain.nginxS3CompatibleHint')}</small></span></label>
               <label className="switch-row"><button type="button" role="switch" aria-checked={nginxHttp2} className={nginxHttp2 ? 'switch-on' : ''} onClick={() => setNginxHttp2((value) => !value)}><i /></button><span><strong>{t('domain.nginxHttp2')}</strong><small>{t('domain.nginxHttp2Hint')}</small></span></label>
               <label className="switch-row"><button type="button" role="switch" aria-checked={nginxGzip} className={nginxGzip ? 'switch-on' : ''} onClick={() => setNginxGzip((value) => !value)}><i /></button><span><strong>{t('domain.nginxGzip')}</strong><small>{t('domain.nginxGzipHint')}</small></span></label>
             </div>

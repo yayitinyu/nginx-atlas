@@ -96,6 +96,7 @@ type Domain struct {
 	CloudflareRecordType    string            `json:"cloudflare_record_type,omitempty"`
 	CloudflareRecordContent string            `json:"cloudflare_record_content,omitempty"`
 	NginxWebsocket          bool              `json:"nginx_websocket"`
+	NginxS3Compatible       bool              `json:"nginx_s3_compatible"`
 	NginxHTTP2              bool              `json:"nginx_http2"`
 	NginxGzip               bool              `json:"nginx_gzip"`
 	LastJobID               string            `json:"last_job_id,omitempty"`

@@ -83,6 +83,7 @@ type ApplyDomainPayload struct {
 	CaptureCertificate  bool               `json:"capture_certificate"`
 	ReplaceConfigPath   string             `json:"replace_config_path,omitempty"`
 	NginxWebsocket      bool               `json:"nginx_websocket"`
+	NginxS3Compatible   bool               `json:"nginx_s3_compatible"`
 	NginxHTTP2          bool               `json:"nginx_http2"`
 	NginxGzip           bool               `json:"nginx_gzip"`
 }

@@ -153,6 +153,43 @@ func TestApplyDomainSelectsHTTP2SyntaxFromInstalledNginx(t *testing.T) {
 	}
 }
 
+func TestApplyDomainRendersS3CompatibleProxy(t *testing.T) {
+	root := t.TempDir()
+	configDir := filepath.Join(root, "nginx")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	executor := NewExecutor(ExecutorConfig{
+		NginxBinary: "nginx", Systemctl: "systemctl", NginxConfigDir: configDir,
+		SSLRoot: filepath.Join(root, "ssl"), DataRoot: filepath.Join(root, "data"),
+	}, alwaysOKRunner{})
+	payload, err := json.Marshal(protocol.ApplyDomainPayload{
+		Domain: "s3.example.com", UpstreamHost: "127.0.0.1", UpstreamPort: 9000,
+		NginxS3Compatible: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := executor.Execute(context.Background(), protocol.WireJob{ID: "job_s3", Type: protocol.JobApplyDomain, Payload: payload})
+	if !result.Success {
+		t.Fatalf("apply failed: %s", result.Error)
+	}
+	config, err := os.ReadFile(filepath.Join(configDir, "atlas-s3.example.com.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, wanted := range []string{
+		`client_max_body_size 0;`,
+		`proxy_set_header Accept-Encoding "identity";`,
+		`proxy_set_header Connection "";`,
+		`proxy_request_buffering off;`,
+	} {
+		if !strings.Contains(string(config), wanted) {
+			t.Errorf("generated config missing %q:\n%s", wanted, config)
+		}
+	}
+}
+
 func TestValidateTakeoverPathRejectsSiblingDirectoriesAndTraversal(t *testing.T) {
 	valid := []string{
 		"/etc/nginx/conf.d/legacy.conf",

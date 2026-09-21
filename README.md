@@ -19,6 +19,7 @@ Nginx Atlas 是一个面向 Linux VPS 集群的 Nginx、域名路由与 TLS 证�
 - 将证书版本推送到多台 VPS；每台节点分别原子写入、验证并重载 Nginx。
 - 单张 ACME 证书可包含最多 20 个 SAN/通配符域名，并在后续续期中保持完整名称集合。
 - 可在添加域名时创建或更新 Cloudflare A/AAAA/CNAME 记录，并选择橙云代理或灰云 DNS。
+- 可为 RustFS 等 S3 兼容对象存储启用专用代理模式，保留签名所需请求头并流式转发大文件。
 - 从各节点的 `nginx -T` 输出中提取安全元数据；可只监控现有规则，也可备份后安全接管。
 - 在面板检查 GitHub 发行版并更新主控/子节点代理；APT 节点可确认后更新软件包与 Nginx。
 - 可修改节点显示名称，并复制只卸载 Atlas Agent、保留 Nginx 配置与证书的命令。
@@ -179,7 +180,8 @@ sudo bash deploy/install.sh server \
    - **已有证书**：选择证书页已管理且覆盖该域名的证书；
    - **Let’s Encrypt**：自动选中已有 DNS 与 ACME 账户，通过 DNS-01 签发，并可开启自动续期。
 3. 可选同步 Cloudflare DNS：自动使用节点 IP 或填写 A/AAAA/CNAME 目标，并选择橙云或灰云。
-4. Nginx 配置预览与“验证并部署”。证书上传、节点证书接管、跨节点分发和自动化账户统一在“证书”页管理。
+4. Nginx 高级设置：WebSocket、S3 / 对象存储兼容、HTTP/2 与 Gzip；S3 模式会关闭请求缓冲和上传大小限制，并固定回源 `Accept-Encoding`。
+5. 验证并部署。证书上传、节点证书接管、跨节点分发和自动化账户统一在“证书”页管理。
 
 典型 TLS 配置会生成 HTTP 到 HTTPS 的 308 跳转、TLS 站点、反向代理头与 WebSocket 升级头。文件写入后才运行 `nginx -t`；配置校验或 reload 失败会恢复之前的配置和证书。
 

@@ -170,7 +170,8 @@ func (e *Executor) applyDomain(ctx context.Context, payload protocol.ApplyDomain
 	config, err := nginxconfig.Render(nginxconfig.Site{
 		Domain: domain, UpstreamHost: payload.UpstreamHost, UpstreamPort: payload.UpstreamPort,
 		TLS: payload.TLS, CertificateDir: certDir,
-		NginxWebsocket: payload.NginxWebsocket, NginxHTTP2: payload.NginxHTTP2, ModernHTTP2: modernHTTP2, NginxGzip: payload.NginxGzip,
+		NginxWebsocket: payload.NginxWebsocket, NginxS3Compatible: payload.NginxS3Compatible,
+		NginxHTTP2: payload.NginxHTTP2, ModernHTTP2: modernHTTP2, NginxGzip: payload.NginxGzip,
 		ProxyHeaderInclude: e.localProxyHeaderInclude(payload.UpstreamHost, payload.UpstreamPort),
 	})
 	if err != nil {

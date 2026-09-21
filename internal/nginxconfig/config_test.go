@@ -115,6 +115,47 @@ func TestRenderOnlyUpgradesWebsocketConnectionsWhenRequested(t *testing.T) {
 	}
 }
 
+func TestRenderS3CompatibleProxy(t *testing.T) {
+	for _, tlsEnabled := range []bool{false, true} {
+		config, err := Render(Site{
+			Domain: "s3.example.com", UpstreamHost: "127.0.0.1", UpstreamPort: 9000,
+			TLS: tlsEnabled, CertificateDir: "/etc/ssl/s3.example.com", NginxS3Compatible: true,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := string(config)
+		for _, wanted := range []string{
+			`client_max_body_size 0;`,
+			`proxy_set_header Accept-Encoding "identity";`,
+			`proxy_set_header Connection "";`,
+			`proxy_request_buffering off;`,
+		} {
+			if count := strings.Count(text, wanted); count != 1 {
+				t.Errorf("TLS=%t: %q count = %d, want 1:\n%s", tlsEnabled, wanted, count, text)
+			}
+		}
+		for _, forbidden := range []string{
+			`client_max_body_size 64m;`,
+			`proxy_set_header Upgrade $http_upgrade;`,
+		} {
+			if strings.Contains(text, forbidden) {
+				t.Errorf("TLS=%t: config contains %q:\n%s", tlsEnabled, forbidden, text)
+			}
+		}
+	}
+}
+
+func TestValidateSiteRejectsS3CompatibilityWithWebsocket(t *testing.T) {
+	err := ValidateSite(Site{
+		Domain: "s3.example.com", UpstreamHost: "127.0.0.1", UpstreamPort: 9000,
+		NginxWebsocket: true, NginxS3Compatible: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "cannot be combined") {
+		t.Fatalf("expected incompatible proxy modes to be rejected, got %v", err)
+	}
+}
+
 func TestRenderAllowsLargerUpstreamResponseHeaders(t *testing.T) {
 	for _, tlsEnabled := range []bool{false, true} {
 		config, err := Render(Site{

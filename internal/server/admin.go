@@ -626,6 +626,7 @@ type createDomainRequest struct {
 	CloudflareRecordType    string   `json:"cloudflare_record_type"`
 	CloudflareRecordContent string   `json:"cloudflare_record_content"`
 	NginxWebsocket          bool     `json:"nginx_websocket"`
+	NginxS3Compatible       bool     `json:"nginx_s3_compatible"`
 	NginxHTTP2              bool     `json:"nginx_http2"`
 	NginxGzip               bool     `json:"nginx_gzip"`
 }
@@ -648,6 +649,7 @@ type updateDomainRequest struct {
 	CloudflareRecordType    *string   `json:"cloudflare_record_type"`
 	CloudflareRecordContent *string   `json:"cloudflare_record_content"`
 	NginxWebsocket          *bool     `json:"nginx_websocket"`
+	NginxS3Compatible       *bool     `json:"nginx_s3_compatible"`
 	NginxHTTP2              *bool     `json:"nginx_http2"`
 	NginxGzip               *bool     `json:"nginx_gzip"`
 }
@@ -708,6 +710,7 @@ func (s *Server) handleCreateDomain(w http.ResponseWriter, r *http.Request) {
 	if err := nginxconfig.ValidateSite(nginxconfig.Site{
 		Domain: request.Domain, UpstreamHost: request.UpstreamHost, UpstreamPort: request.UpstreamPort,
 		TLS: request.CertificateMode != "none", CertificateDir: "/etc/ssl/" + request.Domain,
+		NginxWebsocket: request.NginxWebsocket, NginxS3Compatible: request.NginxS3Compatible,
 	}); err != nil {
 		writeError(w, http.StatusBadRequest, "域名或上游配置无效", "invalid_domain", map[string]string{"reason": err.Error()})
 		return
@@ -822,7 +825,8 @@ func (s *Server) handleCreateDomain(w http.ResponseWriter, r *http.Request) {
 			CloudflareEnabled: request.CloudflareEnabled, CloudflareDNSAccountID: request.CloudflareDNSAccountID,
 			CloudflareProxied: request.CloudflareProxied, CloudflareRecordType: request.CloudflareRecordType,
 			CloudflareRecordContent: request.CloudflareRecordContent,
-			NginxWebsocket:          request.NginxWebsocket, NginxHTTP2: request.NginxHTTP2, NginxGzip: request.NginxGzip,
+			NginxWebsocket:          request.NginxWebsocket, NginxS3Compatible: request.NginxS3Compatible,
+			NginxHTTP2: request.NginxHTTP2, NginxGzip: request.NginxGzip,
 		}
 		state.Domains[domainID] = created
 		var job model.Job
@@ -1128,6 +1132,7 @@ func (s *Server) handleUpdateDomain(w http.ResponseWriter, r *http.Request) {
 		CloudflareRecordType:    existing.CloudflareRecordType,
 		CloudflareRecordContent: existing.CloudflareRecordContent,
 		NginxWebsocket:          existing.NginxWebsocket,
+		NginxS3Compatible:       existing.NginxS3Compatible,
 		NginxHTTP2:              existing.NginxHTTP2,
 		NginxGzip:               existing.NginxGzip,
 	}
@@ -1170,6 +1175,9 @@ func (s *Server) handleUpdateDomain(w http.ResponseWriter, r *http.Request) {
 	}
 	if update.NginxWebsocket != nil {
 		request.NginxWebsocket = *update.NginxWebsocket
+	}
+	if update.NginxS3Compatible != nil {
+		request.NginxS3Compatible = *update.NginxS3Compatible
 	}
 	if update.NginxHTTP2 != nil {
 		request.NginxHTTP2 = *update.NginxHTTP2
@@ -1251,6 +1259,7 @@ func (s *Server) handleUpdateDomain(w http.ResponseWriter, r *http.Request) {
 	if err := nginxconfig.ValidateSite(nginxconfig.Site{
 		Domain: request.Domain, UpstreamHost: request.UpstreamHost, UpstreamPort: request.UpstreamPort,
 		TLS: source != "", CertificateDir: "/etc/ssl/" + request.Domain,
+		NginxWebsocket: request.NginxWebsocket, NginxS3Compatible: request.NginxS3Compatible,
 	}); err != nil {
 		writeError(w, http.StatusBadRequest, "域名或上游配置无效", "invalid_domain", map[string]string{"reason": err.Error()})
 		return
@@ -1332,6 +1341,7 @@ func (s *Server) handleUpdateDomain(w http.ResponseWriter, r *http.Request) {
 			domain.CloudflareRecordContent = ""
 		}
 		domain.NginxWebsocket = request.NginxWebsocket
+		domain.NginxS3Compatible = request.NginxS3Compatible
 		domain.NginxHTTP2 = request.NginxHTTP2
 		domain.NginxGzip = request.NginxGzip
 		domain.Enabled = true

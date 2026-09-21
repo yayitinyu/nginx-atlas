@@ -24,6 +24,7 @@ type Site struct {
 	TLS                bool
 	CertificateDir     string
 	NginxWebsocket     bool
+	NginxS3Compatible  bool
 	NginxHTTP2         bool
 	ModernHTTP2        bool
 	NginxGzip          bool
@@ -46,6 +47,9 @@ func ValidateSite(site Site) error {
 	}
 	if site.ProxyHeaderInclude != "" && site.ProxyHeaderInclude != "/etc/nginx-atlas/proxy-token.conf" {
 		return errors.New("proxy header include path is not trusted")
+	}
+	if site.NginxWebsocket && site.NginxS3Compatible {
+		return errors.New("S3 compatibility cannot be combined with WebSocket support")
 	}
 	return nil
 }
@@ -124,7 +128,11 @@ server {
     ssl_session_cache shared:ATLAS:10m;
     ssl_session_tickets off;
     add_header Strict-Transport-Security "max-age=15552000" always;
+    {{- if .NginxS3Compatible }}
+    client_max_body_size 0;
+    {{- else }}
     client_max_body_size 64m;
+    {{- end }}
 
     {{- if .NginxGzip }}
     gzip on;
@@ -146,6 +154,11 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header X-Forwarded-Host $host;
+        {{- if .NginxS3Compatible }}
+        proxy_set_header Accept-Encoding "identity";
+        proxy_set_header Connection "";
+        proxy_request_buffering off;
+        {{- end }}
         {{- if .NginxWebsocket }}
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection {{ websocketConnection . }};
@@ -160,7 +173,11 @@ server {
     listen 80;
     listen [::]:80;
     server_name {{ .Domain }};
+    {{- if .NginxS3Compatible }}
+    client_max_body_size 0;
+    {{- else }}
     client_max_body_size 64m;
+    {{- end }}
 
     {{- if .NginxGzip }}
     gzip on;
@@ -182,6 +199,11 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header X-Forwarded-Host $host;
+        {{- if .NginxS3Compatible }}
+        proxy_set_header Accept-Encoding "identity";
+        proxy_set_header Connection "";
+        proxy_request_buffering off;
+        {{- end }}
         {{- if .NginxWebsocket }}
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection {{ websocketConnection . }};

@@ -1412,7 +1412,7 @@ func TestUpdateDomainAcceptsEditorPayloadAndPersistsNginxSettings(t *testing.T) 
 	request := createDomainRequest{
 		Domain: "api.example.com", NodeID: "node_primary", UpstreamHost: "127.0.0.2", UpstreamPort: 9090,
 		CertificateMode: "upload", CertificateID: "crt_wildcard", RenewBeforeDays: 30,
-		SyncNodeIDs: []string{"node_backup"}, NginxWebsocket: true, NginxHTTP2: true, NginxGzip: false,
+		SyncNodeIDs: []string{"node_backup"}, NginxS3Compatible: true, NginxHTTP2: true, NginxGzip: false,
 	}
 	updated := performJSON(t, controller.Handler(), http.MethodPut, "/api/v1/domains/dom_api", request, "Bearer "+adminToken)
 	if updated.Code != http.StatusOK {
@@ -1420,13 +1420,13 @@ func TestUpdateDomainAcceptsEditorPayloadAndPersistsNginxSettings(t *testing.T) 
 	}
 	var updateView map[string]any
 	decodeRecorder(t, updated, &updateView)
-	for _, field := range []string{"cloudflare_enabled", "cloudflare_proxied", "nginx_gzip"} {
+	for _, field := range []string{"cloudflare_enabled", "cloudflare_proxied", "nginx_websocket", "nginx_gzip"} {
 		if _, ok := updateView[field]; !ok {
 			t.Fatalf("domain editor response omitted false setting %q: %s", field, updated.Body.String())
 		}
 	}
 	domain := stateStore.Snapshot().Domains["dom_api"]
-	if domain.UpstreamHost != "127.0.0.2" || domain.UpstreamPort != 9090 || !domain.NginxWebsocket || !domain.NginxHTTP2 || domain.NginxGzip {
+	if domain.UpstreamHost != "127.0.0.2" || domain.UpstreamPort != 9090 || domain.NginxWebsocket || !domain.NginxS3Compatible || !domain.NginxHTTP2 || domain.NginxGzip {
 		t.Fatalf("domain editor values were not persisted: %+v", domain)
 	}
 	if len(domain.SyncNodeIDs) != 1 || domain.SyncNodeIDs[0] != "node_backup" {
@@ -1438,6 +1438,26 @@ func TestUpdateDomainAcceptsEditorPayloadAndPersistsNginxSettings(t *testing.T) 
 	job := stateStore.Snapshot().Jobs[domain.LastJobID]
 	if job.Type != protocol.JobApplyDomain || job.Status != model.JobQueued {
 		t.Fatalf("updated domain did not queue an apply job: %+v", job)
+	}
+	var applySpec applyDomainSpec
+	if err := json.Unmarshal(job.Payload, &applySpec); err != nil {
+		t.Fatal(err)
+	}
+	applySpec.CertificateID = ""
+	job.Payload, err = json.Marshal(applySpec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wired, err := controller.buildWireJob(job, stateStore.Snapshot())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var applyPayload protocol.ApplyDomainPayload
+	if err := json.Unmarshal(wired.Payload, &applyPayload); err != nil {
+		t.Fatal(err)
+	}
+	if !applyPayload.NginxS3Compatible || applyPayload.NginxWebsocket {
+		t.Fatalf("S3 proxy mode was not propagated to the agent: %+v", applyPayload)
 	}
 
 	request.CertificateMode = "acme"
@@ -1462,7 +1482,7 @@ func TestUpdateDomainAcceptsEditorPayloadAndPersistsNginxSettings(t *testing.T) 
 		t.Fatalf("partial domain update returned %d: %s", partial.Code, partial.Body.String())
 	}
 	domain = stateStore.Snapshot().Domains["dom_api"]
-	if domain.UpstreamPort != 9091 || !domain.NginxWebsocket || !domain.NginxHTTP2 || domain.NginxGzip || len(domain.SyncNodeIDs) != 1 {
+	if domain.UpstreamPort != 9091 || domain.NginxWebsocket || !domain.NginxS3Compatible || !domain.NginxHTTP2 || domain.NginxGzip || len(domain.SyncNodeIDs) != 1 {
 		t.Fatalf("partial domain update discarded existing editor settings: %+v", domain)
 	}
 }
