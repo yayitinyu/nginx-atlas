@@ -66,6 +66,93 @@ func TestApplyDomainRestoresConfigWhenNginxTestFails(t *testing.T) {
 	}
 }
 
+func TestNginxSupportsModernHTTP2Directive(t *testing.T) {
+	tests := []struct {
+		output string
+		want   bool
+	}{
+		{output: "nginx version: nginx/1.24.0 (Ubuntu)", want: false},
+		{output: "nginx version: nginx/1.25.0", want: false},
+		{output: "nginx version: nginx/1.25.1", want: true},
+		{output: "nginx version: nginx/1.28.3 (Ubuntu)", want: true},
+		{output: "nginx version: nginx/2.0.0", want: true},
+		{output: "openresty/1.27.1.1", want: false},
+		{output: "unexpected", want: false},
+	}
+	for _, test := range tests {
+		if got := nginxSupportsModernHTTP2Directive([]byte(test.output)); got != test.want {
+			t.Errorf("nginxSupportsModernHTTP2Directive(%q)=%v want %v", test.output, got, test.want)
+		}
+	}
+}
+
+type nginxVersionRunner struct {
+	version string
+}
+
+func (runner nginxVersionRunner) Run(_ context.Context, name string, args []string, _ map[string]string) ([]byte, error) {
+	if name == "nginx" && len(args) == 1 && args[0] == "-v" {
+		return []byte(runner.version), nil
+	}
+	return []byte("ok"), nil
+}
+
+func TestApplyDomainSelectsHTTP2SyntaxFromInstalledNginx(t *testing.T) {
+	tests := []struct {
+		name      string
+		version   string
+		wanted    string
+		forbidden string
+	}{
+		{name: "legacy", version: "nginx version: nginx/1.24.0", wanted: "listen 443 ssl http2;", forbidden: "http2 on;"},
+		{name: "modern", version: "nginx version: nginx/1.28.3 (Ubuntu)", wanted: "http2 on;", forbidden: "listen 443 ssl http2;"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			configDir := filepath.Join(root, "nginx")
+			sslRoot := filepath.Join(root, "ssl")
+			certificateDir := filepath.Join(sslRoot, "api.example.com")
+			for _, directory := range []string{configDir, certificateDir} {
+				if err := os.MkdirAll(directory, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			fullchain, key := mustTestCertificatePEM(t, "api.example.com")
+			if err := os.WriteFile(filepath.Join(certificateDir, "fullchain.pem"), fullchain, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(certificateDir, "privkey.pem"), key, 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			executor := NewExecutor(ExecutorConfig{
+				NginxBinary: "nginx", Systemctl: "systemctl", NginxConfigDir: configDir,
+				SSLRoot: sslRoot, DataRoot: filepath.Join(root, "data"),
+			}, nginxVersionRunner{version: test.version})
+			payload, err := json.Marshal(protocol.ApplyDomainPayload{
+				Domain: "api.example.com", UpstreamHost: "127.0.0.1", UpstreamPort: 8080,
+				TLS: true, UseLocalCertificate: true, NginxHTTP2: true,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			result := executor.Execute(context.Background(), protocol.WireJob{ID: "job_test", Type: protocol.JobApplyDomain, Payload: payload})
+			if !result.Success {
+				t.Fatalf("apply failed: %s", result.Error)
+			}
+			config, err := os.ReadFile(filepath.Join(configDir, "atlas-api.example.com.conf"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			text := string(config)
+			if !strings.Contains(text, test.wanted) || strings.Contains(text, test.forbidden) {
+				t.Fatalf("unexpected config for %s:\n%s", test.version, text)
+			}
+		})
+	}
+}
+
 func TestValidateTakeoverPathRejectsSiblingDirectoriesAndTraversal(t *testing.T) {
 	valid := []string{
 		"/etc/nginx/conf.d/legacy.conf",

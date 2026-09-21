@@ -2,6 +2,7 @@ package nginxconfig
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"net"
@@ -24,6 +25,7 @@ type Site struct {
 	CertificateDir     string
 	NginxWebsocket     bool
 	NginxHTTP2         bool
+	ModernHTTP2        bool
 	NginxGzip          bool
 	ProxyHeaderInclude string
 }
@@ -76,9 +78,21 @@ func UpstreamURL(host string, port int) string {
 	return "http://" + host + ":" + strconv.Itoa(port)
 }
 
+func websocketConnectionVariable(site Site) string {
+	sum := sha256.Sum256([]byte(site.Domain))
+	return fmt.Sprintf("$atlas_connection_upgrade_%x", sum[:8])
+}
+
 var siteTemplate = template.Must(template.New("site").Funcs(template.FuncMap{
-	"upstream": func(site Site) string { return UpstreamURL(site.UpstreamHost, site.UpstreamPort) },
+	"upstream":            func(site Site) string { return UpstreamURL(site.UpstreamHost, site.UpstreamPort) },
+	"websocketConnection": websocketConnectionVariable,
 }).Parse(`# Managed by Nginx Atlas. Manual changes will be replaced.
+{{- if .NginxWebsocket }}
+map $http_upgrade {{ websocketConnection . }} {
+    default upgrade;
+    '' close;
+}
+{{- end }}
 {{- if .TLS }}
 server {
     listen 80;
@@ -89,8 +103,14 @@ server {
 
 server {
     {{- if .NginxHTTP2 }}
+    {{- if .ModernHTTP2 }}
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    {{- else }}
     listen 443 ssl http2;
     listen [::]:443 ssl http2;
+    {{- end }}
     {{- else }}
     listen 443 ssl;
     listen [::]:443 ssl;
@@ -127,7 +147,7 @@ server {
         proxy_set_header X-Forwarded-Host $host;
         {{- if .NginxWebsocket }}
         proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
+        proxy_set_header Connection {{ websocketConnection . }};
         proxy_connect_timeout 10s;
         proxy_send_timeout 3600s;
         proxy_read_timeout 3600s;
@@ -162,7 +182,7 @@ server {
         proxy_set_header X-Forwarded-Host $host;
         {{- if .NginxWebsocket }}
         proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
+        proxy_set_header Connection {{ websocketConnection . }};
         proxy_connect_timeout 10s;
         proxy_send_timeout 3600s;
         proxy_read_timeout 3600s;

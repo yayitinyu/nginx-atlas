@@ -35,8 +35,9 @@ const maxCommandOutput = 16 << 10
 const maxAtlasReleaseSize = 128 << 20
 
 var (
-	providerPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
-	envNamePattern  = regexp.MustCompile(`^[A-Z][A-Z0-9_]{1,127}$`)
+	providerPattern     = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
+	envNamePattern      = regexp.MustCompile(`^[A-Z][A-Z0-9_]{1,127}$`)
+	nginxVersionPattern = regexp.MustCompile(`nginx/(\d+)\.(\d+)\.(\d+)`)
 )
 
 type ExecutorConfig struct {
@@ -161,10 +162,15 @@ func (e *Executor) applyDomain(ctx context.Context, payload protocol.ApplyDomain
 	if err != nil {
 		return protocol.JobResultRequest{}, err
 	}
+	modernHTTP2 := false
+	if payload.TLS && payload.NginxHTTP2 {
+		output, versionErr := e.runner.Run(ctx, e.config.NginxBinary, []string{"-v"}, nil)
+		modernHTTP2 = versionErr == nil && nginxSupportsModernHTTP2Directive(output)
+	}
 	config, err := nginxconfig.Render(nginxconfig.Site{
 		Domain: domain, UpstreamHost: payload.UpstreamHost, UpstreamPort: payload.UpstreamPort,
 		TLS: payload.TLS, CertificateDir: certDir,
-		NginxWebsocket: payload.NginxWebsocket, NginxHTTP2: payload.NginxHTTP2, NginxGzip: payload.NginxGzip,
+		NginxWebsocket: payload.NginxWebsocket, NginxHTTP2: payload.NginxHTTP2, ModernHTTP2: modernHTTP2, NginxGzip: payload.NginxGzip,
 		ProxyHeaderInclude: e.localProxyHeaderInclude(payload.UpstreamHost, payload.UpstreamPort),
 	})
 	if err != nil {
@@ -238,6 +244,20 @@ func (e *Executor) applyDomain(ctx context.Context, payload protocol.ApplyDomain
 		result.Certificate = &bundle
 	}
 	return result, nil
+}
+
+func nginxSupportsModernHTTP2Directive(output []byte) bool {
+	match := nginxVersionPattern.FindSubmatch(output)
+	if len(match) != 4 {
+		return false
+	}
+	major, majorErr := strconv.Atoi(string(match[1]))
+	minor, minorErr := strconv.Atoi(string(match[2]))
+	patch, patchErr := strconv.Atoi(string(match[3]))
+	if majorErr != nil || minorErr != nil || patchErr != nil {
+		return false
+	}
+	return major > 1 || major == 1 && (minor > 25 || minor == 25 && patch >= 1)
 }
 
 func (e *Executor) localProxyHeaderInclude(upstreamHost string, upstreamPort int) string {

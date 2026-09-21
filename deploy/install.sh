@@ -606,8 +606,21 @@ WantedBy=multi-user.target
 EOF
 }
 
+nginx_supports_modern_http2() {
+  local version major minor patch
+  version="$(nginx -v 2>&1)" || return 1
+  if [[ ! "$version" =~ nginx/([0-9]+)\.([0-9]+)\.([0-9]+) ]]; then
+    return 1
+  fi
+  major="${BASH_REMATCH[1]}"
+  minor="${BASH_REMATCH[2]}"
+  patch="${BASH_REMATCH[3]}"
+  (( major > 1 || (major == 1 && (minor > 25 || (minor == 25 && patch >= 1))) ))
+}
+
 configure_panel_nginx() {
   local cert_dir="/etc/ssl/$PANEL_DOMAIN"
+  local http2_listen
   if panel_is_agent_managed; then
     secure_agent_managed_panel_proxy
     log "$PANEL_DOMAIN 已由本机节点代理管理，已同步受保护的主控代理配置。"
@@ -618,6 +631,11 @@ configure_panel_nginx() {
     warn "请先由外部反向代理将 $PUBLIC_URL 转发到 $CONTROLLER_ADDR，或放入证书后重新运行安装器。"
     warn "代理必须携带 server.env 中的 ATLAS_PROXY_TOKEN；同机 Nginx 可 include $PROXY_HEADER_CONFIG，并覆盖 X-Real-IP。"
     return
+  fi
+  if nginx_supports_modern_http2; then
+    http2_listen=$'    listen 443 ssl;\n    listen [::]:443 ssl;\n    http2 on;'
+  else
+    http2_listen=$'    listen 443 ssl http2;\n    listen [::]:443 ssl http2;'
   fi
   backup_file "$NGINX_PANEL_CONFIG"
   cat >"$NGINX_PANEL_CONFIG" <<EOF
@@ -630,8 +648,7 @@ server {
 }
 
 server {
-    listen 443 ssl http2;
-    listen [::]:443 ssl http2;
+$http2_listen
     server_name $PANEL_DOMAIN;
 
     ssl_certificate $cert_dir/fullchain.pem;

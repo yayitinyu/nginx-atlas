@@ -16,6 +16,8 @@ func TestInstallerProtectsLocalControlPlaneAndWebSocketProxy(t *testing.T) {
 		"AmbientCapabilities=CAP_NET_BIND_SERVICE",
 		"location = /api/v1/events",
 		`proxy_set_header Upgrade \$http_upgrade;`,
+		"nginx_supports_modern_http2",
+		"http2 on;",
 		"Authorization: AtlasLocal",
 		"ATLAS_PROXY_TOKEN=",
 		"include $PROXY_HEADER_CONFIG;",
