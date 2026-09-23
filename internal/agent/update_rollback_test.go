@@ -5,6 +5,8 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -151,5 +153,59 @@ func TestConfirmPendingUpdateRequiresStableMatchingAgentAndActiveServices(t *tes
 	}
 	if len(runner.calls) != 2 || runner.calls[0].args[0] != "is-active" || runner.calls[1].args[0] != "stop" {
 		t.Fatalf("health confirmation calls = %+v", runner.calls)
+	}
+}
+
+func TestUpdatedAgentConfirmsLocallyWhileControllerIsUnavailable(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	root := t.TempDir()
+	statePath := filepath.Join(root, "state.json")
+	if err := os.WriteFile(statePath, []byte(`{"node_id":"node_1","secret":"secret_1"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	markerPath := pendingUpdatePath(root)
+	helperPath := filepath.Join(root, "updates", "rollback.sh")
+	if err := writeRollbackHelper(helperPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := writePendingUpdate(markerPath, pendingUpdate{
+		ExpectedVersion: "1.2.3",
+		InstalledBinary: filepath.Join(root, "nginx-atlas"),
+		RollbackBinary:  filepath.Join(root, "nginx-atlas-old"),
+		RollbackHelper:  helperPath,
+		RestartServices: []string{"nginx-atlas-agent.service"},
+		RollbackUnit:    "nginx-atlas-update-rollback-test",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	runner := &recordingCommandRunner{}
+	client, err := NewClient(ClientConfig{ServerURL: server.URL, StatePath: statePath, PollInterval: 3 * time.Second, Version: "1.2.3"}, NewExecutor(ExecutorConfig{DataRoot: root, Systemctl: "systemctl"}, runner), runner, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.startedAt = time.Now().Add(-updateConfirmationDelay - time.Second)
+	client.nextReportAt = time.Now().Add(time.Hour)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := client.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(markerPath); !os.IsNotExist(err) {
+		t.Fatalf("healthy update was not confirmed without a controller response: %v", err)
+	}
+	confirmed, disarmed := false, false
+	for _, call := range runner.calls {
+		if call.name != "systemctl" || len(call.args) == 0 {
+			continue
+		}
+		confirmed = confirmed || call.args[0] == "is-active"
+		disarmed = disarmed || call.args[0] == "stop"
+	}
+	if !confirmed || !disarmed {
+		t.Fatalf("local confirmation did not check and cancel the watchdog: %+v", runner.calls)
 	}
 }

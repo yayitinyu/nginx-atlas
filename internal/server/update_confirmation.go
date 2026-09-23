@@ -16,7 +16,7 @@ const (
 	updateObservationDelay    = 3 * time.Minute
 	updateStableDuration      = 30 * time.Second
 	updateMaxReportGap        = 30 * time.Second
-	updateConfirmationTimeout = 5 * time.Minute
+	updateConfirmationTimeout = 30 * time.Minute
 )
 
 func awaitingUpdateConfirmation(job model.Job) bool {

@@ -314,7 +314,8 @@ func (s *Server) handleAgentJobResult(w http.ResponseWriter, r *http.Request) {
 			s.addAudit(state, "success", "job.succeeded", safeJobMessage(request.Message), nodeID, current.DomainID, current.ID)
 		} else {
 			current.Error = truncate(request.Error, 2048)
-			if current.Attempts < current.MaxAttempts {
+			nonRetryable := nonRetryableUpdateError(current)
+			if current.Attempts < current.MaxAttempts && !nonRetryable {
 				current.Status = model.JobQueued
 				current.QueuedAt = &now
 				current.StartedAt = nil
@@ -323,7 +324,11 @@ func (s *Server) handleAgentJobResult(w http.ResponseWriter, r *http.Request) {
 				current.Status = model.JobFailed
 				current.FinishedAt = &now
 				restoreFailedDomainDeletion(state, current, current.Error, now)
-				s.addAudit(state, "error", "job.failed", "任务重试后仍然失败", nodeID, current.DomainID, current.ID)
+				message := "任务重试后仍然失败"
+				if nonRetryable {
+					message = "节点更新校验失败，已停止重试"
+				}
+				s.addAudit(state, "error", "job.failed", message, nodeID, current.DomainID, current.ID)
 			}
 			if domain, ok := state.Domains[current.DomainID]; ok {
 				domain.LastError = current.Error
@@ -345,6 +350,18 @@ func (s *Server) handleAgentJobResult(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"accepted": true})
+}
+
+func nonRetryableUpdateError(job model.Job) bool {
+	if job.Type != protocol.JobUpdateAtlas {
+		return false
+	}
+	switch job.Error {
+	case "controller checksum does not match the trusted release manifest", "release SHA-256 verification failed":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Server) buildWireJob(job model.Job, state model.State) (protocol.WireJob, error) {

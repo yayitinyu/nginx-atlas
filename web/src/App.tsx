@@ -347,7 +347,17 @@ export default function App() {
     try {
       const result = await api.updateAllNodesAtlas()
       setConfirmUpdateAllNodes(false)
-      toast('success', t('toast.allNodesUpdateQueued', { queued: result.queued, skipped: result.skipped }))
+      const parts = [t('toast.nodesUpdateQueued', { count: result.queued })]
+      if (result.deferred > 0) parts.push(t('toast.nodesUpdateDeferred', { count: result.deferred }))
+      if (result.skipped > 0) {
+        const reasons = (result.skipped_nodes ?? []).reduce<Record<string, number>>((counts, node) => {
+          counts[node.reason] = (counts[node.reason] ?? 0) + 1
+          return counts
+        }, {})
+        parts.push(t('toast.nodesUpdateSkipped', { count: result.skipped }))
+        for (const [reason, count] of Object.entries(reasons)) parts.push(t(`nodes.updateSkip.${reason}`, { count }))
+      }
+      toast('success', parts.join(' · '))
       await refresh(true)
     } catch (error) { handleError(error, t('error.atlasUpdate')) } finally { setBusy('') }
   }

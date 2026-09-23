@@ -91,6 +91,7 @@ func runServer(args []string) error {
 func runAgent(args []string) error {
 	flags := flag.NewFlagSet("agent", flag.ContinueOnError)
 	serverURL := flags.String("server", os.Getenv("ATLAS_SERVER_URL"), "controller HTTPS URL")
+	controllerNetwork := flags.String("controller-network", envOr("ATLAS_CONTROLLER_NETWORK", "auto"), "controller dial network: auto, tcp4, or tcp6")
 	nodeName := flags.String("name", os.Getenv("ATLAS_NODE_NAME"), "node display name")
 	statePath := flags.String("state", envOr("ATLAS_AGENT_STATE_PATH", "/var/lib/nginx-atlas/agent.json"), "agent credential state")
 	caCert := flags.String("ca-cert", os.Getenv("ATLAS_CA_CERT"), "optional private CA certificate")
@@ -113,7 +114,7 @@ func runAgent(args []string) error {
 		ProxyHeaderInclude: os.Getenv("ATLAS_PROXY_HEADER_INCLUDE"),
 	}, runner)
 	client, err := agent.NewClient(agent.ClientConfig{
-		ServerURL: *serverURL, NodeName: *nodeName, EnrollmentToken: os.Getenv("ATLAS_ENROLLMENT_TOKEN"),
+		ServerURL: *serverURL, ControllerNetwork: *controllerNetwork, NodeName: *nodeName, EnrollmentToken: os.Getenv("ATLAS_ENROLLMENT_TOKEN"),
 		StatePath: *statePath, CACertPath: *caCert, PollInterval: *pollInterval, Version: version,
 	}, executor, runner, slog.Default())
 	if err != nil {
@@ -127,6 +128,7 @@ func runAgent(args []string) error {
 func runAgentUnregister(args []string) error {
 	flags := flag.NewFlagSet("unregister-agent", flag.ContinueOnError)
 	serverURL := flags.String("server", os.Getenv("ATLAS_SERVER_URL"), "controller HTTPS URL")
+	controllerNetwork := flags.String("controller-network", envOr("ATLAS_CONTROLLER_NETWORK", "auto"), "controller dial network: auto, tcp4, or tcp6")
 	statePath := flags.String("state", envOr("ATLAS_AGENT_STATE_PATH", "/var/lib/nginx-atlas/agent.json"), "agent credential state")
 	caCert := flags.String("ca-cert", os.Getenv("ATLAS_CA_CERT"), "optional private CA certificate")
 	if err := flags.Parse(args); err != nil {
@@ -134,7 +136,7 @@ func runAgentUnregister(args []string) error {
 	}
 	runner := agent.OSCommandRunner{}
 	client, err := agent.NewClient(agent.ClientConfig{
-		ServerURL: *serverURL, StatePath: *statePath, CACertPath: *caCert, Version: version,
+		ServerURL: *serverURL, ControllerNetwork: *controllerNetwork, StatePath: *statePath, CACertPath: *caCert, Version: version,
 	}, agent.NewExecutor(agent.ExecutorConfig{}, runner), runner, slog.Default())
 	if err != nil {
 		return err

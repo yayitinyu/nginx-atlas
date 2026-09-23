@@ -417,9 +417,14 @@ func TestUpdateAllNodesQueuesOnlyEligibleNodes(t *testing.T) {
 	}
 	now := time.Now().UTC()
 	if err := stateStore.Update(func(state *model.State) error {
-		state.Nodes["old"] = model.Node{ID: "old", Name: "Old", Status: model.NodeOnline, Arch: "amd64", AgentVersion: "1.0.0", CreatedAt: now}
+		for index := 1; index <= 6; index++ {
+			id := fmt.Sprintf("old_%d", index)
+			state.Nodes[id] = model.Node{ID: id, Name: fmt.Sprintf("Old %d", index), Status: model.NodeOnline, Arch: "amd64", AgentVersion: "1.0.0", NginxHealthy: true, LastSeenAt: &now, CreatedAt: now}
+		}
 		state.Nodes["current"] = model.Node{ID: "current", Name: "Current", Status: model.NodeOnline, Arch: "amd64", AgentVersion: "9.9.9", CreatedAt: now}
-		state.Nodes["unsupported"] = model.Node{ID: "unsupported", Name: "Unsupported", Status: model.NodeOnline, Arch: "riscv64", AgentVersion: "1.0.0", CreatedAt: now}
+		state.Nodes["offline"] = model.Node{ID: "offline", Name: "Offline", Status: model.NodeOffline, Arch: "amd64", AgentVersion: "1.0.0", CreatedAt: now}
+		state.Nodes["unhealthy"] = model.Node{ID: "unhealthy", Name: "Unhealthy", Status: model.NodeOnline, Arch: "amd64", AgentVersion: "1.0.0", LastSeenAt: &now, CreatedAt: now}
+		state.Nodes["unsupported"] = model.Node{ID: "unsupported", Name: "Unsupported", Status: model.NodeOnline, Arch: "riscv64", AgentVersion: "1.0.0", NginxHealthy: true, LastSeenAt: &now, CreatedAt: now}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -430,13 +435,76 @@ func TestUpdateAllNodesQueuesOnlyEligibleNodes(t *testing.T) {
 		t.Fatalf("update all returned %d: %s", queued.Code, queued.Body.String())
 	}
 	var result struct {
-		Queued  int         `json:"queued"`
-		Skipped int         `json:"skipped"`
-		Jobs    []model.Job `json:"jobs"`
+		Queued       int                 `json:"queued"`
+		Skipped      int                 `json:"skipped"`
+		Deferred     int                 `json:"deferred"`
+		Phase        string              `json:"phase"`
+		SkippedNodes []skippedNodeUpdate `json:"skipped_nodes"`
+		Jobs         []model.Job         `json:"jobs"`
 	}
 	decodeRecorder(t, queued, &result)
-	if result.Queued != 1 || result.Skipped != 2 || len(result.Jobs) != 1 || result.Jobs[0].NodeID != "old" {
+	if result.Queued != 1 || result.Skipped != 4 || result.Deferred != 5 || result.Phase != "canary" || len(result.Jobs) != 1 || result.Jobs[0].NodeID != "old_1" {
 		t.Fatalf("unexpected update-all result: %+v", result)
+	}
+	reasons := make(map[string]bool)
+	for _, skipped := range result.SkippedNodes {
+		reasons[skipped.Reason] = true
+	}
+	if !reasons["current"] || !reasons["offline"] || !reasons["unhealthy"] || !reasons["unsupported_arch"] {
+		t.Fatalf("missing skip reasons: %+v", result.SkippedNodes)
+	}
+	blocked := performJSON(t, controller.Handler(), http.MethodPost, "/api/v1/nodes/update-atlas", struct{}{}, "Bearer "+adminToken)
+	if blocked.Code != http.StatusConflict {
+		t.Fatalf("next batch started before canary completed: %d %s", blocked.Code, blocked.Body.String())
+	}
+	if err := stateStore.Update(func(state *model.State) error {
+		job := state.Jobs[result.Jobs[0].ID]
+		job.Status = model.JobSucceeded
+		job.FinishedAt = &now
+		state.Jobs[job.ID] = job
+		node := state.Nodes[job.NodeID]
+		node.AgentVersion = "9.9.9"
+		state.Nodes[node.ID] = node
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	next := performJSON(t, controller.Handler(), http.MethodPost, "/api/v1/nodes/update-atlas", struct{}{}, "Bearer "+adminToken)
+	if next.Code != http.StatusAccepted {
+		t.Fatalf("next batch returned %d: %s", next.Code, next.Body.String())
+	}
+	var nextResult struct {
+		Queued   int         `json:"queued"`
+		Deferred int         `json:"deferred"`
+		Phase    string      `json:"phase"`
+		Jobs     []model.Job `json:"jobs"`
+	}
+	decodeRecorder(t, next, &nextResult)
+	if nextResult.Queued != 5 || nextResult.Deferred != 0 || nextResult.Phase != "batch" {
+		t.Fatalf("unexpected staged batch: %+v", nextResult)
+	}
+	if err := stateStore.Update(func(state *model.State) error {
+		for index, queuedJob := range nextResult.Jobs {
+			job := state.Jobs[queuedJob.ID]
+			job.FinishedAt = &now
+			node := state.Nodes[job.NodeID]
+			if index == 0 {
+				job.Status = model.JobFailed
+				job.Error = "download release returned HTTP 502"
+			} else {
+				job.Status = model.JobSucceeded
+				node.AgentVersion = "9.9.9"
+			}
+			state.Jobs[job.ID] = job
+			state.Nodes[node.ID] = node
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	failedBatch := performJSON(t, controller.Handler(), http.MethodPost, "/api/v1/nodes/update-atlas", struct{}{}, "Bearer "+adminToken)
+	if failedBatch.Code != http.StatusConflict || !strings.Contains(failedBatch.Body.String(), "update_batch_failed") {
+		t.Fatalf("failed batch did not stop rollout: %d %s", failedBatch.Code, failedBatch.Body.String())
 	}
 }
 

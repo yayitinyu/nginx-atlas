@@ -82,6 +82,30 @@ func TestUpdateResultWaitsForVersionAndDoesNotRedispatch(t *testing.T) {
 	}
 }
 
+func TestChecksumMismatchStopsUpdateRetries(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		message    string
+		wantStatus model.JobStatus
+	}{
+		{name: "trusted manifest mismatch", message: "controller checksum does not match the trusted release manifest", wantStatus: model.JobFailed},
+		{name: "download checksum mismatch", message: "release SHA-256 verification failed", wantStatus: model.JobFailed},
+		{name: "transient download failure", message: "download release returned HTTP 502", wantStatus: model.JobQueued},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			s, st, auth := updateTestController(t)
+			result := performJSON(t, s.Handler(), http.MethodPost, "/api/v1/agent/jobs/update/result", protocol.JobResultRequest{Success: false, Error: test.message}, auth)
+			if result.Code != http.StatusOK {
+				t.Fatalf("result: %d %s", result.Code, result.Body.String())
+			}
+			job := st.Snapshot().Jobs["update"]
+			if job.Status != test.wantStatus || job.Attempts != 1 {
+				t.Fatalf("job after first failure: %+v", job)
+			}
+		})
+	}
+}
+
 func TestUpdateConfirmationRequiresFreshStableReportsBeyondRollbackWindow(t *testing.T) {
 	s, st, _ := updateTestController(t)
 	state := st.Snapshot()

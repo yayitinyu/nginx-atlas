@@ -104,6 +104,9 @@ func (s *Server) runMaintenance() {
 				delete(state.Enrollments, id)
 			}
 		}
+		if err := s.requeueRecoverableWildcardSyncs(state); err != nil {
+			return err
+		}
 		for id, domain := range state.Domains {
 			if !domain.AutoRenew || domain.ACMEAccountID == "" || domain.DNSAccountID == "" {
 				continue

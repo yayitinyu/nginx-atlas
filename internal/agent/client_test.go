@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -38,6 +39,43 @@ func TestClientUnregisterUsesStoredNodeCredential(t *testing.T) {
 	}
 	if authorization != "AtlasNode node_1.secret_1" {
 		t.Fatalf("authorization = %q", authorization)
+	}
+}
+
+func TestClientControllerNetworkUsesSelectedAddressFamily(t *testing.T) {
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	server.Listener = listener
+	server.Start()
+	defer server.Close()
+
+	runner := &recordingCommandRunner{}
+	for _, test := range []struct {
+		network string
+		wantOK  bool
+	}{
+		{network: "tcp4", wantOK: true},
+		{network: "tcp6", wantOK: false},
+	} {
+		client, err := NewClient(ClientConfig{ServerURL: server.URL, ControllerNetwork: test.network, StatePath: filepath.Join(t.TempDir(), "state.json")}, NewExecutor(ExecutorConfig{}, runner), runner, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response, err := client.http.Get(server.URL)
+		if (err == nil) != test.wantOK {
+			t.Fatalf("network %s: response=%v error=%v", test.network, response, err)
+		}
+		if response != nil {
+			_ = response.Body.Close()
+		}
+	}
+	if _, err := NewClient(ClientConfig{ServerURL: server.URL, ControllerNetwork: "udp", StatePath: filepath.Join(t.TempDir(), "state.json")}, NewExecutor(ExecutorConfig{}, runner), runner, nil); err == nil {
+		t.Fatal("invalid controller network was accepted")
 	}
 }
 

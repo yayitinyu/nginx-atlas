@@ -25,13 +25,14 @@ import (
 const maxAgentResponseBytes = 8 << 20
 
 type ClientConfig struct {
-	ServerURL       string
-	NodeName        string
-	EnrollmentToken string
-	StatePath       string
-	CACertPath      string
-	PollInterval    time.Duration
-	Version         string
+	ServerURL         string
+	ControllerNetwork string
+	NodeName          string
+	EnrollmentToken   string
+	StatePath         string
+	CACertPath        string
+	PollInterval      time.Duration
+	Version           string
 }
 
 type Client struct {
@@ -72,6 +73,12 @@ func NewClient(config ClientConfig, executor *Executor, runner CommandRunner, lo
 		return nil, errors.New("server URL must use HTTPS; HTTP is allowed only for loopback development")
 	}
 	config.ServerURL = strings.TrimRight(parsed.String(), "/")
+	if config.ControllerNetwork == "" {
+		config.ControllerNetwork = "auto"
+	}
+	if config.ControllerNetwork != "auto" && config.ControllerNetwork != "tcp4" && config.ControllerNetwork != "tcp6" {
+		return nil, errors.New("controller network must be auto, tcp4, or tcp6")
+	}
 	if strings.TrimSpace(config.NodeName) == "" {
 		hostname, _ := os.Hostname()
 		config.NodeName = hostname
@@ -93,6 +100,15 @@ func NewClient(config ClientConfig, executor *Executor, runner CommandRunner, lo
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+	if config.ControllerNetwork != "auto" {
+		dialer := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
+		transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+			if network == "tcp" {
+				network = config.ControllerNetwork
+			}
+			return dialer.DialContext(ctx, network, address)
+		}
+	}
 	if config.CACertPath != "" {
 		pemData, err := os.ReadFile(config.CACertPath)
 		if err != nil {
@@ -124,6 +140,16 @@ func (c *Client) Run(ctx context.Context) error {
 		}
 	}
 	c.logger.Info("agent connected", "server", c.config.ServerURL, "node_id", c.state.NodeID)
+	confirmationCtx, stopConfirmation := context.WithCancel(ctx)
+	confirmationDone := make(chan struct{})
+	go func() {
+		defer close(confirmationDone)
+		c.runUpdateConfirmation(confirmationCtx)
+	}()
+	defer func() {
+		stopConfirmation()
+		<-confirmationDone
+	}()
 	for {
 		pollAfter, err := c.pollOnce(ctx)
 		if err != nil {
@@ -143,6 +169,23 @@ func (c *Client) Run(ctx context.Context) error {
 			timer.Stop()
 			return nil
 		case <-timer.C:
+		}
+	}
+}
+
+func (c *Client) runUpdateConfirmation(ctx context.Context) {
+	// A controller outage must not prevent a healthy updated agent from
+	// disarming its local rollback watchdog.
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for {
+		if err := c.confirmPendingUpdate(ctx); err != nil && ctx.Err() == nil {
+			c.logger.Warn("updated service health confirmation is pending", "error", err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
 		}
 	}
 }
@@ -187,9 +230,6 @@ func (c *Client) pollOnce(ctx context.Context) (time.Duration, error) {
 	}
 	if err := c.doJSON(ctx, http.MethodPost, "/api/v1/agent/poll", request, &response, true); err != nil {
 		return c.config.PollInterval, err
-	}
-	if err := c.confirmPendingUpdate(ctx); err != nil {
-		c.logger.Warn("updated service health confirmation is pending", "error", err)
 	}
 	reportAfter := time.Duration(response.ReportAfter) * time.Second
 	if reportAfter < 3*time.Second || reportAfter > 5*time.Minute {

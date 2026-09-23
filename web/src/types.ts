@@ -249,6 +249,9 @@ export interface UninstallCommand {
 export interface BulkNodeUpdateResult {
   queued: number
   skipped: number
+  skipped_nodes: { node_id: string; name: string; reason: 'current' | 'offline' | 'unhealthy' | 'unsupported_arch' | 'busy' }[]
+  deferred: number
+  phase: 'canary' | 'batch'
   jobs: JobRecord[]
   version: string
 }

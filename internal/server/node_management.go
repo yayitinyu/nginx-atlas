@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -13,6 +14,14 @@ import (
 )
 
 const nodeRemovedJobError = "node was removed before the task completed"
+
+var errUpdateBatchFailed = errors.New("failed updates need review")
+
+type skippedNodeUpdate struct {
+	NodeID string `json:"node_id"`
+	Name   string `json:"name"`
+	Reason string `json:"reason"`
+}
 
 func (s *Server) handleRenameNode(w http.ResponseWriter, r *http.Request) {
 	var request struct {
@@ -132,8 +141,38 @@ func (s *Server) handleUpdateAllNodesAtlas(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	jobs := make([]model.Job, 0)
-	skipped := 0
+	skipped := make([]skippedNodeUpdate, 0)
+	failedNodeNames := make([]string, 0)
+	deferred := 0
+	phase := "canary"
 	err = s.store.Update(func(state *model.State) error {
+		latestJobs, active := latestAtlasUpdateJobs(state, release.Version)
+		if active {
+			return errConflict
+		}
+		failed := make([]string, 0)
+		canarySucceeded := false
+		for nodeID, job := range latestJobs {
+			node, exists := state.Nodes[nodeID]
+			if !exists || node.Status == model.NodeRevoked {
+				continue
+			}
+			if job.Status == model.JobSucceeded && node.AgentVersion == release.Version {
+				canarySucceeded = true
+			} else if job.Status == model.JobFailed && node.AgentVersion != release.Version {
+				failed = append(failed, node.Name)
+			}
+		}
+		if len(failed) > 0 {
+			sort.Strings(failed)
+			failedNodeNames = failed
+			return errUpdateBatchFailed
+		}
+		batchLimit := 1
+		if canarySucceeded {
+			batchLimit = 5
+			phase = "batch"
+		}
 		nodeIDs := make([]string, 0, len(state.Nodes))
 		for nodeID, node := range state.Nodes {
 			if node.Status != model.NodeRevoked {
@@ -149,13 +188,32 @@ func (s *Server) handleUpdateAllNodesAtlas(w http.ResponseWriter, r *http.Reques
 		})
 		for _, nodeID := range nodeIDs {
 			node := state.Nodes[nodeID]
+			skip := func(reason string) {
+				skipped = append(skipped, skippedNodeUpdate{NodeID: nodeID, Name: node.Name, Reason: reason})
+			}
 			if strings.TrimSpace(node.AgentVersion) != "" && node.AgentVersion != "dev" && !versionUpdateAvailable(node.AgentVersion, release.Version) {
-				skipped++
+				skip("current")
+				continue
+			}
+			if node.Status != model.NodeOnline || node.LastSeenAt == nil || time.Since(*node.LastSeenAt) > s.nodeOfflineAfter(*state) {
+				skip("offline")
+				continue
+			}
+			if !node.NginxHealthy {
+				skip("unhealthy")
 				continue
 			}
 			asset, supported := release.Assets[normalizeNodeArch(node.Arch)]
-			if !supported || hasActiveNodeJob(state, nodeID, protocol.JobUpdateAtlas) {
-				skipped++
+			if !supported {
+				skip("unsupported_arch")
+				continue
+			}
+			if hasAnyActiveNodeJob(state, nodeID) {
+				skip("busy")
+				continue
+			}
+			if len(jobs) >= batchLimit {
+				deferred++
 				continue
 			}
 			job, enqueueErr := enqueueJob(state, nodeID, "", protocol.JobUpdateAtlas, protocol.UpdateAtlasPayload{
@@ -169,6 +227,14 @@ func (s *Server) handleUpdateAllNodesAtlas(w http.ResponseWriter, r *http.Reques
 		}
 		return nil
 	})
+	if errors.Is(err, errConflict) {
+		writeError(w, http.StatusConflict, "请等待当前节点更新批次完成", "update_batch_running", nil)
+		return
+	}
+	if errors.Is(err, errUpdateBatchFailed) {
+		writeError(w, http.StatusConflict, "上一批更新失败："+strings.Join(failedNodeNames, "、")+"。请先检查或重试", "update_batch_failed", map[string]string{"nodes": strings.Join(failedNodeNames, ",")})
+		return
+	}
 	if err != nil {
 		wrapStoreError(w, err)
 		return
@@ -177,7 +243,38 @@ func (s *Server) handleUpdateAllNodesAtlas(w http.ResponseWriter, r *http.Reques
 	if len(jobs) > 0 {
 		status = http.StatusAccepted
 	}
-	writeJSON(w, status, map[string]any{"queued": len(jobs), "skipped": skipped, "jobs": jobs, "version": release.Version})
+	writeJSON(w, status, map[string]any{"queued": len(jobs), "skipped": len(skipped), "skipped_nodes": skipped, "deferred": deferred, "phase": phase, "jobs": jobs, "version": release.Version})
+}
+
+func latestAtlasUpdateJobs(state *model.State, version string) (map[string]model.Job, bool) {
+	latest := make(map[string]model.Job)
+	active := false
+	for _, job := range state.Jobs {
+		if job.Type != protocol.JobUpdateAtlas {
+			continue
+		}
+		if job.Status == model.JobQueued || job.Status == model.JobRunning {
+			active = true
+		}
+		var payload protocol.UpdateAtlasPayload
+		if json.Unmarshal(job.Payload, &payload) != nil || strings.TrimPrefix(payload.ExpectedVersion, "v") != version {
+			continue
+		}
+		previous, ok := latest[job.NodeID]
+		if !ok || job.CreatedAt.After(previous.CreatedAt) || (job.CreatedAt.Equal(previous.CreatedAt) && job.ID > previous.ID) {
+			latest[job.NodeID] = job
+		}
+	}
+	return latest, active
+}
+
+func hasAnyActiveNodeJob(state *model.State, nodeID string) bool {
+	for _, job := range state.Jobs {
+		if job.NodeID == nodeID && (job.Status == model.JobQueued || job.Status == model.JobRunning) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) handleUpdateNodeSystem(w http.ResponseWriter, r *http.Request) {
