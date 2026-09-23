@@ -417,12 +417,15 @@ func TestUpdateAllNodesQueuesOnlyEligibleNodes(t *testing.T) {
 	}
 	now := time.Now().UTC()
 	if err := stateStore.Update(func(state *model.State) error {
+		state.Settings.NodePollSeconds = 300
 		for index := 1; index <= 6; index++ {
 			id := fmt.Sprintf("old_%d", index)
 			state.Nodes[id] = model.Node{ID: id, Name: fmt.Sprintf("Old %d", index), Status: model.NodeOnline, Arch: "amd64", AgentVersion: "1.0.0", NginxHealthy: true, LastSeenAt: &now, CreatedAt: now}
 		}
 		state.Nodes["current"] = model.Node{ID: "current", Name: "Current", Status: model.NodeOnline, Arch: "amd64", AgentVersion: "9.9.9", CreatedAt: now}
 		state.Nodes["offline"] = model.Node{ID: "offline", Name: "Offline", Status: model.NodeOffline, Arch: "amd64", AgentVersion: "1.0.0", CreatedAt: now}
+		staleAt := now.Add(-10 * time.Minute)
+		state.Nodes["stale"] = model.Node{ID: "stale", Name: "Stale", Status: model.NodeOnline, Arch: "amd64", AgentVersion: "1.0.0", NginxHealthy: true, LastSeenAt: &staleAt, CreatedAt: now}
 		state.Nodes["unhealthy"] = model.Node{ID: "unhealthy", Name: "Unhealthy", Status: model.NodeOnline, Arch: "amd64", AgentVersion: "1.0.0", LastSeenAt: &now, CreatedAt: now}
 		state.Nodes["unsupported"] = model.Node{ID: "unsupported", Name: "Unsupported", Status: model.NodeOnline, Arch: "riscv64", AgentVersion: "1.0.0", NginxHealthy: true, LastSeenAt: &now, CreatedAt: now}
 		return nil
@@ -443,12 +446,19 @@ func TestUpdateAllNodesQueuesOnlyEligibleNodes(t *testing.T) {
 		Jobs         []model.Job         `json:"jobs"`
 	}
 	decodeRecorder(t, queued, &result)
-	if result.Queued != 1 || result.Skipped != 4 || result.Deferred != 5 || result.Phase != "canary" || len(result.Jobs) != 1 || result.Jobs[0].NodeID != "old_1" {
+	if result.Queued != 1 || result.Skipped != 5 || result.Deferred != 5 || result.Phase != "canary" || len(result.Jobs) != 1 || result.Jobs[0].NodeID != "old_1" {
 		t.Fatalf("unexpected update-all result: %+v", result)
 	}
 	reasons := make(map[string]bool)
+	staleSkipped := false
 	for _, skipped := range result.SkippedNodes {
 		reasons[skipped.Reason] = true
+		if skipped.NodeID == "stale" {
+			staleSkipped = skipped.Reason == "offline"
+		}
+	}
+	if !staleSkipped {
+		t.Fatalf("stale online node was not skipped as offline: %+v", result.SkippedNodes)
 	}
 	if !reasons["current"] || !reasons["offline"] || !reasons["unhealthy"] || !reasons["unsupported_arch"] {
 		t.Fatalf("missing skip reasons: %+v", result.SkippedNodes)

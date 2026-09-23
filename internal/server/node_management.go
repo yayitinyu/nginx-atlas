@@ -15,6 +15,8 @@ import (
 
 const nodeRemovedJobError = "node was removed before the task completed"
 
+const minimumUpdateCandidateFreshness = 90 * time.Second
+
 var errUpdateBatchFailed = errors.New("failed updates need review")
 
 type skippedNodeUpdate struct {
@@ -173,6 +175,15 @@ func (s *Server) handleUpdateAllNodesAtlas(w http.ResponseWriter, r *http.Reques
 			batchLimit = 5
 			phase = "batch"
 		}
+		// Node status may stay online for 15 minutes when report frequency is 300s.
+		// Updates need a recent poll so a disconnected agent does not stall a batch.
+		candidateFreshness := 3 * s.config.PollAfter
+		if candidateFreshness < minimumUpdateCandidateFreshness {
+			candidateFreshness = minimumUpdateCandidateFreshness
+		}
+		if offlineAfter := s.nodeOfflineAfter(*state); candidateFreshness > offlineAfter {
+			candidateFreshness = offlineAfter
+		}
 		nodeIDs := make([]string, 0, len(state.Nodes))
 		for nodeID, node := range state.Nodes {
 			if node.Status != model.NodeRevoked {
@@ -195,7 +206,7 @@ func (s *Server) handleUpdateAllNodesAtlas(w http.ResponseWriter, r *http.Reques
 				skip("current")
 				continue
 			}
-			if node.Status != model.NodeOnline || node.LastSeenAt == nil || time.Since(*node.LastSeenAt) > s.nodeOfflineAfter(*state) {
+			if node.Status != model.NodeOnline || node.LastSeenAt == nil || time.Since(*node.LastSeenAt) > candidateFreshness {
 				skip("offline")
 				continue
 			}
