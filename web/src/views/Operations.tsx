@@ -101,7 +101,7 @@ export function CertificatesPage({ certificates, nodes, onAdd, onRenew, onToggle
   )
   const expiring = certificates.filter((certificate) => certificate.status !== 'valid').length
   const autoRenew = certificates.filter((certificate) => certificate.auto_renew).length
-  const syncedNodes = new Set(certificates.flatMap((certificate) => certificate.deployed_node_ids)).size
+  const syncedNodes = new Set(certificates.flatMap((certificate) => certificate.deployed_node_ids ?? [])).size
   useEffect(() => {
     const available = new Set(certificates.map((certificate) => certificate.id))
     setSelected((current) => new Set([...current].filter((id) => available.has(id))))
@@ -214,7 +214,7 @@ export function CertificatesPage({ certificates, nodes, onAdd, onRenew, onToggle
                 </button>
                 <span>{toggling ? t('common.saving') : certificate.auto_renew ? t('certificate.enabled') : t('certificate.disabled')}</span>
               </span>
-              <span className="deployed-count"><strong>{certificate.deployed_node_ids.length}</strong>/{nodes.length}</span>
+              <span className="deployed-count"><strong>{certificate.deployed_node_ids?.length ?? 0}</strong>/{nodes.length}</span>
               <span className="certificate-actions">
                 <button type="button" className="certificate-action-edit" onClick={() => onEdit(certificate)} title={t('common.edit')}>
                   <Icon name="edit" size={15} /><span>{t('common.edit')}</span>

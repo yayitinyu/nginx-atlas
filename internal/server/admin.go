@@ -2498,11 +2498,11 @@ func makeCertificateView(certificate model.Certificate, now time.Time) certifica
 	return certificateView{
 		ID: certificate.ID, Domain: certificate.Domain, Source: certificate.Source,
 		Fingerprint: certificate.FingerprintSHA256, Issuer: certificate.Issuer, SerialNumber: certificate.SerialNumber,
-		NotBefore: certificate.NotBefore, NotAfter: certificate.NotAfter, DNSNames: certificate.DNSNames,
-		RequestedDNSNames: certificate.RequestedDNSNames,
+		NotBefore: certificate.NotBefore, NotAfter: certificate.NotAfter, DNSNames: append([]string{}, certificate.DNSNames...),
+		RequestedDNSNames: append([]string{}, certificate.RequestedDNSNames...),
 		AutoRenew:         certificate.AutoRenew, RenewBeforeDays: normalizeRenewBeforeDays(certificate.RenewBeforeDays),
 		ACMEAccountID: certificate.ACMEAccountID, DNSAccountID: certificate.DNSAccountID,
-		IssuerNodeID: certificate.IssuerNodeID, DeployedNodeIDs: certificate.DeployedNodeIDs,
+		IssuerNodeID: certificate.IssuerNodeID, DeployedNodeIDs: append([]string{}, certificate.DeployedNodeIDs...),
 		DaysRemaining: days, Status: certificateState(certificate.NotAfter, now), CreatedAt: certificate.CreatedAt, UpdatedAt: certificate.UpdatedAt,
 	}
 }
