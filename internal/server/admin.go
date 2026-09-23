@@ -1615,7 +1615,7 @@ func (s *Server) handleUploadCertificate(w http.ResponseWriter, r *http.Request)
 	}
 	domain := strings.ToLower(strings.TrimSpace(r.FormValue("domain")))
 	if domain != "" {
-		if _, err := nginxconfig.ConfigFileName(domain); err != nil {
+		if _, err := normalizeCertificateNames(domain, nil); err != nil {
 			writeError(w, http.StatusBadRequest, "域名无效", "invalid_domain", nil)
 			return
 		}

@@ -3,6 +3,8 @@ package server
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,7 +18,13 @@ import (
 	"time"
 )
 
-const maxReleaseResponse = 2 << 20
+const (
+	maxReleaseResponse   = 2 << 20
+	maxReleaseAssetBytes = 64 << 20
+	releaseCacheTTL      = 15 * time.Minute
+)
+
+var errReleaseAssetNotFound = errors.New("release asset not found")
 
 var (
 	repositoryPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
@@ -44,6 +52,96 @@ type githubRelease struct {
 		Name               string `json:"name"`
 		BrowserDownloadURL string `json:"browser_download_url"`
 	} `json:"assets"`
+}
+
+func (s *Server) handleReleaseDownload(w http.ResponseWriter, r *http.Request) {
+	body, err := s.cachedReleaseDownload(r.PathValue("name"))
+	if errors.Is(err, errReleaseAssetNotFound) {
+		http.NotFound(w, r)
+		return
+	}
+	if err != nil {
+		s.logger.Warn("release download failed", "name", r.PathValue("name"), "error", err)
+		http.Error(w, "release asset unavailable", http.StatusBadGateway)
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Cache-Control", "public, max-age=300")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	controller := http.NewResponseController(w)
+	_ = controller.SetWriteDeadline(time.Now().Add(3 * time.Minute))
+	_, _ = w.Write(body)
+}
+
+func logicalReleaseName(name string) (arch string, checksums bool, ok bool) {
+	switch name {
+	case "checksums.txt":
+		return "", true, true
+	case "nginx-atlas_linux_amd64.tar.gz":
+		return "amd64", false, true
+	case "nginx-atlas_linux_arm64.tar.gz":
+		return "arm64", false, true
+	default:
+		return "", false, false
+	}
+}
+
+func renderLogicalChecksums(release releaseBundle) []byte {
+	var builder strings.Builder
+	for _, arch := range []string{"amd64", "arm64"} {
+		asset, ok := release.Assets[arch]
+		if !ok || !sha256Pattern.MatchString(asset.SHA256) {
+			continue
+		}
+		fmt.Fprintf(&builder, "%s  nginx-atlas_linux_%s.tar.gz\n", strings.ToLower(asset.SHA256), arch)
+	}
+	return []byte(builder.String())
+}
+
+func (s *Server) cachedReleaseDownload(name string) ([]byte, error) {
+	arch, checksums, ok := logicalReleaseName(name)
+	if !ok {
+		return nil, errReleaseAssetNotFound
+	}
+	s.releaseCacheMu.Lock()
+	defer s.releaseCacheMu.Unlock()
+	if s.releaseFiles != nil && time.Since(s.releaseCachedAt) < releaseCacheTTL {
+		if body, found := s.releaseFiles[name]; found {
+			return append([]byte(nil), body...), nil
+		}
+	} else {
+		s.releaseFiles = map[string][]byte{}
+		s.releaseCacheVersion = ""
+	}
+	fetchCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	release, err := s.fetchLatestRelease(fetchCtx)
+	if err != nil {
+		return nil, err
+	}
+	if s.releaseCacheVersion != release.Version {
+		s.releaseFiles = map[string][]byte{}
+		s.releaseCacheVersion = release.Version
+	}
+	s.releaseFiles["checksums.txt"] = renderLogicalChecksums(release)
+	s.releaseCachedAt = time.Now()
+	if checksums {
+		return append([]byte(nil), s.releaseFiles["checksums.txt"]...), nil
+	}
+	asset, found := release.Assets[arch]
+	if !found {
+		return nil, errReleaseAssetNotFound
+	}
+	body, err := fetchLimited(fetchCtx, asset.DownloadURL, maxReleaseAssetBytes, 2*time.Minute)
+	if err != nil {
+		return nil, err
+	}
+	sum := sha256.Sum256(body)
+	if hex.EncodeToString(sum[:]) != strings.ToLower(asset.SHA256) {
+		return nil, errors.New("release asset checksum mismatch")
+	}
+	s.releaseFiles[name] = body
+	return append([]byte(nil), body...), nil
 }
 
 func (s *Server) handleReleaseInfo(w http.ResponseWriter, r *http.Request) {
@@ -114,6 +212,33 @@ func (s *Server) fetchLatestRelease(ctx context.Context) (releaseBundle, error) 
 		return releaseBundle{}, errors.New("latest release has no verified Linux asset")
 	}
 	return result, nil
+}
+
+func fetchLimited(ctx context.Context, source string, limit int64, timeout time.Duration) ([]byte, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, source, nil)
+	if err != nil {
+		return nil, err
+	}
+	request.Header.Set("Accept", "*/*")
+	request.Header.Set("User-Agent", "nginx-atlas-controller")
+	client := &http.Client{Timeout: timeout}
+	response, err := client.Do(request)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
+		return nil, fmt.Errorf("upstream returned HTTP %d", response.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) > limit {
+		return nil, errors.New("upstream response is too large")
+	}
+	return body, nil
 }
 
 func fetchJSON(ctx context.Context, source string, target any) error {

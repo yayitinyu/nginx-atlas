@@ -49,36 +49,40 @@ type Config struct {
 }
 
 type Server struct {
-	config           Config
-	store            *store.Store
-	box              *securebox.Box
-	logger           *slog.Logger
-	adminTokenHash   [32]byte
-	localTokenHash   [32]byte
-	localTokenReady  bool
-	proxyToken       string
-	sessionMu        sync.RWMutex
-	adminSessions    map[[32]byte]time.Time
-	eventTicketMu    sync.Mutex
-	eventTickets     map[[32]byte]time.Time
-	eventPending     chan struct{}
-	eventClients     chan struct{}
-	eventPendingMu   sync.Mutex
-	eventPendingIP   map[string]int
-	nodePollMu       sync.Mutex
-	nodeNextPoll     map[string]time.Time
-	nodePollNow      func() time.Time
-	loginMu          sync.Mutex
-	loginAttempts    map[string]loginAttemptWindow
-	loginCleanupAt   time.Time
-	passwordTokens   float64
-	passwordTokenAt  time.Time
-	loginWork        chan struct{}
-	passwordWork     chan struct{}
-	loginNow         func() time.Time
-	httpClient       *http.Client
-	certificateRoots *x509.CertPool
-	handler          http.Handler
+	config              Config
+	store               *store.Store
+	box                 *securebox.Box
+	logger              *slog.Logger
+	adminTokenHash      [32]byte
+	localTokenHash      [32]byte
+	localTokenReady     bool
+	proxyToken          string
+	sessionMu           sync.RWMutex
+	adminSessions       map[[32]byte]time.Time
+	eventTicketMu       sync.Mutex
+	eventTickets        map[[32]byte]time.Time
+	eventPending        chan struct{}
+	eventClients        chan struct{}
+	eventPendingMu      sync.Mutex
+	eventPendingIP      map[string]int
+	nodePollMu          sync.Mutex
+	nodeNextPoll        map[string]time.Time
+	nodePollNow         func() time.Time
+	loginMu             sync.Mutex
+	loginAttempts       map[string]loginAttemptWindow
+	loginCleanupAt      time.Time
+	passwordTokens      float64
+	passwordTokenAt     time.Time
+	loginWork           chan struct{}
+	passwordWork        chan struct{}
+	loginNow            func() time.Time
+	httpClient          *http.Client
+	certificateRoots    *x509.CertPool
+	handler             http.Handler
+	releaseCacheMu      sync.Mutex
+	releaseCachedAt     time.Time
+	releaseCacheVersion string
+	releaseFiles        map[string][]byte
 }
 
 func New(config Config, stateStore *store.Store, box *securebox.Box, logger *slog.Logger) (*Server, error) {
@@ -181,6 +185,7 @@ func (s *Server) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	mux.HandleFunc("GET /install.sh", s.handleInstaller)
+	mux.HandleFunc("GET /dl/{name}", s.handleReleaseDownload)
 	mux.HandleFunc("POST /api/v1/agent/enroll", s.handleAgentEnroll)
 	mux.Handle("POST /api/v1/agent/poll", s.nodeAuth(http.HandlerFunc(s.handleAgentPoll)))
 	mux.Handle("POST /api/v1/agent/jobs/{id}/result", s.nodeAuth(http.HandlerFunc(s.handleAgentJobResult)))

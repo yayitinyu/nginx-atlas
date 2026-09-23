@@ -326,6 +326,72 @@ func TestApplyDomainUsesSharedWildcardCertificateDir(t *testing.T) {
 	}
 }
 
+func TestSyncWildcardCertificateWritesApexDirectory(t *testing.T) {
+	root := t.TempDir()
+	sslRoot := filepath.Join(root, "ssl")
+	executor := NewExecutor(ExecutorConfig{
+		NginxBinary: "nginx", Systemctl: "systemctl", NginxConfigDir: filepath.Join(root, "nginx"),
+		SSLRoot: sslRoot, DataRoot: filepath.Join(root, "data"),
+	}, alwaysOKRunner{})
+	cert, key := mustTestCertificatePEM(t, "*.example.com", "example.com")
+	payload, err := json.Marshal(protocol.SyncCertificatePayload{
+		Domain: "*.example.com", ReloadNginx: true,
+		Certificate: protocol.CertificateBundle{FullchainPEM: string(cert), PrivateKeyPEM: string(key)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := executor.Execute(context.Background(), protocol.WireJob{ID: "job_sync", Type: protocol.JobSyncCertificate, Payload: payload})
+	if !result.Success {
+		t.Fatalf("wildcard sync failed: %s", result.Error)
+	}
+	if _, err := os.Stat(filepath.Join(sslRoot, "example.com", "fullchain.pem")); err != nil {
+		t.Fatalf("expected apex certificate directory: %v", err)
+	}
+	entries, err := os.ReadDir(sslRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.Contains(entry.Name(), "*") {
+			t.Fatalf("wildcard directory should not be created: %s", entry.Name())
+		}
+	}
+
+	onlyCert, onlyKey := mustTestCertificatePEM(t, "*.only.example.com")
+	onlyPayload, err := json.Marshal(protocol.SyncCertificatePayload{
+		Domain:      "*.only.example.com",
+		Certificate: protocol.CertificateBundle{FullchainPEM: string(onlyCert), PrivateKeyPEM: string(onlyKey)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	onlyResult := executor.Execute(context.Background(), protocol.WireJob{ID: "job_only", Type: protocol.JobSyncCertificate, Payload: onlyPayload})
+	if !onlyResult.Success {
+		t.Fatalf("wildcard-only sync failed: %s", onlyResult.Error)
+	}
+	found := false
+	for _, meta := range executor.InventoryCertificates() {
+		if meta.Domain == "*.only.example.com" && meta.Error == "" && meta.KeyMatches {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("wildcard-only certificate was not inventoried: %+v", executor.InventoryCertificates())
+	}
+}
+
+func TestIssueCertificateAcceptsWildcardPrimaryName(t *testing.T) {
+	executor := NewExecutor(ExecutorConfig{SSLRoot: t.TempDir(), DataRoot: t.TempDir()}, alwaysOKRunner{})
+	_, err := executor.issueCertificate(context.Background(), protocol.IssueCertificatePayload{
+		Domain: "*.example.com", Email: "admin@example.com",
+		DirectoryURL: "https://acme.example.com/directory", DNSProvider: "manual",
+	})
+	if err == nil || strings.Contains(err.Error(), "invalid certificate domain") {
+		t.Fatalf("wildcard primary was rejected before issuance: %v", err)
+	}
+}
+
 func TestCertificatePathsRejectTraversalAndSymlinkEscapes(t *testing.T) {
 	root := t.TempDir()
 	sslRoot := filepath.Join(root, "ssl")

@@ -39,6 +39,23 @@ func TestValidateRejectsMismatchedAndExpiredKeys(t *testing.T) {
 	}
 }
 
+func TestValidateAcceptsWildcardIdentity(t *testing.T) {
+	now := time.Now().UTC()
+	certPEM, keyPEM := makeCertificate(t, "*.example.com", now.Add(-time.Hour), now.Add(48*time.Hour), nil)
+	if _, err := Validate(certPEM, keyPEM, "*.example.com", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Validate(certPEM, keyPEM, "api.example.com", now); err != nil {
+		t.Fatalf("wildcard certificate should still cover a concrete hostname: %v", err)
+	}
+	if _, err := Validate(certPEM, keyPEM, "example.com", now); err == nil {
+		t.Fatal("wildcard identity must not be treated as covering the apex")
+	}
+	if _, err := Validate(certPEM, keyPEM, "*.other.example", now); err == nil {
+		t.Fatal("expected a different wildcard name to be rejected")
+	}
+}
+
 func TestCoversHostnameUsesX509WildcardRules(t *testing.T) {
 	t.Parallel()
 

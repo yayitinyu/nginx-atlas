@@ -5,8 +5,10 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
@@ -436,6 +438,66 @@ func TestUpdateAllNodesQueuesOnlyEligibleNodes(t *testing.T) {
 	if result.Queued != 1 || result.Skipped != 2 || len(result.Jobs) != 1 || result.Jobs[0].NodeID != "old" {
 		t.Fatalf("unexpected update-all result: %+v", result)
 	}
+}
+
+func TestReleaseDownloadServesVerifiedLogicalAsset(t *testing.T) {
+	payload := []byte("not-a-real-tar")
+	digest := hex.EncodeToString(sha256Sum(payload))
+	var releaseServer *httptest.Server
+	releaseServer = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/owner/repo/releases/latest":
+			writeJSON(w, http.StatusOK, map[string]any{
+				"tag_name": "v9.9.9", "html_url": releaseServer.URL, "published_at": time.Now().UTC(),
+				"assets": []map[string]string{
+					{"name": "nginx-atlas_9.9.9_linux_amd64.tar.gz", "browser_download_url": releaseServer.URL + "/asset"},
+					{"name": "checksums.txt", "browser_download_url": releaseServer.URL + "/checksums.txt"},
+				},
+			})
+		case "/checksums.txt":
+			_, _ = fmt.Fprintf(w, "%s  nginx-atlas_9.9.9_linux_amd64.tar.gz\n", digest)
+		case "/asset":
+			_, _ = w.Write(payload)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer releaseServer.Close()
+
+	stateStore, err := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	box, _ := securebox.New(bytes.Repeat([]byte{0x41}, 32))
+	controller, err := New(Config{AdminToken: strings.Repeat("d", 32), Repository: "owner/repo", ReleaseAPIURL: releaseServer.URL}, stateStore, box, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	asset := httptest.NewRecorder()
+	controller.Handler().ServeHTTP(asset, httptest.NewRequest(http.MethodGet, "/dl/nginx-atlas_linux_amd64.tar.gz", nil))
+	if asset.Code != http.StatusOK || !bytes.Equal(asset.Body.Bytes(), payload) {
+		t.Fatalf("asset download = %d %q", asset.Code, asset.Body.Bytes())
+	}
+	sums := httptest.NewRecorder()
+	controller.Handler().ServeHTTP(sums, httptest.NewRequest(http.MethodGet, "/dl/checksums.txt", nil))
+	if sums.Code != http.StatusOK || !strings.Contains(sums.Body.String(), digest+"  nginx-atlas_linux_amd64.tar.gz") {
+		t.Fatalf("logical checksums = %d %q", sums.Code, sums.Body.String())
+	}
+	missing := httptest.NewRecorder()
+	controller.Handler().ServeHTTP(missing, httptest.NewRequest(http.MethodGet, "/dl/nginx-atlas_linux_arm64.tar.gz", nil))
+	if missing.Code != http.StatusNotFound {
+		t.Fatalf("missing arch returned %d", missing.Code)
+	}
+	rejected := httptest.NewRecorder()
+	controller.Handler().ServeHTTP(rejected, httptest.NewRequest(http.MethodGet, "/dl/lego.tar.gz", nil))
+	if rejected.Code != http.StatusNotFound {
+		t.Fatalf("unexpected download name returned %d", rejected.Code)
+	}
+}
+
+func sha256Sum(data []byte) []byte {
+	sum := sha256.Sum256(data)
+	return sum[:]
 }
 
 func TestMaintenanceFailsAbandonedQueueWithoutInterruptingBusyNode(t *testing.T) {

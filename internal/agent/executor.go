@@ -347,7 +347,7 @@ func (e *Executor) issueCertificate(ctx context.Context, payload protocol.IssueC
 		return protocol.JobResultRequest{}, errors.New("certificate domain is missing")
 	}
 	domain := domains[0]
-	if _, err := nginxconfig.ConfigFileName(domain); err != nil {
+	if err := validateCertificateName(domain); err != nil {
 		return protocol.JobResultRequest{}, fmt.Errorf("invalid certificate domain: %w", err)
 	}
 	if !providerPattern.MatchString(payload.DNSProvider) || payload.DNSProvider == "manual" || payload.DNSProvider == "exec" {
@@ -423,7 +423,7 @@ func (e *Executor) issueCertificate(ctx context.Context, payload protocol.IssueC
 
 func (e *Executor) captureCertificate(payload protocol.CaptureCertificatePayload) (protocol.JobResultRequest, error) {
 	domain := strings.ToLower(strings.TrimSpace(payload.Domain))
-	if _, err := nginxconfig.ConfigFileName(domain); err != nil {
+	if err := validateCertificateName(domain); err != nil {
 		return protocol.JobResultRequest{}, fmt.Errorf("invalid certificate domain: %w", err)
 	}
 	bundle, err := e.readAndValidateCertificate(domain)
@@ -501,9 +501,16 @@ func (e *Executor) InventoryCertificates() []model.CertificateMeta {
 		}
 		info, validateErr := certutil.Validate(fullchain, privateKey, domain, e.now())
 		if validateErr != nil {
-			meta.Error = validateErr.Error()
-			result = append(result, meta)
-			continue
+			// A wildcard-only certificate is stored under its apex directory.
+			if wildInfo, wildErr := certutil.Validate(fullchain, privateKey, "*."+domain, e.now()); wildErr == nil {
+				info = wildInfo
+				domain = "*." + domain
+				meta.Domain = domain
+			} else {
+				meta.Error = validateErr.Error()
+				result = append(result, meta)
+				continue
+			}
 		}
 		meta.FingerprintSHA256 = info.FingerprintSHA256
 		meta.Issuer = info.Issuer
@@ -912,9 +919,26 @@ func (e *Executor) ensureLocalCertificate(domain, sourceDir string) error {
 	return nil
 }
 
-func (e *Executor) certificateDir(domain string) (string, error) {
+// certificateStorageName maps a certificate identity onto a directory under
+// the SSL root. Wildcard identities (*.example.com) use the apex directory,
+// matching certificates that were issued with the apex as their primary name.
+func certificateStorageName(domain string) (string, error) {
 	domain = strings.ToLower(strings.TrimSpace(domain))
-	if _, err := nginxconfig.ConfigFileName(domain); err != nil {
+	storage := domain
+	if strings.HasPrefix(domain, "*.") {
+		storage = strings.TrimPrefix(domain, "*.")
+	} else if strings.Contains(domain, "*") {
+		return "", fmt.Errorf("invalid wildcard certificate name %q", domain)
+	}
+	if _, err := nginxconfig.ConfigFileName(storage); err != nil {
+		return "", err
+	}
+	return storage, nil
+}
+
+func (e *Executor) certificateDir(domain string) (string, error) {
+	domain, err := certificateStorageName(domain)
+	if err != nil {
 		return "", err
 	}
 	root, err := filepath.Abs(filepath.Clean(e.config.SSLRoot))

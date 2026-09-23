@@ -428,7 +428,7 @@ func (s *Server) panelAccess(next http.Handler) http.Handler {
 }
 
 func panelAccessExempt(path string) bool {
-	return path == "/healthz" || path == "/install.sh" || strings.HasPrefix(path, "/api/v1/agent/") || strings.HasPrefix(path, "/api/v1/local/")
+	return path == "/healthz" || path == "/install.sh" || strings.HasPrefix(path, "/dl/") || strings.HasPrefix(path, "/api/v1/agent/") || strings.HasPrefix(path, "/api/v1/local/")
 }
 
 func (s *Server) clientIP(r *http.Request) string {

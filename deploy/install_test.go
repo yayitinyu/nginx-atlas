@@ -23,6 +23,12 @@ func TestInstallerProtectsLocalControlPlaneAndWebSocketProxy(t *testing.T) {
 		"include $PROXY_HEADER_CONFIG;",
 		"ATLAS_PROXY_HEADER_INCLUDE=",
 		"--token-stdin",
+		"/dl/${asset_name}",
+		"nginx-atlas_linux_${arch}.tar.gz",
+		"--max-time",
+		"主控下载失败，改为从 GitHub 下载",
+		"https://github.seiyuu.page",
+		"GitHub 代理下载失败，改为直连",
 	} {
 		if !strings.Contains(script, required) {
 			t.Errorf("installer is missing %q", required)

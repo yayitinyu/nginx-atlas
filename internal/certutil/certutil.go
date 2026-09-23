@@ -50,8 +50,8 @@ func Validate(fullchainPEM, privateKeyPEM []byte, domain string, now time.Time) 
 	}
 	domain = strings.TrimSpace(strings.ToLower(domain))
 	if domain != "" {
-		if err := leaf.VerifyHostname(domain); err != nil {
-			return Info{}, fmt.Errorf("certificate does not cover %q: %w", domain, err)
+		if err := certificateCoversName(leaf, domain); err != nil {
+			return Info{}, err
 		}
 	}
 	fingerprint := sha256.Sum256(leaf.Raw)
@@ -95,6 +95,52 @@ func VerifyTrustedChain(fullchainPEM []byte, domain string, now time.Time, roots
 		return fmt.Errorf("certificate chain is not trusted: %w", err)
 	}
 	return nil
+}
+
+// certificateCoversName accepts either a concrete hostname or a wildcard
+// identity such as *.example.com. Go's VerifyHostname rejects a wildcard as
+// the name being checked, so a wildcard identity is matched against SANs.
+func certificateCoversName(leaf *x509.Certificate, domain string) error {
+	if strings.HasPrefix(domain, "*.") {
+		if !validWildcardIdentity(domain) {
+			return fmt.Errorf("invalid wildcard name %q", domain)
+		}
+		for _, name := range leaf.DNSNames {
+			if strings.EqualFold(strings.TrimSpace(name), domain) {
+				return nil
+			}
+		}
+		return fmt.Errorf("certificate does not contain %q", domain)
+	}
+	if err := leaf.VerifyHostname(domain); err != nil {
+		return fmt.Errorf("certificate does not cover %q: %w", domain, err)
+	}
+	return nil
+}
+
+func validWildcardIdentity(domain string) bool {
+	rest, ok := strings.CutPrefix(domain, "*.")
+	if !ok || rest == "" || strings.Contains(rest, "*") {
+		return false
+	}
+	labels := strings.Split(rest, ".")
+	if len(labels) < 2 {
+		return false
+	}
+	for _, label := range labels {
+		if len(label) == 0 || len(label) > 63 {
+			return false
+		}
+		for index, char := range label {
+			switch {
+			case char >= 'a' && char <= 'z', char >= '0' && char <= '9':
+			case char == '-' && index > 0 && index < len(label)-1:
+			default:
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func parseCertificates(data []byte) ([]*x509.Certificate, error) {

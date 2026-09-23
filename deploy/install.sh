@@ -23,6 +23,7 @@ BINARY_FILE=""
 BINARY_URL="${ATLAS_BINARY_URL:-}"
 BINARY_SHA256="${ATLAS_BINARY_SHA256:-}"
 REPOSITORY="${ATLAS_REPO:-$DEFAULT_REPOSITORY}"
+GITHUB_PROXY="${ATLAS_GITHUB_PROXY-https://github.seiyuu.page}"
 SKIP_LEGO="false"
 PURGE_STATE="false"
 FORCE_LOCAL="false"
@@ -56,6 +57,9 @@ Options:
   --force-local            With uninstall-agent: remove local state even when the
                            controller was already revoked or is unavailable.
   --token-stdin            Read the one-time enrollment token from standard input.
+
+GitHub release files are downloaded through https://github.seiyuu.page first.
+Set ATLAS_GITHUB_PROXY empty to fetch those files directly from GitHub.
 
 The server mode also installs a local node agent. Existing state, secrets, and
 service configuration are preserved on reruns.
@@ -123,6 +127,9 @@ validate_args() {
     die "--purge-state 仅可与 uninstall-server 一起使用。"
   fi
   [[ "$REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || die "GitHub 仓库必须使用 OWNER/REPO 格式。"
+  if [[ -n "$GITHUB_PROXY" ]]; then
+    [[ "$GITHUB_PROXY" =~ ^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?$ ]] || die "GitHub 代理必须是不含路径的 HTTPS 源站。"
+  fi
   [[ "$NODE_NAME" =~ ^[^[:cntrl:]]{2,64}$ ]] || die "节点名称必须为 2–64 个可见字符。"
   if [[ "$MODE" == "agent" ]]; then
     [[ "$SERVER_URL" =~ ^https://[^/[:space:]]+ ]] || die "远程主控地址必须使用 HTTPS。"
@@ -306,6 +313,41 @@ verify_sha256() {
   [[ "${actual,,}" == "${expected,,}" ]] || die "SHA-256 校验失败：$(basename "$file")"
 }
 
+download_file() {
+  local url="$1" output="$2" max_time="$3"
+  curl --fail --silent --show-error --location \
+    --connect-timeout 20 \
+    --retry 2 --retry-delay 2 \
+    --max-time "$max_time" \
+    "$url" --output "$output"
+}
+
+github_proxy_url() {
+  local upstream="$1" proxy
+  proxy="${GITHUB_PROXY%/}"
+  [[ -n "$proxy" ]] || return 1
+  case "$upstream" in
+    https://github.com/*)
+      printf '%s/%s\n' "$proxy" "$upstream"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+download_github_asset() {
+  local url="$1" output="$2" max_time="$3" proxied
+  if proxied="$(github_proxy_url "$url")"; then
+    if download_file "$proxied" "$output" "$max_time"; then
+      return 0
+    fi
+    warn "GitHub 代理下载失败，改为直连"
+    rm -f -- "$output"
+  fi
+  download_file "$url" "$output" "$max_time"
+}
+
 checksum_from_manifest() {
   local manifest="$1" wanted="$2"
   awk -v wanted="$wanted" '
@@ -321,8 +363,31 @@ checksum_from_manifest() {
   ' "$manifest"
 }
 
+download_github_atlas() {
+  local arch="$1" release_json asset_url checksum_url expected
+  release_json="$WORK_DIR/atlas-release.json"
+  if [[ -n "$GITHUB_PROXY" ]]; then
+    log "正在通过 GitHub 代理下载 Nginx Atlas"
+  else
+    log "正在从 GitHub 下载 Nginx Atlas"
+  fi
+  download_file "https://api.github.com/repos/$REPOSITORY/releases/latest" "$release_json" 60 \
+    || die "无法读取 GitHub 发布信息。可使用 --binary-file。"
+  asset_url="$(jq -r --arg arch "$arch" '.assets[] | select(.name | test("linux_" + $arch + "\\.tar\\.gz$")) | .browser_download_url' "$release_json" | head -n1)"
+  checksum_url="$(jq -r '.assets[] | select(.name | test("checksums\\.txt$")) | .browser_download_url' "$release_json" | head -n1)"
+  [[ -n "$asset_url" && "$asset_url" != "null" && -n "$checksum_url" && "$checksum_url" != "null" ]] || die "发布中缺少 Linux $arch 包或 checksums.txt；可改用 --binary-file。"
+  archive="$WORK_DIR/$(basename "$asset_url")"
+  download_github_asset "$asset_url" "$archive" 180 \
+    || die "GitHub 安装包下载失败或过慢。可使用 --binary-file，或等主控升级后从主控下载。"
+  download_github_asset "$checksum_url" "$WORK_DIR/checksums.txt" 60 \
+    || die "无法下载 checksums.txt。"
+  expected="$(checksum_from_manifest "$WORK_DIR/checksums.txt" "$(basename "$archive")")"
+  [[ "$expected" =~ ^[A-Fa-f0-9]{64}$ ]] || die "checksums.txt 中没有找到安装包摘要。"
+  verify_sha256 "$archive" "$expected"
+}
+
 install_binary() {
-  local destination="$INSTALL_DIR/$PROGRAM" archive asset_url checksum_url expected release_json arch
+  local destination="$INSTALL_DIR/$PROGRAM" archive asset_name expected arch
   if [[ -n "$BINARY_FILE" ]]; then
     install -m 0755 "$BINARY_FILE" "$destination"
     log "已安装本地二进制"
@@ -330,21 +395,27 @@ install_binary() {
   fi
   if [[ -n "$BINARY_URL" ]]; then
     archive="$WORK_DIR/custom-download"
-    curl --fail --silent --show-error --location "$BINARY_URL" --output "$archive"
+    download_file "$BINARY_URL" "$archive" 180 || die "自定义二进制下载失败。"
     verify_sha256 "$archive" "$BINARY_SHA256"
   else
     arch="$(map_arch)"
-    release_json="$WORK_DIR/atlas-release.json"
-    curl --fail --silent --show-error --location "https://api.github.com/repos/$REPOSITORY/releases/latest" --output "$release_json"
-    asset_url="$(jq -r --arg arch "$arch" '.assets[] | select(.name | test("linux_" + $arch + "\\.tar\\.gz$")) | .browser_download_url' "$release_json" | head -n1)"
-    checksum_url="$(jq -r '.assets[] | select(.name | test("checksums\\.txt$")) | .browser_download_url' "$release_json" | head -n1)"
-    [[ -n "$asset_url" && "$asset_url" != "null" && -n "$checksum_url" && "$checksum_url" != "null" ]] || die "发布中缺少 Linux $arch 包或 checksums.txt；可改用 --binary-file。"
-    archive="$WORK_DIR/$(basename "$asset_url")"
-    curl --fail --silent --show-error --location "$asset_url" --output "$archive"
-    curl --fail --silent --show-error --location "$checksum_url" --output "$WORK_DIR/checksums.txt"
-    expected="$(checksum_from_manifest "$WORK_DIR/checksums.txt" "$(basename "$archive")")"
-    [[ "$expected" =~ ^[A-Fa-f0-9]{64}$ ]] || die "checksums.txt 中没有找到安装包摘要。"
-    verify_sha256 "$archive" "$expected"
+    asset_name="nginx-atlas_linux_${arch}.tar.gz"
+    archive="$WORK_DIR/$asset_name"
+    if [[ "$MODE" == "agent" ]]; then
+      log "正在从主控下载 Nginx Atlas"
+      if download_file "${SERVER_URL%/}/dl/${asset_name}" "$archive" 180 \
+        && download_file "${SERVER_URL%/}/dl/checksums.txt" "$WORK_DIR/checksums.txt" 30; then
+        expected="$(checksum_from_manifest "$WORK_DIR/checksums.txt" "$asset_name")"
+        [[ "$expected" =~ ^[A-Fa-f0-9]{64}$ ]] || die "主控 checksums.txt 中没有找到安装包摘要。"
+        verify_sha256 "$archive" "$expected"
+      else
+        warn "主控下载失败，改为从 GitHub 下载"
+        rm -f -- "$archive" "$WORK_DIR/checksums.txt"
+        download_github_atlas "$arch"
+      fi
+    else
+      download_github_atlas "$arch"
+    fi
   fi
   if tar -tzf "$archive" >/dev/null 2>&1; then
     tar -xzf "$archive" -C "$WORK_DIR"
@@ -368,13 +439,27 @@ install_lego() {
   local arch release_json asset_url checksum_url archive expected
   arch="$(map_arch)"
   release_json="$WORK_DIR/lego-release.json"
-  curl --fail --silent --show-error --location "https://api.github.com/repos/go-acme/lego/releases/latest" --output "$release_json"
+  if [[ -n "$GITHUB_PROXY" ]]; then
+    log "正在通过 GitHub 代理下载 lego"
+  else
+    log "正在从 GitHub 下载 lego"
+  fi
+  if ! download_file "https://api.github.com/repos/go-acme/lego/releases/latest" "$release_json" 60; then
+    warn "无法连接 GitHub 下载 lego，已跳过。DNS-01 自动签发将不可用。"
+    return
+  fi
   asset_url="$(jq -r --arg arch "$arch" '.assets[] | select(.name | test("linux_" + $arch + "\\.tar\\.gz$")) | .browser_download_url' "$release_json" | head -n1)"
   checksum_url="$(jq -r '.assets[] | select(.name | test("checksums\\.txt$")) | .browser_download_url' "$release_json" | head -n1)"
   [[ -n "$asset_url" && "$asset_url" != "null" && -n "$checksum_url" && "$checksum_url" != "null" ]] || die "无法找到 lego Linux 发布包。"
   archive="$WORK_DIR/$(basename "$asset_url")"
-  curl --fail --silent --show-error --location "$asset_url" --output "$archive"
-  curl --fail --silent --show-error --location "$checksum_url" --output "$WORK_DIR/lego-checksums.txt"
+  if ! download_github_asset "$asset_url" "$archive" 180; then
+    warn "lego 安装包下载失败或过慢，已跳过。DNS-01 自动签发将不可用。"
+    return
+  fi
+  if ! download_github_asset "$checksum_url" "$WORK_DIR/lego-checksums.txt" 60; then
+    warn "无法下载 lego checksums.txt，已跳过。DNS-01 自动签发将不可用。"
+    return
+  fi
   expected="$(checksum_from_manifest "$WORK_DIR/lego-checksums.txt" "$(basename "$archive")")"
   [[ "$expected" =~ ^[A-Fa-f0-9]{64}$ ]] || die "lego checksums.txt 中没有找到安装包摘要。"
   verify_sha256 "$archive" "$expected"
