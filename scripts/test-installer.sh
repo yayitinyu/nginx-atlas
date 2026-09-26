@@ -47,6 +47,17 @@ stdin_help="$(bash -s -- --help <"$ROOT_DIR/deploy/install.sh")"
 grep -Fq 'Usage:' <<<"$file_help"
 grep -Fq 'Usage:' <<<"$stdin_help"
 
+GITHUB_PROXY=""
+if github_proxy_url "https://github.com/example/project/releases/download/v1/file" >/dev/null; then
+  printf 'GitHub proxy was enabled without an opt-in.\n' >&2
+  exit 1
+fi
+parse_args server --public-url https://atlas.example.com --github-proxy https://mirror.example.com
+[[ "$GITHUB_PROXY" == "https://mirror.example.com" ]]
+[[ "$(github_proxy_url 'https://github.com/example/project/releases/download/v1/file')" == 'https://mirror.example.com/https://github.com/example/project/releases/download/v1/file' ]]
+parse_args server --public-url https://atlas.example.com --no-github-proxy
+[[ -z "$GITHUB_PROXY" ]]
+
 SYSTEMCTL_CALLS=()
 systemctl() { SYSTEMCTL_CALLS+=("$*"); }
 enable_and_restart_service nginx-atlas-test.service

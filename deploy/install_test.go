@@ -27,7 +27,8 @@ func TestInstallerProtectsLocalControlPlaneAndWebSocketProxy(t *testing.T) {
 		"nginx-atlas_linux_${arch}.tar.gz",
 		"--max-time",
 		"主控下载失败，改为从 GitHub 下载",
-		"https://github.seiyuu.page",
+		`GITHUB_PROXY="${ATLAS_GITHUB_PROXY-}"`,
+		"--github-proxy",
 		"GitHub 代理下载失败，改为直连",
 	} {
 		if !strings.Contains(script, required) {

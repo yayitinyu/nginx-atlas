@@ -960,7 +960,7 @@ func TestImportNodeCertificateQueuesReadOnlyCapture(t *testing.T) {
 	}
 }
 
-func TestCertificateRenewalRejectsRevokedIssuerNode(t *testing.T) {
+func TestCertificateRenewalSkipsRevokedButAllowsOfflineDistributionNode(t *testing.T) {
 	stateStore, err := store.Open(filepath.Join(t.TempDir(), "state.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -1010,8 +1010,14 @@ func TestCertificateRenewalRejectsRevokedIssuerNode(t *testing.T) {
 		t.Fatal(err)
 	}
 	controller.runMaintenance()
-	if jobs := stateStore.Snapshot().Jobs; len(jobs) != 0 {
-		t.Fatalf("offline issuer node received renewal jobs: %+v", jobs)
+	if jobs := stateStore.Snapshot().Jobs; len(jobs) != 1 {
+		t.Fatalf("controller did not schedule renewal while distribution node is offline: %+v", jobs)
+	} else {
+		for _, job := range jobs {
+			if job.Type != protocol.JobIssueCertificate {
+				t.Fatalf("unexpected job type: %s", job.Type)
+			}
+		}
 	}
 }
 
@@ -1115,7 +1121,7 @@ func TestCertificateAutoRenewSwitchRejectsMissingAutomation(t *testing.T) {
 	}
 }
 
-func TestFailedIssuancePreservesAgentError(t *testing.T) {
+func TestFailedIssuanceStaysOnControllerAndPreservesError(t *testing.T) {
 	stateStore, err := store.Open(filepath.Join(t.TempDir(), "state.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -1144,7 +1150,8 @@ func TestFailedIssuancePreservesAgentError(t *testing.T) {
 		state.Domains["dom_atlas"] = model.Domain{ID: "dom_atlas", Name: "atlas.example.com", NodeID: credentials.NodeID, CreatedAt: now, UpdatedAt: now}
 		state.Jobs["job_issue"] = model.Job{
 			ID: "job_issue", NodeID: credentials.NodeID, DomainID: "dom_atlas", Type: protocol.JobIssueCertificate,
-			Status: model.JobRunning, Attempts: 3, MaxAttempts: 3, CreatedAt: now, StartedAt: &now,
+			Status: model.JobRunning, Attempts: 2, MaxAttempts: 3, CreatedAt: now, StartedAt: &now,
+			Payload: json.RawMessage(`{"domain_id":"dom_atlas"}`),
 		}
 		node := state.Nodes[credentials.NodeID]
 		node.RunningJobID = "job_issue"
@@ -1154,12 +1161,24 @@ func TestFailedIssuancePreservesAgentError(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	wantError := "ACME DNS-01 issuance failed: exit status 1"
+	wantError := "DNS account no longer exists"
+	poll := performJSON(t, controller.Handler(), http.MethodPost, "/api/v1/agent/poll", protocol.PollRequest{}, "AtlasNode "+credentials.NodeID+"."+credentials.NodeSecret)
+	if poll.Code != http.StatusOK {
+		t.Fatalf("agent poll returned %d: %s", poll.Code, poll.Body.String())
+	}
+	var polled protocol.PollResponse
+	decodeRecorder(t, poll, &polled)
+	if polled.Job != nil {
+		t.Fatal("controller issuance was sent to an agent")
+	}
 	resultRecorder := performJSON(t, controller.Handler(), http.MethodPost, "/api/v1/agent/jobs/job_issue/result", protocol.JobResultRequest{
 		Success: false, Error: wantError,
 	}, "AtlasNode "+credentials.NodeID+"."+credentials.NodeSecret)
-	if resultRecorder.Code != http.StatusOK {
-		t.Fatalf("submit failed result returned %d: %s", resultRecorder.Code, resultRecorder.Body.String())
+	if resultRecorder.Code != http.StatusConflict {
+		t.Fatalf("agent result for controller job returned %d: %s", resultRecorder.Code, resultRecorder.Body.String())
+	}
+	if err := controller.issueNextCertificate(context.Background()); err == nil || err.Error() != wantError {
+		t.Fatalf("controller issuance returned %v, want %q", err, wantError)
 	}
 	snapshot := stateStore.Snapshot()
 	if got := snapshot.Jobs["job_issue"].Error; got != wantError {

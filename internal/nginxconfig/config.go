@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"text/template"
+	"unicode/utf8"
 )
 
 var (
@@ -73,6 +74,18 @@ func ConfigFileName(domain string) (string, error) {
 		return "", errors.New("invalid domain")
 	}
 	return "atlas-" + domain + ".conf", nil
+}
+
+// ValidateCustomConfig bounds the admin supplied Nginx file before it enters
+// persisted state or a node job. Nginx itself validates the full grammar.
+func ValidateCustomConfig(config string) error {
+	if len(config) == 0 || len(config) > 256<<10 {
+		return errors.New("configuration must contain 1–262144 bytes")
+	}
+	if !utf8.ValidString(config) || strings.ContainsRune(config, '\x00') {
+		return errors.New("configuration must be valid UTF-8 without NUL bytes")
+	}
+	return nil
 }
 
 func UpstreamURL(host string, port int) string {

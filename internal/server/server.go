@@ -21,6 +21,7 @@ import (
 
 	"github.com/yayitinyu/nginx-atlas/deploy"
 	"github.com/yayitinyu/nginx-atlas/internal/id"
+	"github.com/yayitinyu/nginx-atlas/internal/issuer"
 	"github.com/yayitinyu/nginx-atlas/internal/model"
 	"github.com/yayitinyu/nginx-atlas/internal/protocol"
 	"github.com/yayitinyu/nginx-atlas/internal/securebox"
@@ -39,6 +40,9 @@ type Config struct {
 	Version            string
 	Repository         string
 	ReleaseAPIURL      string
+	GithubProxy        string
+	LegoBinary         string
+	DataRoot           string
 	CloudflareAPIURL   string
 	TurnstileVerifyURL string
 	HTTPClient         *http.Client
@@ -53,6 +57,7 @@ type Server struct {
 	store               *store.Store
 	box                 *securebox.Box
 	logger              *slog.Logger
+	certificateRunner   issuer.Runner
 	adminTokenHash      [32]byte
 	localTokenHash      [32]byte
 	localTokenReady     bool
@@ -100,6 +105,15 @@ func New(config Config, stateStore *store.Store, box *securebox.Box, logger *slo
 	}
 	if strings.TrimSpace(config.Repository) == "" {
 		config.Repository = "yayitinyu/nginx-atlas"
+	}
+	if config.DataRoot == "" {
+		config.DataRoot = "/var/lib/nginx-atlas/server"
+	}
+	if config.LegoBinary == "" {
+		config.LegoBinary = "lego"
+	}
+	if !validGithubProxy(config.GithubProxy) {
+		return nil, errors.New("GitHub proxy must be an HTTPS origin without a path")
 	}
 	if strings.TrimSpace(config.ReleaseAPIURL) == "" {
 		config.ReleaseAPIURL = "https://api.github.com"
@@ -168,6 +182,7 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		WriteTimeout: 60 * time.Second, IdleTimeout: 90 * time.Second,
 	}
 	go s.runScheduler(ctx)
+	go s.runCertificateIssuer(ctx)
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -215,6 +230,8 @@ func (s *Server) routes() http.Handler {
 	mux.Handle("GET /api/v1/domains", s.adminAuth(http.HandlerFunc(s.handleDomains)))
 	mux.Handle("POST /api/v1/domains", s.adminAuth(http.HandlerFunc(s.handleCreateDomain)))
 	mux.Handle("PUT /api/v1/domains/{id}", s.adminAuth(http.HandlerFunc(s.handleUpdateDomain)))
+	mux.Handle("GET /api/v1/domains/{id}/config", s.adminAuth(http.HandlerFunc(s.handleDomainConfig)))
+	mux.Handle("PUT /api/v1/domains/{id}/config", s.adminAuth(http.HandlerFunc(s.handleUpdateDomainConfig)))
 	mux.Handle("POST /api/v1/domains/adopt", s.adminAuth(http.HandlerFunc(s.handleAdoptDomain)))
 	mux.Handle("DELETE /api/v1/domains/{id}", s.adminAuth(http.HandlerFunc(s.handleDeleteDomain)))
 	mux.Handle("GET /api/v1/certificates", s.adminAuth(http.HandlerFunc(s.handleCertificates)))

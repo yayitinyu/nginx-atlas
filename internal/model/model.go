@@ -99,6 +99,7 @@ type Domain struct {
 	NginxS3Compatible       bool              `json:"nginx_s3_compatible"`
 	NginxHTTP2              bool              `json:"nginx_http2"`
 	NginxGzip               bool              `json:"nginx_gzip"`
+	CustomConfig            string            `json:"custom_config,omitempty"`
 	LastJobID               string            `json:"last_job_id,omitempty"`
 	LastError               string            `json:"last_error,omitempty"`
 	CreatedAt               time.Time         `json:"created_at"`

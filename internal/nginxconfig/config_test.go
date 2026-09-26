@@ -203,3 +203,14 @@ func TestUpstreamURLBracketsIPv6(t *testing.T) {
 		t.Fatalf("unexpected IPv6 upstream URL: %s", got)
 	}
 }
+
+func TestValidateCustomConfigBoundsAndEncoding(t *testing.T) {
+	for _, config := range []string{"", "server { listen 80; }\x00", string([]byte{0xff}), strings.Repeat("a", (256<<10)+1)} {
+		if err := ValidateCustomConfig(config); err == nil {
+			t.Fatalf("unsafe custom config was accepted (length %d)", len(config))
+		}
+	}
+	if err := ValidateCustomConfig("server { listen 80; }\n"); err != nil {
+		t.Fatalf("valid custom config rejected: %v", err)
+	}
+}

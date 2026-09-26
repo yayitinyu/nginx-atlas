@@ -79,6 +79,8 @@ func runServer(args []string) error {
 		Address: *address, PublicURL: *publicURL, AdminToken: os.Getenv("ATLAS_ADMIN_TOKEN"), Demo: *demo,
 		LocalToken: os.Getenv("ATLAS_LOCAL_TOKEN"), ProxyToken: os.Getenv("ATLAS_PROXY_TOKEN"),
 		Version: version, Repository: envOr("ATLAS_REPOSITORY", "yayitinyu/nginx-atlas"),
+		GithubProxy: os.Getenv("ATLAS_GITHUB_PROXY"), LegoBinary: envOr("ATLAS_LEGO_BINARY", "lego"),
+		DataRoot: envOr("ATLAS_SERVER_DATA_ROOT", "/var/lib/nginx-atlas/server"),
 	}, stateStore, box, slog.Default())
 	if err != nil {
 		return err
@@ -98,7 +100,6 @@ func runAgent(args []string) error {
 	pollInterval := flags.Duration("poll", envDuration("ATLAS_POLL_INTERVAL", 10*time.Second), "poll interval")
 	nginxBinary := flags.String("nginx", envOr("ATLAS_NGINX_BINARY", "nginx"), "nginx binary")
 	systemctlBinary := flags.String("systemctl", envOr("ATLAS_SYSTEMCTL_BINARY", "systemctl"), "systemctl binary")
-	legoBinary := flags.String("lego", envOr("ATLAS_LEGO_BINARY", "lego"), "lego ACME binary")
 	nginxConfigDir := flags.String("nginx-config-dir", envOr("ATLAS_NGINX_CONFIG_DIR", "/etc/nginx/conf.d"), "managed nginx configuration directory")
 	sslRoot := flags.String("ssl-root", envOr("ATLAS_SSL_ROOT", "/etc/ssl"), "domain certificate root")
 	dataRoot := flags.String("data-root", envOr("ATLAS_DATA_ROOT", "/var/lib/nginx-atlas"), "agent data directory")
@@ -107,7 +108,7 @@ func runAgent(args []string) error {
 	}
 	runner := agent.OSCommandRunner{}
 	executor := agent.NewExecutor(agent.ExecutorConfig{
-		NginxBinary: *nginxBinary, Systemctl: *systemctlBinary, LegoBinary: *legoBinary,
+		NginxBinary: *nginxBinary, Systemctl: *systemctlBinary,
 		NginxConfigDir: *nginxConfigDir, SSLRoot: *sslRoot, DataRoot: *dataRoot,
 		Repository:         envOr("ATLAS_REPOSITORY", "yayitinyu/nginx-atlas"),
 		CurrentVersion:     version,

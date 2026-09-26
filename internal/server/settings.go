@@ -42,6 +42,7 @@ var (
 
 type settingsView struct {
 	NodePollSeconds           int      `json:"node_poll_seconds"`
+	GithubProxy               string   `json:"github_proxy"`
 	TurnstileEnabled          bool     `json:"turnstile_enabled"`
 	TurnstileSiteKey          string   `json:"turnstile_site_key"`
 	TurnstileSecretConfigured bool     `json:"turnstile_secret_configured"`
@@ -53,6 +54,7 @@ type settingsView struct {
 
 type settingsUpdateRequest struct {
 	NodePollSeconds           *int      `json:"node_poll_seconds"`
+	GithubProxy               *string   `json:"github_proxy"`
 	TurnstileEnabled          *bool     `json:"turnstile_enabled"`
 	TurnstileSiteKey          *string   `json:"turnstile_site_key"`
 	TurnstileSecret           *string   `json:"turnstile_secret"`
@@ -78,6 +80,7 @@ func (s *Server) effectiveControllerSettings(settings model.ControllerSettings) 
 	}
 	return settingsView{
 		NodePollSeconds:           seconds,
+		GithubProxy:               s.config.GithubProxy,
 		TurnstileEnabled:          settings.TurnstileEnabled,
 		TurnstileSiteKey:          settings.TurnstileSiteKey,
 		TurnstileSecretConfigured: settings.TurnstileSecretCiphertext != "",
@@ -122,6 +125,10 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	var request settingsUpdateRequest
 	if !decodeJSON(w, r, &request) {
+		return
+	}
+	if request.GithubProxy != nil && *request.GithubProxy != s.config.GithubProxy {
+		writeError(w, http.StatusBadRequest, "GitHub 反代需在安装主控时配置", "github_proxy_read_only", nil)
 		return
 	}
 

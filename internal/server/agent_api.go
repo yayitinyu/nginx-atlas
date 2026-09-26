@@ -147,7 +147,7 @@ func (s *Server) handleAgentPoll(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if node.RunningJobID != "" {
-			if job, ok := state.Jobs[node.RunningJobID]; ok && job.Status == model.JobRunning {
+			if job, ok := state.Jobs[node.RunningJobID]; ok && job.Status == model.JobRunning && job.Type != protocol.JobIssueCertificate {
 				if job.Attempts < job.MaxAttempts {
 					job.Attempts++
 				}
@@ -163,7 +163,7 @@ func (s *Server) handleAgentPoll(w http.ResponseWriter, r *http.Request) {
 		}
 		orphanedRunning := make([]model.Job, 0, 1)
 		for _, job := range state.Jobs {
-			if job.NodeID == nodeID && job.Status == model.JobRunning {
+			if job.NodeID == nodeID && job.Type != protocol.JobIssueCertificate && job.Status == model.JobRunning {
 				orphanedRunning = append(orphanedRunning, job)
 			}
 		}
@@ -184,7 +184,7 @@ func (s *Server) handleAgentPoll(w http.ResponseWriter, r *http.Request) {
 		}
 		queued := make([]model.Job, 0)
 		for _, job := range state.Jobs {
-			if job.NodeID == nodeID && job.Status == model.JobQueued {
+			if job.NodeID == nodeID && job.Type != protocol.JobIssueCertificate && job.Status == model.JobQueued {
 				queued = append(queued, job)
 			}
 		}
@@ -257,7 +257,7 @@ func (s *Server) handleAgentJobResult(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	job, ok := s.store.JobForNode(jobID, nodeID)
-	if !ok || job.Status != model.JobRunning {
+	if !ok || job.Status != model.JobRunning || job.Type == protocol.JobIssueCertificate {
 		writeError(w, http.StatusConflict, "任务不存在、节点不匹配或已完成", "job_conflict", nil)
 		return
 	}
@@ -384,6 +384,10 @@ func (s *Server) buildWireJob(job model.Job, state model.State) (protocol.WireJo
 			ReplaceConfigPath: spec.ReplaceConfigPath,
 			NginxWebsocket:    domain.NginxWebsocket, NginxS3Compatible: domain.NginxS3Compatible,
 			NginxHTTP2: domain.NginxHTTP2, NginxGzip: domain.NginxGzip,
+		}
+		wirePayload.CustomConfig = domain.CustomConfig
+		if spec.CustomConfig != nil {
+			wirePayload.CustomConfig = *spec.CustomConfig
 		}
 		if spec.CertificateID != "" {
 			bundle, err := s.decryptCertificate(state, spec.CertificateID)
@@ -544,11 +548,11 @@ func (s *Server) prepareCertificateResult(state model.State, job model.Job, bund
 	}
 	info, err := certutil.Validate([]byte(bundle.FullchainPEM), []byte(bundle.PrivateKeyPEM), context.Domain, time.Now())
 	if err != nil {
-		return nil, fmt.Errorf("agent returned an invalid certificate: %w", err)
+		return nil, fmt.Errorf("certificate task returned an invalid certificate: %w", err)
 	}
 	if context.Source == model.CertificateACME {
 		if err := certutil.VerifyTrustedChain([]byte(bundle.FullchainPEM), context.Domain, time.Now(), s.certificateRoots); err != nil {
-			return nil, fmt.Errorf("agent returned an untrusted ACME certificate: %w", err)
+			return nil, fmt.Errorf("certificate task returned an untrusted ACME certificate: %w", err)
 		}
 	}
 	requestedDNSNames := context.RequestedDNSNames
@@ -556,7 +560,7 @@ func (s *Server) prepareCertificateResult(state model.State, job model.Job, bund
 		requestedDNSNames = append([]string(nil), info.DNSNames...)
 	}
 	if err := ensureCertificateNames(info.DNSNames, requestedDNSNames); err != nil {
-		return nil, fmt.Errorf("agent returned a certificate with incomplete names: %w", err)
+		return nil, fmt.Errorf("certificate task returned a certificate with incomplete names: %w", err)
 	}
 	certificateID := context.CertificateID
 	var existing model.Certificate
@@ -654,7 +658,8 @@ func certificateResultContextForJob(state model.State, job model.Job) (certifica
 			RequestedDNSNames: spec.DNSNames,
 			AutoRenew:         spec.AutoRenew, RenewBeforeDays: spec.RenewBeforeDays,
 			ACMEAccountID: spec.ACMEAccountID, DNSAccountID: spec.DNSAccountID,
-			InstalledOnIssuer: spec.Install,
+			// The controller signs; the primary node receives a sync job later.
+			InstalledOnIssuer: false,
 		}, nil
 	case protocol.JobCaptureCertificate:
 		var spec captureCertificateSpec
@@ -772,6 +777,13 @@ func (s *Server) completeSuccessfulJob(state *model.State, job model.Job, reques
 		}
 		if prepared != nil {
 			domain.CertificateID = prepared.ID
+		}
+		var spec applyDomainSpec
+		if err := json.Unmarshal(job.Payload, &spec); err != nil {
+			return err
+		}
+		if spec.CustomConfig != nil {
+			domain.CustomConfig = *spec.CustomConfig
 		}
 		domain.Enabled = true
 		domain.Deleting = false

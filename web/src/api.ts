@@ -8,6 +8,7 @@ import type {
   DashboardData,
   DNSAccount,
   DomainRecord,
+  DomainConfig,
   EnrollmentResponse,
   JobRecord,
   ManagementCommands,
@@ -103,10 +104,10 @@ export const api = {
   audit: (limit = 500) => request<AuditEvent[]>(`/api/v1/audit?limit=${encodeURIComponent(limit)}`),
   dnsAccounts: () => request<DNSAccount[]>('/api/v1/dns-accounts'),
   acmeAccounts: () => request<ACMEAccount[]>('/api/v1/acme-accounts'),
-  createEnrollment: (ttlMinutes = 30, name = '') =>
+  createEnrollment: (ttlMinutes = 30, name = '', githubProxy?: string) =>
     request<EnrollmentResponse>('/api/v1/enrollments', {
       method: 'POST',
-      body: JSON.stringify({ ttl_minutes: ttlMinutes, name }),
+      body: JSON.stringify({ ttl_minutes: ttlMinutes, name, github_proxy: githubProxy }),
     }),
   revokeNode: (id: string) => request<void>(`/api/v1/nodes/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   revokeNodes: (ids: string[]) => request<{ deleted: number }>('/api/v1/nodes', { method: 'DELETE', body: JSON.stringify({ ids }) }),
@@ -122,6 +123,9 @@ export const api = {
     request<DomainRecord>('/api/v1/domains', { method: 'POST', body: JSON.stringify(input) }),
   updateDomain: (id: string, input: Partial<CreateDomainInput>) =>
     request<DomainRecord>(`/api/v1/domains/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(input) }),
+  domainConfig: (id: string) => request<DomainConfig>(`/api/v1/domains/${encodeURIComponent(id)}/config`),
+  updateDomainConfig: (id: string, config: string, revision: string) =>
+    request<JobRecord>(`/api/v1/domains/${encodeURIComponent(id)}/config`, { method: 'PUT', body: JSON.stringify({ config, revision }) }),
   adoptDomain: (input: { node_id: string; domain: string; config_path?: string; takeover?: boolean }) =>
     request<DomainRecord>('/api/v1/domains/adopt', { method: 'POST', body: JSON.stringify(input) }),
   deleteDomain: (id: string) =>

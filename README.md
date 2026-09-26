@@ -69,11 +69,13 @@ curl -fsSL https://github.com/yayitinyu/nginx-atlas/releases/latest/download/ins
 安装器会：
 
 1. 从最新 GitHub Release 下载当前 CPU 架构（amd64/arm64）安装包并校验 SHA-256；
-2. 安装/更新 `nginx-atlas` 二进制与 lego；
+2. 安装/更新 `nginx-atlas` 二进制，并仅在主控安装 lego；
 3. 启动主控服务与本机节点代理；
 4. 若面板证书存在，创建 HTTPS 反向代理站点。
 
 **重复执行同一条命令即可原地升级**；已有主密钥、管理员令牌、节点身份和状态文件会被保留。
+
+默认直连 GitHub 下载发行文件。若需要 GitHub 反代，可在主控安装命令末尾加 `--github-proxy https://mirror.example.com`；该选择会保存到主控配置，并自动加入面板生成的节点安装命令。重新安装时可用 `--no-github-proxy` 关闭。节点安装弹窗也可为单次命令单独选择反代。
 
 若面板证书尚不存在，主控和本机 Agent 仍会启动，但不会创建公网 Nginx 站点。此时可使用已有反向代理，或先通过 DNS-01 签发证书再重新运行安装命令。
 
@@ -151,7 +153,7 @@ sudo bash deploy/install.sh server \
 安装器会：
 
 1. 检测 `apt` / `dnf` / `yum`，缺少 Nginx 时安装并设置自启。
-2. 安装并校验 Nginx Atlas 与 lego。
+2. 安装并校验 Nginx Atlas；仅在主控安装 lego。
 3. 生成主密钥和管理员令牌；重复安装时保留已有值。
 4. 启动非特权主控服务与本机节点代理。
 5. 扫描符合约定的证书目录，并运行 `nginx -t`。
@@ -185,6 +187,8 @@ sudo bash deploy/install.sh server \
 
 典型 TLS 配置会生成 HTTP 到 HTTPS 的 308 跳转、TLS 站点、反向代理头与 WebSocket 升级头。文件写入后才运行 `nginx -t`；配置校验或 reload 失败会恢复之前的配置和证书。
 
+已管理域名可在“域名”列表打开“完整配置”编辑器，直接修改该域名的整个 Nginx 配置文件。保存会创建节点任务；节点通过 `nginx -t` 并成功重载后，主控才把自定义内容记为当前版本。失败时节点恢复原文件；编辑器可恢复 Atlas 自动生成的配置。仅监控的域名没有可编辑的托管文件。
+
 ## DNS 与 ACME 账户
 
 设置页只维护一个 Cloudflare DNS 账户和一个 ACME 账户：分别填写最小权限 Cloudflare API Token 与 ACME 邮箱。申请证书时会自动使用这两个账户，不再重复选择。
@@ -206,18 +210,18 @@ ACME 账户默认目录：
 https://acme-v02.api.letsencrypt.org/directory
 ```
 
-代理使用当前 lego v5 命令格式：`lego run --dns ... --renew-days 30`；证书仍会在主控侧重新验证后才被保存和同步。参见 [lego 官方签发/续期文档](https://go-acme.github.io/lego/usage/cli/renew-a-certificate/)。
+主控使用 lego 的 DNS-01 模式签发和续期，私有 DNS 凭据不下发给节点。主控验证完整证书链后，将证书与私钥通过节点任务下发。参见 [lego 官方签发/续期文档](https://go-acme.github.io/lego/usage/cli/renew-a-certificate/)。
 
 ## 证书同步与续期
 
 - 证书和私钥在主控状态文件中使用 AES-256-GCM 加密，并绑定独立用途标签。
 - 上传证书时不要求特定文件名或手工填写域名；主控从证书 SAN/CN 识别域名，节点部署时统一写为 `fullchain.pem` 与 `privkey.pem`。
-- 队列中仅保存证书、域名和账户 ID；代理领取任务时才短暂解密并通过 HTTPS 下发。
+- 队列中仅保存证书、域名和账户 ID；主控执行 DNS-01 签发，节点仅在应用证书任务中接收证书与私钥。
 - 节点将新文件写入同目录临时文件，设置 `fullchain.pem` 为 `0644`、`privkey.pem` 为 `0600`，再原子替换。
 - 每个节点独立执行证书校验、`nginx -t` 和 reload；失败会恢复它自己的旧版本。
 - 调度器每 15 秒处理离线与超时任务，并在证书进入 `renew_before_days` 窗口时创建 ACME 续期任务。
 - 关闭证书自动续期会同时停止关联域名的后续调度，但不会取消已经进入运行状态的任务。
-- 证书页可编辑签发节点、续期窗口与 SAN 名称；例如一张证书同时覆盖 `nanami.im` 与 `*.nanami.im`。DNS/ACME 账户自动使用设置页中的唯一配置。
+- 证书页可编辑首个下发节点、续期窗口与 SAN 名称；例如一张证书同时覆盖 `nanami.im` 与 `*.nanami.im`。DNS/ACME 账户自动使用设置页中的唯一配置。
 - 证书下载包不会缓存，内部文件名固定且私钥权限标记为 `0600`。下载包包含明文私钥，只应保存到受信任设备并及时移入受权限保护的位置。
 
 ## 节点维护与规则接管
@@ -241,7 +245,7 @@ https://acme-v02.api.letsencrypt.org/directory
 | 节点配置 | `/etc/nginx-atlas/agent.env` |
 | 主控状态 | `/var/lib/nginx-atlas/server/state.json` |
 | 节点凭据 | `/var/lib/nginx-atlas/agent/state.json` |
-| ACME/lego 数据 | `/var/lib/nginx-atlas/agent/lego/` |
+| ACME/lego 数据 | `/var/lib/nginx-atlas/server/lego/` |
 | 托管 Nginx 站点 | `/etc/nginx/conf.d/atlas-<域名>.conf` |
 | 域名证书 | `/etc/ssl/<域名>/fullchain.pem`、`privkey.pem` |
 

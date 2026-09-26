@@ -4,6 +4,8 @@ import { usePreferences } from '../preferences'
 import { Icon } from './Icon'
 import { ActionButton, IconButton, StatusDot } from './Primitives'
 import { SelectField } from './SelectField'
+import { api } from '../api'
+import type { DomainConfig, DomainRecord } from '../types'
 
 export type DNSAccountInput = { name: string; provider: string; credentials: Record<string, string>; keep_credentials: boolean }
 export type ACMEAccountInput = { name: string; email: string; directory_url: string; eab_kid: string; eab_hmac: string; keep_eab: boolean }
@@ -98,27 +100,39 @@ export function NodeManageDialog({ open, node, release, busy, onClose, onRename,
   )
 }
 
-export function NodeAddDialog({ open, busy, onClose, onGenerate }: {
+export function NodeAddDialog({ open, busy, defaultGithubProxy, onClose, onGenerate }: {
   open: boolean
   busy: boolean
+  defaultGithubProxy: string
   onClose: () => void
-  onGenerate: (name: string) => Promise<string>
+  onGenerate: (name: string, githubProxy: string) => Promise<string>
 }) {
   const { t } = usePreferences()
   const [name, setName] = useState('')
   const [command, setCommand] = useState('')
   const [copied, setCopied] = useState(false)
+  const [githubProxyEnabled, setGithubProxyEnabled] = useState(Boolean(defaultGithubProxy))
+  const [githubProxy, setGithubProxy] = useState(defaultGithubProxy)
+  const [proxyError, setProxyError] = useState('')
 
   useEffect(() => {
     if (!open) return
     setName('')
     setCommand('')
     setCopied(false)
-  }, [open])
+    setGithubProxyEnabled(Boolean(defaultGithubProxy))
+    setGithubProxy(defaultGithubProxy)
+    setProxyError('')
+  }, [open, defaultGithubProxy])
 
   async function submit(event: FormEvent) {
     event.preventDefault()
-    const generated = await onGenerate(name.trim())
+    if (githubProxyEnabled && !/^https:\/\/[A-Za-z0-9.-]+(?::[0-9]{1,5})?$/.test(githubProxy.trim())) {
+      setProxyError(t('dialog.githubProxyInvalid'))
+      return
+    }
+    setProxyError('')
+    const generated = await onGenerate(name.trim(), githubProxyEnabled ? githubProxy.trim() : '')
     if (generated) setCommand(generated)
   }
 
@@ -138,6 +152,8 @@ export function NodeAddDialog({ open, busy, onClose, onGenerate }: {
           <span>{t('dialog.nodeName')} · {t('common.optional')}</span>
           <div className="field-control"><Icon name="server" size={17} /><input value={name} maxLength={64} onChange={(event) => { setName(event.target.value); setCommand(''); setCopied(false) }} placeholder={t('dialog.nodeNamePlaceholder')} autoFocus /></div>
         </label>
+        <label className="switch-row"><button type="button" role="switch" aria-checked={githubProxyEnabled} className={githubProxyEnabled ? 'switch-on' : ''} onClick={() => { setGithubProxyEnabled((value) => !value); setCommand(''); setProxyError('') }}><i /></button><span><strong>{t('dialog.githubProxy')}</strong></span></label>
+        {githubProxyEnabled && <label><span>{t('dialog.githubProxyURL')}</span><div className="field-control"><input type="url" value={githubProxy} onChange={(event) => { setGithubProxy(event.target.value); setCommand(''); setProxyError('') }} placeholder="https://github.example.com" /></div>{proxyError && <small role="alert">{proxyError}</small>}</label>}
         {command ? (
           <section className="node-enrollment-command" aria-live="polite">
             <span><Icon name="check" size={17} /><strong>{t('dialog.commandReady')}</strong></span>
@@ -147,6 +163,55 @@ export function NodeAddDialog({ open, busy, onClose, onGenerate }: {
           </section>
         ) : <ActionButton type="submit" wide plain disabled={busy}>{busy ? t('common.loading') : t('dialog.generate')}</ActionButton>}
       </form>
+    </DialogShell>
+  )
+}
+
+export function DomainConfigDialog({ domain, onClose, onQueued }: {
+  domain?: DomainRecord
+  onClose: () => void
+  onQueued: () => Promise<void>
+}) {
+  const { t } = usePreferences()
+  const [loaded, setLoaded] = useState<DomainConfig>()
+  const [config, setConfig] = useState('')
+  const [reset, setReset] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    if (!domain) { setLoaded(undefined); return }
+    let active = true
+    setLoaded(undefined)
+    setError('')
+    void api.domainConfig(domain.id).then((value) => {
+      if (active) { setLoaded(value); setConfig(value.config); setReset(false) }
+    }).catch((cause: unknown) => { if (active) setError(cause instanceof Error ? cause.message : t('domain.configLoadError')) })
+    return () => { active = false }
+  }, [domain?.id])
+
+  async function submit(event: FormEvent) {
+    event.preventDefault()
+    if (!domain || !loaded || busy) return
+    setBusy(true)
+    setError('')
+    try {
+      await api.updateDomainConfig(domain.id, reset ? '' : config, loaded.revision)
+      await onQueued()
+      onClose()
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : t('domain.configSaveError'))
+    } finally { setBusy(false) }
+  }
+
+  return (
+    <DialogShell open={Boolean(domain)} title={t('domain.configEditTitle', { domain: domain?.name ?? '' })} description={t('domain.configSafety')} onClose={() => !busy && onClose()} wide>
+      {error && <p role="alert" className="form-warning">{error}</p>}
+      {!loaded ? <p className="domain-config-loading">{t('common.loading')}</p> : <form className="dialog-form domain-config-form" onSubmit={(event) => void submit(event)}>
+        <div className="domain-config-toolbar"><span>{loaded.path}</span><button type="button" onClick={() => { setConfig(loaded.generated_config); setReset(true) }} disabled={busy}>{t('domain.configReset')}</button></div>
+        <textarea aria-label={t('domain.configEditor')} spellCheck={false} value={config} onChange={(event) => { setConfig(event.target.value); setReset(false) }} disabled={busy} />
+        <div className="dialog-actions"><button type="button" onClick={onClose} disabled={busy}>{t('common.cancel')}</button><ActionButton type="submit" plain disabled={busy || (!reset && (!config || config === loaded.config))}>{busy ? t('common.queueing') : t('common.save')}</ActionButton></div>
+      </form>}
     </DialogShell>
   )
 }

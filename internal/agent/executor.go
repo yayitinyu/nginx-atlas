@@ -13,7 +13,6 @@ import (
 	"io"
 	"io/fs"
 	"net/http"
-	"net/mail"
 	"net/url"
 	"os"
 	"path"
@@ -35,8 +34,6 @@ const maxCommandOutput = 16 << 10
 const maxAtlasReleaseSize = 128 << 20
 
 var (
-	providerPattern     = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
-	envNamePattern      = regexp.MustCompile(`^[A-Z][A-Z0-9_]{1,127}$`)
 	nginxVersionPattern = regexp.MustCompile(`nginx/(\d+)\.(\d+)\.(\d+)`)
 )
 
@@ -44,7 +41,6 @@ type ExecutorConfig struct {
 	NginxBinary        string
 	Systemctl          string
 	SystemdRun         string
-	LegoBinary         string
 	NginxConfigDir     string
 	SSLRoot            string
 	DataRoot           string
@@ -68,9 +64,6 @@ func NewExecutor(config ExecutorConfig, runner CommandRunner) *Executor {
 	}
 	if config.SystemdRun == "" {
 		config.SystemdRun = "systemd-run"
-	}
-	if config.LegoBinary == "" {
-		config.LegoBinary = "lego"
 	}
 	if config.NginxConfigDir == "" {
 		config.NginxConfigDir = "/etc/nginx/conf.d"
@@ -114,12 +107,6 @@ func (e *Executor) Execute(ctx context.Context, job protocol.WireJob) protocol.J
 		err = decodePayload(job.Payload, &payload)
 		if err == nil {
 			result, err = e.syncCertificate(ctx, payload)
-		}
-	case protocol.JobIssueCertificate:
-		var payload protocol.IssueCertificatePayload
-		err = decodePayload(job.Payload, &payload)
-		if err == nil {
-			result, err = e.issueCertificate(ctx, payload)
 		}
 	case protocol.JobCaptureCertificate:
 		var payload protocol.CaptureCertificatePayload
@@ -177,6 +164,12 @@ func (e *Executor) applyDomain(ctx context.Context, payload protocol.ApplyDomain
 	if err != nil {
 		return protocol.JobResultRequest{}, err
 	}
+	if payload.CustomConfig != "" {
+		if err := nginxconfig.ValidateCustomConfig(payload.CustomConfig); err != nil {
+			return protocol.JobResultRequest{}, fmt.Errorf("invalid custom nginx configuration: %w", err)
+		}
+		config = []byte(payload.CustomConfig)
+	}
 	filename, err := nginxconfig.ConfigFileName(domain)
 	if err != nil {
 		return protocol.JobResultRequest{}, err
@@ -190,17 +183,22 @@ func (e *Executor) applyDomain(ctx context.Context, payload protocol.ApplyDomain
 		return protocol.JobResultRequest{}, err
 	}
 	takeoverChanged := false
-	rollback := func() {
-		_ = restoreFiles(backup)
-		if takeoverChanged {
-			_, _ = e.restoreTakeoverConfig(payload.ReplaceConfigPath)
+	rollback := func() error {
+		var rollbackErr error
+		if err := restoreFiles(backup); err != nil {
+			rollbackErr = fmt.Errorf("restore previous files: %w", err)
 		}
+		if takeoverChanged {
+			if _, err := e.restoreTakeoverConfig(payload.ReplaceConfigPath); err != nil {
+				rollbackErr = errors.Join(rollbackErr, fmt.Errorf("restore original nginx site: %w", err))
+			}
+		}
+		return rollbackErr
 	}
 
 	if payload.Certificate != nil {
 		if err := e.installCertificate(domain, *payload.Certificate); err != nil {
-			rollback()
-			return protocol.JobResultRequest{}, err
+			return protocol.JobResultRequest{}, errors.Join(err, rollback())
 		}
 	} else if payload.TLS && payload.UseLocalCertificate {
 		sourceDir := strings.TrimSpace(payload.LocalCertificateDir)
@@ -216,25 +214,29 @@ func (e *Executor) applyDomain(ctx context.Context, payload protocol.ApplyDomain
 	if payload.ReplaceConfigPath != "" {
 		takeoverChanged, err = e.disableTakeoverConfig(payload.ReplaceConfigPath, paths[0], domain)
 		if err != nil {
-			rollback()
-			return protocol.JobResultRequest{}, fmt.Errorf("disable original nginx site: %w", err)
+			return protocol.JobResultRequest{}, errors.Join(fmt.Errorf("disable original nginx site: %w", err), rollback())
 		}
 	}
 	if err := writeAtomic(paths[0], config, 0o644); err != nil {
-		rollback()
-		return protocol.JobResultRequest{}, fmt.Errorf("write nginx site: %w", err)
+		return protocol.JobResultRequest{}, errors.Join(fmt.Errorf("write nginx site: %w", err), rollback())
 	}
 	output, err := e.runner.Run(ctx, e.config.NginxBinary, []string{"-t"}, nil)
 	if err != nil {
-		rollback()
-		_, _ = e.runner.Run(ctx, e.config.NginxBinary, []string{"-t"}, nil)
-		return protocol.JobResultRequest{NginxOutput: limitOutput(output)}, fmt.Errorf("nginx configuration validation failed: %w", err)
+		rollbackErr := rollback()
+		if _, verifyErr := e.runner.Run(ctx, e.config.NginxBinary, []string{"-t"}, nil); verifyErr != nil {
+			rollbackErr = errors.Join(rollbackErr, fmt.Errorf("restored nginx configuration validation failed: %w", verifyErr))
+		}
+		return protocol.JobResultRequest{NginxOutput: limitOutput(output)}, errors.Join(fmt.Errorf("nginx configuration validation failed: %w", err), rollbackErr)
 	}
 	if _, err := e.runner.Run(ctx, e.config.Systemctl, []string{"reload", "nginx"}, nil); err != nil {
-		rollback()
-		_, _ = e.runner.Run(ctx, e.config.NginxBinary, []string{"-t"}, nil)
-		_, _ = e.runner.Run(ctx, e.config.Systemctl, []string{"reload", "nginx"}, nil)
-		return protocol.JobResultRequest{NginxOutput: limitOutput(output)}, fmt.Errorf("reload nginx: %w", err)
+		rollbackErr := rollback()
+		if _, verifyErr := e.runner.Run(ctx, e.config.NginxBinary, []string{"-t"}, nil); verifyErr != nil {
+			rollbackErr = errors.Join(rollbackErr, fmt.Errorf("restored nginx configuration validation failed: %w", verifyErr))
+		}
+		if _, reloadErr := e.runner.Run(ctx, e.config.Systemctl, []string{"reload", "nginx"}, nil); reloadErr != nil {
+			rollbackErr = errors.Join(rollbackErr, fmt.Errorf("reload restored nginx configuration: %w", reloadErr))
+		}
+		return protocol.JobResultRequest{NginxOutput: limitOutput(output)}, errors.Join(fmt.Errorf("reload nginx: %w", err), rollbackErr)
 	}
 	result := protocol.JobResultRequest{Message: "Nginx 配置已验证并重载", NginxOutput: limitOutput(output)}
 	if payload.CaptureCertificate && payload.TLS {
@@ -339,86 +341,6 @@ func (e *Executor) syncCertificate(ctx context.Context, payload protocol.SyncCer
 	}
 	result.Message = "证书已同步，Nginx 配置已验证并重载"
 	return result, nil
-}
-
-func (e *Executor) issueCertificate(ctx context.Context, payload protocol.IssueCertificatePayload) (protocol.JobResultRequest, error) {
-	domains := normalizeRequestedDomains(payload.Domain, payload.Domains)
-	if len(domains) == 0 {
-		return protocol.JobResultRequest{}, errors.New("certificate domain is missing")
-	}
-	domain := domains[0]
-	if err := validateCertificateName(domain); err != nil {
-		return protocol.JobResultRequest{}, fmt.Errorf("invalid certificate domain: %w", err)
-	}
-	if !providerPattern.MatchString(payload.DNSProvider) || payload.DNSProvider == "manual" || payload.DNSProvider == "exec" {
-		return protocol.JobResultRequest{}, errors.New("DNS provider is invalid or unsafe for unattended execution")
-	}
-	if _, err := mail.ParseAddress(payload.Email); err != nil {
-		return protocol.JobResultRequest{}, errors.New("ACME account email is invalid")
-	}
-	directory, err := url.Parse(payload.DirectoryURL)
-	if err != nil || directory.Scheme != "https" || directory.Host == "" {
-		return protocol.JobResultRequest{}, errors.New("ACME directory must be an HTTPS URL")
-	}
-	env := make(map[string]string, len(payload.Credentials))
-	for key, value := range payload.Credentials {
-		if !envNamePattern.MatchString(key) || strings.TrimSpace(value) == "" {
-			return protocol.JobResultRequest{}, fmt.Errorf("invalid DNS credential variable %q", key)
-		}
-		env[key] = value
-	}
-	accountHash := sha256.Sum256([]byte(strings.ToLower(payload.Email) + "\x00" + payload.DirectoryURL + "\x00" + payload.DNSProvider))
-	legoPath := filepath.Join(e.config.DataRoot, "lego", hex.EncodeToString(accountHash[:8]))
-	if err := os.MkdirAll(legoPath, 0o700); err != nil {
-		return protocol.JobResultRequest{}, fmt.Errorf("create lego data directory: %w", err)
-	}
-	args := []string{"run", "--path", legoPath, "--email", payload.Email, "--server", payload.DirectoryURL,
-		"--dns", payload.DNSProvider, "--accept-tos", "--renew-days", "30"}
-	for _, requestedDomain := range domains {
-		if err := validateCertificateName(requestedDomain); err != nil {
-			return protocol.JobResultRequest{}, err
-		}
-		args = append(args, "--domains", requestedDomain)
-	}
-	if payload.EABKID != "" || payload.EABHMAC != "" {
-		if payload.EABKID == "" || payload.EABHMAC == "" {
-			return protocol.JobResultRequest{}, errors.New("both EAB KID and HMAC are required")
-		}
-		// lego supports these flags through environment variables. Keeping the
-		// HMAC out of argv prevents disclosure through /proc/*/cmdline and ps.
-		env["LEGO_EAB_KID"] = payload.EABKID
-		env["LEGO_EAB_HMAC"] = payload.EABHMAC
-		args = append(args, "--eab")
-	}
-	output, err := e.runner.Run(ctx, e.config.LegoBinary, args, env)
-	if err != nil {
-		return protocol.JobResultRequest{NginxOutput: limitOutput(output)}, fmt.Errorf("ACME DNS-01 issuance failed: %w", err)
-	}
-	certPath, keyPath, err := findLegoCertificate(legoPath, domain)
-	if err != nil {
-		return protocol.JobResultRequest{NginxOutput: limitOutput(output)}, err
-	}
-	fullchain, err := os.ReadFile(certPath)
-	if err != nil {
-		return protocol.JobResultRequest{}, fmt.Errorf("read issued certificate: %w", err)
-	}
-	privateKey, err := os.ReadFile(keyPath)
-	if err != nil {
-		return protocol.JobResultRequest{}, fmt.Errorf("read issued private key: %w", err)
-	}
-	info, err := certutil.Validate(fullchain, privateKey, domain, e.now())
-	if err != nil {
-		return protocol.JobResultRequest{}, fmt.Errorf("validate issued certificate: %w", err)
-	}
-	if err := ensureRequestedNames(info.DNSNames, domains); err != nil {
-		return protocol.JobResultRequest{}, fmt.Errorf("validate issued certificate names: %w", err)
-	}
-	bundle := protocol.CertificateBundle{FullchainPEM: string(fullchain), PrivateKeyPEM: string(privateKey)}
-	return protocol.JobResultRequest{
-		Message:     "Let's Encrypt DNS-01 证书签发成功",
-		Certificate: &bundle,
-		NginxOutput: limitOutput(output),
-	}, nil
 }
 
 func (e *Executor) captureCertificate(payload protocol.CaptureCertificatePayload) (protocol.JobResultRequest, error) {
@@ -1408,21 +1330,6 @@ func parseAgentVersion(value string) ([3]int, string, bool) {
 	return result, prerelease, true
 }
 
-func normalizeRequestedDomains(primary string, requested []string) []string {
-	values := append([]string{primary}, requested...)
-	result := make([]string, 0, len(values))
-	seen := make(map[string]bool)
-	for _, value := range values {
-		value = strings.ToLower(strings.TrimSpace(value))
-		if value == "" || seen[value] {
-			continue
-		}
-		seen[value] = true
-		result = append(result, value)
-	}
-	return result
-}
-
 func validateCertificateName(value string) error {
 	base := value
 	if strings.HasPrefix(value, "*.") {
@@ -1432,25 +1339,6 @@ func validateCertificateName(value string) error {
 	}
 	if _, err := nginxconfig.ConfigFileName(base); err != nil {
 		return fmt.Errorf("invalid certificate name %q", value)
-	}
-	return nil
-}
-
-func ensureRequestedNames(actual, requested []string) error {
-	actualSet := make(map[string]bool, len(actual))
-	for _, value := range actual {
-		actualSet[strings.ToLower(strings.TrimSpace(value))] = true
-	}
-	for _, value := range requested {
-		if strings.HasPrefix(value, "*.") {
-			if !actualSet[value] {
-				return fmt.Errorf("certificate does not contain %s", value)
-			}
-			continue
-		}
-		if !certutil.CoversHostname(actual, value) {
-			return fmt.Errorf("certificate does not cover %s", value)
-		}
 	}
 	return nil
 }
@@ -1531,35 +1419,6 @@ func writeAtomic(path string, data []byte, mode fs.FileMode) error {
 	}
 	committed = true
 	return nil
-}
-
-func findLegoCertificate(root, domain string) (string, string, error) {
-	var matches []string
-	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".crt") || strings.HasSuffix(entry.Name(), ".issuer.crt") {
-			return nil
-		}
-		matches = append(matches, path)
-		return nil
-	})
-	if err != nil {
-		return "", "", fmt.Errorf("scan lego certificates: %w", err)
-	}
-	for _, certPath := range matches {
-		keyPath := strings.TrimSuffix(certPath, ".crt") + ".key"
-		fullchain, certErr := os.ReadFile(certPath)
-		privateKey, keyErr := os.ReadFile(keyPath)
-		if certErr != nil || keyErr != nil {
-			continue
-		}
-		if _, err := certutil.Validate(fullchain, privateKey, domain, time.Now()); err == nil {
-			return certPath, keyPath, nil
-		}
-	}
-	return "", "", fmt.Errorf("lego did not produce a valid certificate for %s", domain)
 }
 
 func decodePayload(data json.RawMessage, target any) error {

@@ -7,13 +7,13 @@ import { LoginGate } from './components/LoginGate'
 import { MobileHeader, MobileMenu, MobileNavigation, NavigationRail, type PageKey } from './components/Navigation'
 import { ConfirmDialog, LoadingState, ToastRegion, type ToastMessage } from './components/Primitives'
 import { DomainDrawer, type DomainSubmission } from './components/DomainDrawer'
-import { AccessSettingsDialog, ACMEAccountDialog, CertificateAutomationDialog, CertificateDialog, CertificateDownloadDialog, DNSAccountDialog, NodeAddDialog, NodeManageDialog, PasswordDialog, SyncDialog, type ACMEAccountInput, type CertificateAutomationSettingsInput, type CertificateSubmission, type DNSAccountInput } from './components/Dialogs'
+import { AccessSettingsDialog, ACMEAccountDialog, CertificateAutomationDialog, CertificateDialog, CertificateDownloadDialog, DNSAccountDialog, DomainConfigDialog, NodeAddDialog, NodeManageDialog, PasswordDialog, SyncDialog, type ACMEAccountInput, type CertificateAutomationSettingsInput, type CertificateSubmission, type DNSAccountInput } from './components/Dialogs'
 import { SelectField } from './components/SelectField'
 import { Overview } from './views/Overview'
 import { AuditPage, CertificatesPage, ControllerUpdatePage, DomainsPage, NodesPage, PendingPage, SettingsPage } from './views/Operations'
 
 type AuthState = 'checking' | 'anonymous' | 'authenticated'
-const emptyDashboard: DashboardData = { nodes: [], domains: [], certificates: [], audit: [], jobs: [], pending_job_count: 0, settings: { node_poll_seconds: 30, turnstile_enabled: false, turnstile_site_key: '', turnstile_secret_configured: false, panel_allowed_cidrs: [], security_entrance_enabled: false, security_entrance_status: 404 }, server_time: new Date().toISOString() }
+const emptyDashboard: DashboardData = { nodes: [], domains: [], certificates: [], audit: [], jobs: [], pending_job_count: 0, settings: { node_poll_seconds: 30, github_proxy: '', turnstile_enabled: false, turnstile_site_key: '', turnstile_secret_configured: false, panel_allowed_cidrs: [], security_entrance_enabled: false, security_entrance_status: 404 }, server_time: new Date().toISOString() }
 
 export default function App() {
   const { t, effectiveTheme, effectiveLanguage, setTheme, setLanguage } = usePreferences()
@@ -25,6 +25,7 @@ export default function App() {
   const [loading, setLoading] = useState(true)
   const [mobileMenu, setMobileMenu] = useState(false)
   const [domainDrawer, setDomainDrawer] = useState(false)
+  const [configDomain, setConfigDomain] = useState<DomainRecord>()
   const [certificateDialog, setCertificateDialog] = useState(false)
   const [nodeDialog, setNodeDialog] = useState(false)
   const [dnsDialog, setDNSDialog] = useState(false)
@@ -310,10 +311,10 @@ export default function App() {
     catch (error) { handleError(error, t('error.removeDomain')) } finally { setBusy('') }
   }
 
-  async function generateNodeEnrollment(name: string): Promise<string> {
+  async function generateNodeEnrollment(name: string, githubProxy: string): Promise<string> {
     setBusy('node-enrollment')
     try {
-      return (await api.createEnrollment(30, name)).command
+      return (await api.createEnrollment(30, name, githubProxy)).command
     } catch (error) {
       handleError(error, t('error.node'))
       return ''
@@ -507,7 +508,7 @@ export default function App() {
           </div>
         </header>
         <main className="workspace-content">{loading ? <LoadingState /> : renderPage(page, {
-          data, dnsAccounts, acmeAccounts, onAddDomain: () => { setEditingDomain(undefined); setDomainDrawer(true) }, onEditDomain: (domain) => { setEditingDomain(domain); setDomainDrawer(true) }, onAddCertificate: () => setCertificateDialog(true), onAddNode: () => setNodeDialog(true), onPage: setPage,
+          data, dnsAccounts, acmeAccounts, onAddDomain: () => { setEditingDomain(undefined); setDomainDrawer(true) }, onEditDomain: (domain) => { setEditingDomain(domain); setDomainDrawer(true) }, onConfigDomain: setConfigDomain, onAddCertificate: () => setCertificateDialog(true), onAddNode: () => setNodeDialog(true), onPage: setPage,
           onDeleteDomain: setConfirmDomain, onDeleteCertificates: setConfirmCertificateIDs, onDeleteNodes: setConfirmNodeIDs, onManageNode: (node) => void openNodeManager(node), onUpdateAllNodes: () => setConfirmUpdateAllNodes(true),
           onRenew: setConfirmCertificate, onToggleAutoRenew: (certificate, enabled) => void setCertificateAutoRenew(certificate, enabled), onSync: setSyncCertificate, onDownloadCertificate: setDownloadCertificate, onEditCertificate: setAutomationCertificate, busy,
           onAddDNS: () => { setEditingDNS(undefined); setDNSDialog(true) }, onEditDNS: (account) => { setEditingDNS(account); setDNSDialog(true) },
@@ -520,8 +521,9 @@ export default function App() {
       <MobileNavigation page={page} onChange={setPage} />
       <MobileMenu open={mobileMenu} onClose={() => setMobileMenu(false)} onLogout={logout} />
       <DomainDrawer key={editingDomain?.id ?? 'create-domain'} open={domainDrawer} nodes={data.nodes} certificates={data.certificates} dnsAccounts={dnsAccounts} acmeAccounts={acmeAccounts} busy={busy === 'domain'} editingDomain={editingDomain} onClose={() => { if (!busy) { setDomainDrawer(false); setEditingDomain(undefined) } }} onSubmit={createDomain} onUpdate={updateDomain} />
+      <DomainConfigDialog domain={configDomain} onClose={() => setConfigDomain(undefined)} onQueued={async () => { toast('success', t('domain.configQueued')); await refresh(true) }} />
       <CertificateDialog open={certificateDialog} nodes={data.nodes} dnsAccounts={dnsAccounts} acmeAccounts={acmeAccounts} busy={busy === 'certificate'} onClose={() => !busy && setCertificateDialog(false)} onSubmit={submitCertificate} />
-      <NodeAddDialog open={nodeDialog} busy={busy === 'node-enrollment'} onClose={() => !busy && setNodeDialog(false)} onGenerate={generateNodeEnrollment} />
+      <NodeAddDialog open={nodeDialog} busy={busy === 'node-enrollment'} defaultGithubProxy={data.settings.github_proxy} onClose={() => !busy && setNodeDialog(false)} onGenerate={generateNodeEnrollment} />
       <CertificateAutomationDialog open={Boolean(automationCertificate)} certificate={automationCertificate} nodes={data.nodes} dnsAccounts={dnsAccounts} acmeAccounts={acmeAccounts} busy={busy === 'certificate-automation'} onClose={() => !busy && setAutomationCertificate(undefined)} onSave={saveCertificateAutomation} />
       <NodeManageDialog open={Boolean(managedNode)} node={managedNode} release={releaseInfo} busy={busy} onClose={() => !busy && setManagedNode(undefined)} onRename={renameManagedNode} onCheckRelease={checkRelease} onUpdateAtlas={updateManagedNodeAtlas} onUpdateSystem={updateManagedNodeSystem} onRemoveAndUninstall={removeManagedNodeAndUninstall} />
       <DNSAccountDialog open={dnsDialog} account={editingDNS} busy={busy === 'dns'} onClose={() => { setDNSDialog(false); setEditingDNS(undefined) }} onSave={saveDNS} />
@@ -548,6 +550,7 @@ interface PageProps {
   acmeAccounts: ACMEAccount[]
   onAddDomain: () => void
   onEditDomain: (domain: DomainRecord) => void
+  onConfigDomain: (domain: DomainRecord) => void
   onAddCertificate: () => void
   onAddNode: () => void
   onPage: (page: PageKey) => void
@@ -579,7 +582,7 @@ interface PageProps {
 function renderPage(page: PageKey, props: PageProps) {
   switch (page) {
     case 'overview': return <Overview data={props.data} onNavigate={props.onPage} />
-    case 'domains': return <DomainsPage domains={props.data.domains} nodes={props.data.nodes} onAdd={props.onAddDomain} onEdit={props.onEditDomain} onDelete={props.onDeleteDomain} />
+    case 'domains': return <DomainsPage domains={props.data.domains} nodes={props.data.nodes} onAdd={props.onAddDomain} onEdit={props.onEditDomain} onConfig={props.onConfigDomain} onDelete={props.onDeleteDomain} />
     case 'certificates': return <CertificatesPage certificates={props.data.certificates} nodes={props.data.nodes} onAdd={props.onAddCertificate} onRenew={props.onRenew} onToggleAutoRenew={props.onToggleAutoRenew} onSync={props.onSync} onDownload={props.onDownloadCertificate} onEdit={props.onEditCertificate} onDeleteSelected={props.onDeleteCertificates} busy={props.busy} />
     case 'nodes': return <NodesPage nodes={props.data.nodes} onManage={props.onManageNode} onAdd={props.onAddNode} onUpdateAll={props.onUpdateAllNodes} onDeleteSelected={props.onDeleteNodes} busy={props.busy} />
     case 'pending': return <PendingPage jobs={props.data.jobs} nodes={props.data.nodes} domains={props.data.domains} busy={props.busy} onRetry={props.onRetryJob} onClear={props.onClearJobs} />

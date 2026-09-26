@@ -23,7 +23,8 @@ BINARY_FILE=""
 BINARY_URL="${ATLAS_BINARY_URL:-}"
 BINARY_SHA256="${ATLAS_BINARY_SHA256:-}"
 REPOSITORY="${ATLAS_REPO:-$DEFAULT_REPOSITORY}"
-GITHUB_PROXY="${ATLAS_GITHUB_PROXY-https://github.seiyuu.page}"
+GITHUB_PROXY="${ATLAS_GITHUB_PROXY-}"
+GITHUB_PROXY_SET="${ATLAS_GITHUB_PROXY+x}"
 SKIP_LEGO="false"
 PURGE_STATE="false"
 FORCE_LOCAL="false"
@@ -51,15 +52,17 @@ Options:
   --binary-url URL         Download a binary or tar.gz from a custom URL.
   --binary-sha256 SHA256   Required with --binary-url.
   --repo OWNER/REPO        GitHub repository used for the latest release.
-  --skip-lego              Do not install the lego DNS-01 client.
+  --github-proxy URL       Use an HTTPS GitHub reverse proxy for release files.
+  --no-github-proxy        Download release files directly from GitHub.
+  --skip-lego              Do not install lego on the controller.
   --purge-state            With uninstall-server: also remove /var/lib/nginx-atlas
                            and /etc/nginx-atlas (irreversible).
   --force-local            With uninstall-agent: remove local state even when the
                            controller was already revoked or is unavailable.
   --token-stdin            Read the one-time enrollment token from standard input.
 
-GitHub release files are downloaded through https://github.seiyuu.page first.
-Set ATLAS_GITHUB_PROXY empty to fetch those files directly from GitHub.
+GitHub release files are downloaded directly unless --github-proxy is set.
+The proxy is passed to generated node installation commands.
 
 The server mode also installs a local node agent. Existing state, secrets, and
 service configuration are preserved on reruns.
@@ -103,6 +106,8 @@ parse_args() {
       --binary-url) [[ $# -ge 2 ]] || die "--binary-url 缺少参数"; BINARY_URL="$2"; shift 2 ;;
       --binary-sha256) [[ $# -ge 2 ]] || die "--binary-sha256 缺少参数"; BINARY_SHA256="$2"; shift 2 ;;
       --repo) [[ $# -ge 2 ]] || die "--repo 缺少参数"; REPOSITORY="$2"; shift 2 ;;
+      --github-proxy) [[ $# -ge 2 ]] || die "--github-proxy 缺少参数"; GITHUB_PROXY="$2"; GITHUB_PROXY_SET="true"; shift 2 ;;
+      --no-github-proxy) GITHUB_PROXY=""; GITHUB_PROXY_SET="true"; shift ;;
       --skip-lego) SKIP_LEGO="true"; shift ;;
       --purge-state) PURGE_STATE="true"; shift ;;
       --force-local) FORCE_LOCAL="true"; shift ;;
@@ -110,6 +115,9 @@ parse_args() {
       *) die "未知参数：$1" ;;
     esac
   done
+  if [[ "$MODE" == "server" && -z "$GITHUB_PROXY_SET" && -f "$CONFIG_DIR/server.env" ]]; then
+    GITHUB_PROXY="$(sed -n 's/^ATLAS_GITHUB_PROXY=//p' "$CONFIG_DIR/server.env" | head -n1)"
+  fi
 }
 
 validate_args() {
@@ -626,6 +634,16 @@ write_server_env() {
       chown nginx-atlas:nginx-atlas "$CONFIG_DIR/server.env"
       chmod 0600 "$CONFIG_DIR/server.env"
     fi
+    if [[ -n "$GITHUB_PROXY_SET" ]]; then
+      backup_file "$CONFIG_DIR/server.env"
+      sed '/^ATLAS_GITHUB_PROXY=/d' "$CONFIG_DIR/server.env" >"$WORK_DIR/server-proxy.env"
+      printf 'ATLAS_GITHUB_PROXY=%s\n' "$GITHUB_PROXY" >>"$WORK_DIR/server-proxy.env"
+      install -m 0600 -o nginx-atlas -g nginx-atlas "$WORK_DIR/server-proxy.env" "$CONFIG_DIR/server.env"
+    elif ! grep -q '^ATLAS_GITHUB_PROXY=' "$CONFIG_DIR/server.env"; then
+      printf 'ATLAS_GITHUB_PROXY=%s\n' "$GITHUB_PROXY" >>"$CONFIG_DIR/server.env"
+      chown nginx-atlas:nginx-atlas "$CONFIG_DIR/server.env"
+      chmod 0600 "$CONFIG_DIR/server.env"
+    fi
     if grep -Fxq 'ATLAS_ADDR=127.0.0.1:9090' "$CONFIG_DIR/server.env"; then
       backup_file "$CONFIG_DIR/server.env"
       sed 's/^ATLAS_ADDR=127\.0\.0\.1:9090$/ATLAS_ADDR=127.0.0.1:909/' "$CONFIG_DIR/server.env" >"$WORK_DIR/server.env"
@@ -651,6 +669,7 @@ ATLAS_ADMIN_TOKEN=$ADMIN_TOKEN
 ATLAS_LOCAL_TOKEN=$LOCAL_TOKEN
 ATLAS_PROXY_TOKEN=$PROXY_TOKEN
 ATLAS_REPOSITORY=$REPOSITORY
+ATLAS_GITHUB_PROXY=$GITHUB_PROXY
 EOF
   ADMIN_TOKEN_CREATED="true"
   chown nginx-atlas:nginx-atlas "$CONFIG_DIR/server.env"
@@ -890,8 +909,8 @@ main() {
   install_packages
   prepare_directories
   install_binary
-  install_lego
   if [[ "$MODE" == "server" ]]; then
+    install_lego
     install_server_mode
   else
     install_agent_mode

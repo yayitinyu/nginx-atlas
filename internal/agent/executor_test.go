@@ -66,6 +66,42 @@ func TestApplyDomainRestoresConfigWhenNginxTestFails(t *testing.T) {
 	}
 }
 
+func TestApplyCustomConfigRestoresPreviousFileWhenNginxTestFails(t *testing.T) {
+	root := t.TempDir()
+	configDir := filepath.Join(root, "nginx")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(configDir, "atlas-api.example.com.conf")
+	previous := []byte("server { listen 80; server_name api.example.com; }\n")
+	if err := os.WriteFile(path, previous, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runner := &sequenceRunner{}
+	executor := NewExecutor(ExecutorConfig{NginxConfigDir: configDir, SSLRoot: filepath.Join(root, "ssl"), DataRoot: filepath.Join(root, "data")}, runner)
+	custom := "server { listen 80; server_name api.example.com; location / { proxy_pass http://127.0.0.1:8081; } }\n"
+	payload, _ := json.Marshal(protocol.ApplyDomainPayload{Domain: "api.example.com", UpstreamHost: "127.0.0.1", UpstreamPort: 8080, CustomConfig: custom})
+	result := executor.Execute(context.Background(), protocol.WireJob{Type: protocol.JobApplyDomain, Payload: payload})
+	if result.Success {
+		t.Fatal("expected nginx validation failure")
+	}
+	actual, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(actual) != string(previous) {
+		t.Fatalf("previous config was not restored: %q", actual)
+	}
+}
+
+func TestAgentDoesNotExecuteCertificateIssuance(t *testing.T) {
+	executor := NewExecutor(ExecutorConfig{}, alwaysOKRunner{})
+	result := executor.Execute(context.Background(), protocol.WireJob{Type: protocol.JobIssueCertificate})
+	if result.Success || !strings.Contains(result.Error, "unsupported job type") {
+		t.Fatalf("agent accepted controller-only issuance: %+v", result)
+	}
+}
+
 func TestNginxSupportsModernHTTP2Directive(t *testing.T) {
 	tests := []struct {
 		output string
@@ -378,17 +414,6 @@ func TestSyncWildcardCertificateWritesApexDirectory(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("wildcard-only certificate was not inventoried: %+v", executor.InventoryCertificates())
-	}
-}
-
-func TestIssueCertificateAcceptsWildcardPrimaryName(t *testing.T) {
-	executor := NewExecutor(ExecutorConfig{SSLRoot: t.TempDir(), DataRoot: t.TempDir()}, alwaysOKRunner{})
-	_, err := executor.issueCertificate(context.Background(), protocol.IssueCertificatePayload{
-		Domain: "*.example.com", Email: "admin@example.com",
-		DirectoryURL: "https://acme.example.com/directory", DNSProvider: "manual",
-	})
-	if err == nil || strings.Contains(err.Error(), "invalid certificate domain") {
-		t.Fatalf("wildcard primary was rejected before issuance: %v", err)
 	}
 }
 

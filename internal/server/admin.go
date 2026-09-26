@@ -32,16 +32,22 @@ const letsEncryptDirectory = "https://acme-v02.api.letsencrypt.org/directory"
 var (
 	dnsProviderPattern    = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
 	credentialNamePattern = regexp.MustCompile(`^[A-Z][A-Z0-9_]{1,127}$`)
+	githubProxyPattern    = regexp.MustCompile(`^https://[A-Za-z0-9.-]+(?::[0-9]{1,5})?$`)
 )
+
+func validGithubProxy(value string) bool {
+	return value == "" || githubProxyPattern.MatchString(value)
+}
 
 type domainView struct {
 	model.Domain
-	NodeName          string     `json:"node_name"`
-	NodeStatus        string     `json:"node_status"`
-	CertificateIssuer string     `json:"certificate_issuer,omitempty"`
-	CertificateExpiry *time.Time `json:"certificate_expiry,omitempty"`
-	CertificateStatus string     `json:"certificate_status"`
-	JobStatus         string     `json:"job_status,omitempty"`
+	CustomConfigEnabled bool       `json:"custom_config_enabled"`
+	NodeName            string     `json:"node_name"`
+	NodeStatus          string     `json:"node_status"`
+	CertificateIssuer   string     `json:"certificate_issuer,omitempty"`
+	CertificateExpiry   *time.Time `json:"certificate_expiry,omitempty"`
+	CertificateStatus   string     `json:"certificate_status"`
+	JobStatus           string     `json:"job_status,omitempty"`
 }
 
 type certificateView struct {
@@ -413,8 +419,9 @@ func jobNeedsAttention(state model.State, job model.Job) bool {
 
 func (s *Server) handleCreateEnrollment(w http.ResponseWriter, r *http.Request) {
 	var request struct {
-		Name       string `json:"name"`
-		TTLMinutes int    `json:"ttl_minutes"`
+		Name        string  `json:"name"`
+		TTLMinutes  int     `json:"ttl_minutes"`
+		GithubProxy *string `json:"github_proxy"`
 	}
 	if !decodeJSON(w, r, &request) {
 		return
@@ -429,6 +436,14 @@ func (s *Server) handleCreateEnrollment(w http.ResponseWriter, r *http.Request) 
 	}
 	if request.TTLMinutes < 5 || request.TTLMinutes > 1440 {
 		writeError(w, http.StatusBadRequest, "令牌有效期需为 5–1440 分钟", "invalid_ttl", nil)
+		return
+	}
+	proxy := s.config.GithubProxy
+	if request.GithubProxy != nil {
+		proxy = strings.TrimSpace(*request.GithubProxy)
+	}
+	if !validGithubProxy(proxy) {
+		writeError(w, http.StatusBadRequest, "GitHub 反代地址必须是无路径的 HTTPS 源站", "invalid_github_proxy", nil)
 		return
 	}
 	enrollmentID, err := id.New("enr")
@@ -457,8 +472,12 @@ func (s *Server) handleCreateEnrollment(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	baseURL := s.publicURL(r)
-	command := fmt.Sprintf("( tmp=$(mktemp) && trap 'rm -f -- \"$tmp\"' EXIT && chmod 600 \"$tmp\" && curl -fsSL %s -o \"$tmp\" && printf '%%s' %s | sudo bash \"$tmp\" agent --server %s --token-stdin )",
-		shellQuote(strings.TrimRight(baseURL, "/")+"/install.sh"), shellQuote(token), shellQuote(baseURL))
+	proxyArg := ""
+	if proxy != "" {
+		proxyArg = " --github-proxy " + shellQuote(proxy)
+	}
+	command := fmt.Sprintf("( tmp=$(mktemp) && trap 'rm -f -- \"$tmp\"' EXIT && chmod 600 \"$tmp\" && curl -fsSL %s -o \"$tmp\" && printf '%%s' %s | sudo bash \"$tmp\" agent --server %s --token-stdin%s )",
+		shellQuote(strings.TrimRight(baseURL, "/")+"/install.sh"), shellQuote(token), shellQuote(baseURL), proxyArg)
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"id": enrollmentID, "name": request.Name, "token": token, "expires_at": expiresAt, "command": command,
 	})
@@ -655,12 +674,13 @@ type updateDomainRequest struct {
 }
 
 type applyDomainSpec struct {
-	DomainID            string `json:"domain_id"`
-	CertificateID       string `json:"certificate_id,omitempty"`
-	UseLocalCertificate bool   `json:"use_local_certificate"`
-	CaptureCertificate  bool   `json:"capture_certificate"`
-	LocalCertificateDir string `json:"local_certificate_dir,omitempty"`
-	ReplaceConfigPath   string `json:"replace_config_path,omitempty"`
+	DomainID            string  `json:"domain_id"`
+	CustomConfig        *string `json:"custom_config,omitempty"`
+	CertificateID       string  `json:"certificate_id,omitempty"`
+	UseLocalCertificate bool    `json:"use_local_certificate"`
+	CaptureCertificate  bool    `json:"capture_certificate"`
+	LocalCertificateDir string  `json:"local_certificate_dir,omitempty"`
+	ReplaceConfigPath   string  `json:"replace_config_path,omitempty"`
 }
 
 type issueCertificateSpec struct {
@@ -1264,6 +1284,15 @@ func (s *Server) handleUpdateDomain(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "域名或上游配置无效", "invalid_domain", map[string]string{"reason": err.Error()})
 		return
 	}
+	if existing.CustomConfig != "" && (request.NodeID != existing.NodeID ||
+		request.UpstreamHost != existing.UpstreamHost || request.UpstreamPort != existing.UpstreamPort ||
+		source != existing.CertificateMode ||
+		(source == model.CertificateUpload && request.CertificateID != existing.CertificateID) ||
+		request.NginxWebsocket != existing.NginxWebsocket || request.NginxS3Compatible != existing.NginxS3Compatible ||
+		request.NginxHTTP2 != existing.NginxHTTP2 || request.NginxGzip != existing.NginxGzip) {
+		writeError(w, http.StatusConflict, "当前域名使用完整配置，请在完整配置编辑器修改 Nginx 规则", "custom_config_active", nil)
+		return
+	}
 	if request.CloudflareEnabled {
 		cloudflare, err := s.upsertCloudflareRecord(r.Context(), snapshot, request)
 		if err != nil {
@@ -1281,6 +1310,9 @@ func (s *Server) handleUpdateDomain(w http.ResponseWriter, r *http.Request) {
 		domain, ok := state.Domains[domainID]
 		if !ok {
 			return errNotFound
+		}
+		if domain.CustomConfig != existing.CustomConfig || hasActiveCustomConfigJob(*state, domain.ID) {
+			return errConflict
 		}
 		if node, ok := state.Nodes[request.NodeID]; !ok || node.Status == model.NodeRevoked {
 			return fmt.Errorf("%w: node", errNotFound)
@@ -1385,10 +1417,15 @@ func (s *Server) handleUpdateDomain(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "域名不存在", "not_found", nil)
 		return
 	}
+	if errors.Is(err, errConflict) {
+		writeError(w, http.StatusConflict, "域名已有部署任务，请等待完成后重试", "domain_job_conflict", nil)
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "无法更新域名", "invalid_domain_update", map[string]string{"reason": err.Error()})
 		return
 	}
+	updated.CustomConfig = ""
 	writeJSON(w, http.StatusOK, updated)
 }
 
@@ -2428,7 +2465,9 @@ func domainViews(state model.State) []domainView {
 		if domainIsDeleting(state, domain) {
 			continue
 		}
-		view := domainView{Domain: domain, CertificateStatus: "none"}
+		customConfigEnabled := domain.CustomConfig != ""
+		domain.CustomConfig = ""
+		view := domainView{Domain: domain, CustomConfigEnabled: customConfigEnabled, CertificateStatus: "none"}
 		if node, ok := state.Nodes[domain.NodeID]; ok {
 			view.NodeName = node.Name
 			view.NodeStatus = string(node.Status)

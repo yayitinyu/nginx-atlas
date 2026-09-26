@@ -6,11 +6,12 @@ import { ActionButton, Bezel, EmptyState, IconButton, SectionHeading, StatusDot,
 import { SelectField } from '../components/SelectField'
 import { DomainTable, relativeTime } from './Overview'
 
-export function DomainsPage({ domains, nodes, onAdd, onEdit, onDelete }: {
+export function DomainsPage({ domains, nodes, onAdd, onEdit, onConfig, onDelete }: {
   domains: DomainRecord[]
   nodes: NodeRecord[]
   onAdd: () => void
   onEdit: (domain: DomainRecord) => void
+  onConfig: (domain: DomainRecord) => void
   onDelete: (domain: DomainRecord) => void
 }) {
   const { t } = usePreferences()
@@ -52,11 +53,12 @@ export function DomainsPage({ domains, nodes, onAdd, onEdit, onDelete }: {
         {filtered.length ? (
           <DomainTable
             domains={filtered}
-            onOpen={onEdit}
+            onOpen={(domain) => domain.custom_config_enabled ? onConfig(domain) : onEdit(domain)}
             showActions={(domain) => (
               <div className="domain-row-actions">
                 <IconButton name={copiedDomain === domain.name ? 'check' : 'copy'} label={`${t(copiedDomain === domain.name ? 'dialog.copied' : 'domain.copy')} ${domain.name}`} onClick={() => void copyDomain(domain.name)} />
                 <IconButton name="edit" label={`${t('common.edit')} ${domain.name}`} onClick={() => onEdit(domain)} />
+                {!domain.observed_only && <IconButton name="terminal" label={`${t('domain.configEditor')} ${domain.name}`} onClick={() => onConfig(domain)} />}
                 <IconButton name="trash" label={`${t('common.delete')} ${domain.name}`} onClick={() => onDelete(domain)} />
               </div>
             )}

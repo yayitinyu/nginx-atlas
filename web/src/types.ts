@@ -78,6 +78,8 @@ export interface DomainRecord {
   nginx_s3_compatible: boolean
   nginx_http2: boolean
   nginx_gzip: boolean
+  custom_config?: string
+  custom_config_enabled?: boolean
   last_job_id?: string
   last_error?: string
   job_status?: JobStatus
@@ -148,6 +150,7 @@ export interface DashboardData {
 
 export interface ControllerSettings {
   node_poll_seconds: number
+  github_proxy: string
   turnstile_enabled: boolean
   turnstile_site_key: string
   turnstile_secret_configured: boolean
@@ -218,6 +221,14 @@ export interface CreateDomainInput {
   nginx_s3_compatible?: boolean
   nginx_http2?: boolean
   nginx_gzip?: boolean
+}
+
+export interface DomainConfig {
+  config: string
+  generated_config: string
+  mode: 'generated' | 'custom'
+  revision: string
+  path: string
 }
 
 export interface CertificateAutomationInput {

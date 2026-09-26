@@ -45,11 +45,14 @@ func (s *Server) runMaintenance() {
 		}
 		runningByNode := make(map[string]bool)
 		for _, job := range state.Jobs {
-			if job.Status == model.JobRunning {
+			if job.Status == model.JobRunning && job.Type != protocol.JobIssueCertificate {
 				runningByNode[job.NodeID] = true
 			}
 		}
 		for id, job := range state.Jobs {
+			if job.Type == protocol.JobIssueCertificate {
+				continue
+			}
 			if awaitingUpdateConfirmation(job) {
 				if now.Sub(*job.UpdateAcceptedAt) >= updateConfirmationTimeout {
 					node, exists := state.Nodes[job.NodeID]
@@ -111,8 +114,7 @@ func (s *Server) runMaintenance() {
 			if !domain.AutoRenew || domain.ACMEAccountID == "" || domain.DNSAccountID == "" {
 				continue
 			}
-			node, nodeExists := state.Nodes[domain.NodeID]
-			if !nodeExists || node.Status != model.NodeOnline {
+			if node, ok := state.Nodes[domain.NodeID]; !ok || node.Status == model.NodeRevoked {
 				continue
 			}
 			if _, ok := state.ACMEAccounts[domain.ACMEAccountID]; !ok {
@@ -152,8 +154,7 @@ func (s *Server) runMaintenance() {
 			if certificate.NotAfter.Sub(now) > time.Duration(renewBeforeDays)*24*time.Hour || hasActiveCertificateJob(state, certificate.ID) {
 				continue
 			}
-			node, ok := state.Nodes[certificate.IssuerNodeID]
-			if !ok || node.Status != model.NodeOnline {
+			if node, ok := state.Nodes[certificate.IssuerNodeID]; !ok || node.Status == model.NodeRevoked {
 				continue
 			}
 			if _, ok := state.ACMEAccounts[certificate.ACMEAccountID]; !ok {
